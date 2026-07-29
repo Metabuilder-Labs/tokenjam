@@ -60,6 +60,31 @@ def test_empty_hash_default_route_is_dashboard(html: str) -> None:
     assert "|| 'review';" not in html, "empty-hash default must be dashboard, not review"
 
 
+def test_default_route_normalization_agrees_with_getroute(html: str) -> None:
+    # Greptile P1-1: the URL-normalization replaceState on an empty hash must
+    # write #/dashboard, matching getRoute()'s default. Writing the old #/review
+    # here made the page (Dashboard) and address bar disagree, so a refresh or
+    # shared bare link opened Review instead.
+    assert "history.replaceState(null, '', '#/dashboard');" in html
+    assert (
+        "history.replaceState(null, '', '#/review');" not in html
+    ), "empty-hash normalization must write #/dashboard, not #/review"
+
+
+def test_dashboard_is_lens_neutral_and_preserves_active_lens(html: str) -> None:
+    # Greptile P1-3: Dashboard is data-lens="all", so opening it from Observe
+    # must keep the user in Observe. It must therefore be ABSENT from VIEW_LENS
+    # (a mapped lens would force a switch), and the route-sync effect must fall
+    # back to the sidebar's CURRENT lens for an unmapped view, not to 'improve'.
+    assert (
+        "dashboard: 'improve'" not in html
+    ), "Dashboard must not be classified as improve in VIEW_LENS (it is lens-neutral)"
+    assert (
+        "const lens = VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve';"
+        in html
+    ), "unmapped (lens-neutral) views must preserve the active lens, not reset to improve"
+
+
 # --------------------------------------------------------------------------- #
 # #655 — one shared 30d window default across window-driven screens.
 # --------------------------------------------------------------------------- #
@@ -76,6 +101,23 @@ def test_window_driven_screens_use_the_shared_default(html: str) -> None:
     assert "const DEFAULTS = { since: DEFAULT_SINCE, metric: 'spend'" in html  # Analytics
     assert "const DEFAULTS = { since: '24h', result:" not in html
     assert "const DEFAULTS = { since: '7d', group_by:" not in html
+
+
+def test_drill_through_hrefs_omit_since_at_the_shared_default(html: str) -> None:
+    # Greptile P1-2: drill-through href builders must decide "omit since" against
+    # the shared DEFAULT_SINCE, not a hardcoded literal. With the default moved
+    # to 30d, tracesHrefForWindow's old `!== '24h'` dropped a real 24h window and
+    # silently reset Traces to 30d. Both the Traces and Optimize href builders
+    # now compare to DEFAULT_SINCE.
+    assert (
+        "if (since && since !== DEFAULT_SINCE) sp.set('since', since);" in html
+    ), "drill-through builders must omit since only at DEFAULT_SINCE"
+    assert (
+        "if (since && since !== '24h') sp.set('since', since);" not in html
+    ), "tracesHrefForWindow must not hardcode the retired 24h default"
+    assert (
+        "if (since && since !== '30d') sp.set('since', since);" not in html
+    ), "href builders must read DEFAULT_SINCE, not a hardcoded 30d literal"
 
 
 # --------------------------------------------------------------------------- #

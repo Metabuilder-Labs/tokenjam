@@ -2382,7 +2382,12 @@ function analyticsHref(q, route = 'analytics') {
 
 function tracesHrefForWindow(since) {
   const sp = new URLSearchParams();
-  if (since && since !== '24h') sp.set('since', since);
+  // Propagate the Dashboard's ACTUAL window into the Traces drill-through so the
+  // two agree. Omit `since` only when it equals the shared DEFAULT_SINCE — the
+  // one value Traces resolves to on a bare href. The default moved to 30d
+  // (issue #655); hardcoding '24h' here (the old default) dropped a real
+  // non-default window and silently reset Traces to 30d (Greptile P1).
+  if (since && since !== DEFAULT_SINCE) sp.set('since', since);
   const s = sp.toString();
   return '#/traces' + (s ? '?' + s : '');
 }
@@ -7264,7 +7269,10 @@ function fmtCadence(seconds) {
 // destination shows the same window the tile was computed from.
 function optimizeFindingHref(name, since) {
   const sp = new URLSearchParams();
-  if (since && since !== '30d') sp.set('since', since);
+  // Omit `since` only at the shared DEFAULT_SINCE (the value Optimize resolves
+  // to on a bare href) — read it from the constant rather than a literal so a
+  // future default move can't silently drop a real window (issue #655).
+  if (since && since !== DEFAULT_SINCE) sp.set('since', since);
   sp.set('finding', name);
   return '#/optimize?' + sp.toString();
 }
@@ -12919,8 +12927,14 @@ function DashboardView({ params, persona }) {
 // (which lens a ROUTE belongs to, used to flip the active lens on a deep-link
 // or a back-nav). Changing one without the other desyncs the sidebar from the
 // URL: the link sits in one group while landing on it activates the other.
+// Dashboard is deliberately ABSENT here: it is the lens-neutral front door
+// (data-lens="all", visible in both lenses, issue #654). Mapping it to a lens
+// would flip an Observe user to Improve the moment they open it, hiding their
+// Observe nav (Greptile P1). A view with no entry resolves to `null` in the
+// route-sync effect, which then PRESERVES whatever lens is active rather than
+// forcing a switch.
 const VIEW_LENS = {
-  review: 'improve', dashboard: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
+  review: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
   faq: 'improve', optimize: 'improve',
   traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
   budget: 'observe',
@@ -13103,13 +13117,16 @@ function App() {
   }, []);
 
   // Reflect the default route in the URL bar without a render-time redirect.
-  // getRoute() already defaults to 'review' (Improve lens home), so the first
-  // render shows the Review inbox; this just makes the address bar say so
-  // (replaceState = no extra history entry, no hashchange race that left the
-  // view blank — #132).
+  // getRoute() defaults to 'dashboard' (the lens-neutral triage front door,
+  // issue #654), so the first render shows the Dashboard; this just makes the
+  // address bar say so, so a refresh or a shared bare URL lands on the SAME
+  // page that rendered. The default MUST match getRoute()'s — writing #/review
+  // here (the old Improve home) desynced the page from the address bar and made
+  // a reload open Review instead (Greptile P1). replaceState = no extra history
+  // entry, no hashchange race that left the view blank — #132.
   useEffect(() => {
     if (!location.hash || location.hash === '#/') {
-      history.replaceState(null, '', '#/review');
+      history.replaceState(null, '', '#/dashboard');
     }
   }, []);
 
@@ -13145,8 +13162,13 @@ function App() {
   // back-nav into the other lens's view must flip the pill, not just the page).
   useEffect(() => {
     const view = route.view, param = route.param || '';
-    const lens = VIEW_LENS[view] || 'improve';
     const sidebar = document.querySelector('.sidebar');
+    // A view maps to a lens, EXCEPT the lens-neutral ones (Dashboard, #654):
+    // those are absent from VIEW_LENS and must PRESERVE the active lens so an
+    // Observe user opening the Dashboard stays in Observe (Greptile P1). Fall
+    // back to the sidebar's current lens for a neutral view, then 'improve' only
+    // on the very first paint before any lens has been set.
+    const lens = VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve';
     // `data-persona` drives the nav gating in CSS, alongside `data-lens`.
     // Written in this same pass so the two can never disagree for a frame;
     // `persona` is therefore in this effect's dependency list. It is also
