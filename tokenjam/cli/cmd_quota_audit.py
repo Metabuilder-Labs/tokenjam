@@ -57,7 +57,7 @@ from tokenjam.utils.time_parse import parse_since
 @click.pass_context
 def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
                     export_target: str | None, output_json_flag: bool) -> None:
-    """Audit which sessions used Opus quota."""
+    """Flag premium sessions that could run cheaper."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
