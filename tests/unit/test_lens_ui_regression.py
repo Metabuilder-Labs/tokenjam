@@ -5042,7 +5042,9 @@ def test_analyzer_guide_nav_entry_is_unconditional_not_a_nav_child(html):
     # Nothing may hide it based on the active view. The route effect's only
     # display mutation is the nav-child branch; assert it stays scoped there.
     eff = html[html.index("document.querySelectorAll('.nav-link').forEach"):]
-    eff = eff[:eff.index("}, [route.view, route.param]);")]
+    # The dependency array is the slice's end anchor. `persona` joined it when
+    # the nav gating started writing `data-persona` in this same effect.
+    eff = eff[:eff.index("}, [route.view, route.param, persona]);")]
     display_lines = [ln for ln in eff.splitlines() if "style.display" in ln]
     assert len(display_lines) == 1, (
         "a second display mutation appeared in the nav effect; the FAQ entry "
