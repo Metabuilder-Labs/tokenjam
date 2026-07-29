@@ -62,3 +62,27 @@ def test_trace_detail_fetches_attributes_lazily(html: str) -> None:
 def test_trace_detail_caps_rendered_rows(html: str) -> None:
     """Thousands of DOM rows freeze the tab; the render is capped + disclosed."""
     assert "RENDER_ROW_CAP" in html
+
+
+# --------------------------------------------------------------------------- #
+# #659 P1-1 — the Lens waterfall must request the OPT-IN light payload so the
+# default (full-attributes) response is left intact for exports / the API shim.
+# --------------------------------------------------------------------------- #
+def test_waterfall_fetch_uses_light_payload_param(html: str) -> None:
+    """The waterfall fetch passes ?attributes=false; the default full payload is
+    reserved for complete-span consumers (ApiBackend.get_trace_spans)."""
+    assert "'/traces/' + traceId + '?attributes=false'" in html
+
+
+# --------------------------------------------------------------------------- #
+# #659 P1-3 — costliest "jump" badges must never target a row hidden by the
+# render cap. Beyond-cap costliest spans are pinned into the rendered set, and
+# the badge gates on the rendered-row id set so no badge is a dead link.
+# --------------------------------------------------------------------------- #
+def test_jump_badges_only_target_rendered_rows(html: str) -> None:
+    """A jump badge must only render when its target row is actually rendered."""
+    # The rendered-row id set exists and the badge gates on it.
+    assert "renderedRowIds" in html
+    assert "!renderedRowIds.has(sid)" in html
+    # Beyond-cap costliest spans are pinned into the rendered set.
+    assert "pinnedRows" in html

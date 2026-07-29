@@ -31,6 +31,7 @@ See ``tokenjam/CLAUDE.md`` → "StorageBackend parity" for the one-line rule.
 from __future__ import annotations
 
 import dataclasses
+import json
 import threading
 import time
 from contextlib import contextmanager
@@ -75,6 +76,7 @@ SESSION = "parity-session"
 SHIM_PARITY_METHODS = {
     "get_traces",
     "get_trace_spans",
+    "get_span",
     "get_cost_summary",
     "get_alerts",
     "get_tool_calls",
@@ -158,7 +160,10 @@ def _proj_traces(traces) -> list:
 
 def _proj_spans(spans) -> list:
     # Includes cache_tokens / cache_write_tokens — the exact fields the shim
-    # used to drop on daemon-fetched spans (#_dict_to_span regression).
+    # used to drop on daemon-fetched spans (#_dict_to_span regression). Also
+    # includes `attributes` (#653): get_trace_spans now defaults to the FULL
+    # payload, so the shim must carry captured content — the attribute-free
+    # waterfall payload is opt-in (?attributes=false) and never taken here.
     return sorted(
         (
             s.span_id,
@@ -169,8 +174,28 @@ def _proj_spans(spans) -> list:
             round(s.cost_usd or 0.0, 6),
             s.model,
             s.provider,
+            json.dumps(s.attributes or {}, sort_keys=True),
         )
         for s in spans
+    )
+
+
+def _proj_span(span) -> tuple | None:
+    # Single-span parity (get_span) — same projection as one row of _proj_spans,
+    # including attributes so the targeted single-span fetch is proven to carry
+    # captured content across the shim.
+    if span is None:
+        return None
+    return (
+        span.span_id,
+        span.input_tokens,
+        span.output_tokens,
+        span.cache_tokens,
+        span.cache_write_tokens,
+        round(span.cost_usd or 0.0, 6),
+        span.model,
+        span.provider,
+        json.dumps(span.attributes or {}, sort_keys=True),
     )
 
 
@@ -222,11 +247,12 @@ def _proj_baseline(baseline) -> tuple | None:
 # time so get_daily_cost targets the seeded historical day and get_trace_spans a
 # real trace. The historical daily-cost target is load-bearing: querying today
 # would not catch an API shim that forgot to send an `until` bound.
-def _parity_specs(now, trace_id):
+def _parity_specs(now, trace_id, span_id="span-id"):
     historical_day = (now - timedelta(days=3)).date()
     return {
         "get_traces": (lambda b: b.get_traces(TraceFilters(limit=100)), _proj_traces),
         "get_trace_spans": (lambda b: b.get_trace_spans(trace_id), _proj_spans),
+        "get_span": (lambda b: b.get_span(trace_id, span_id), _proj_span),
         "get_cost_summary": (lambda b: b.get_cost_summary(CostFilters()), _proj_cost),
         "get_alerts": (lambda b: b.get_alerts(AlertFilters()), _proj_alerts),
         "get_tool_calls": (lambda b: b.get_tool_calls(AGENT, None, None), _proj_tool_calls),
@@ -247,6 +273,7 @@ class _Dataset:
     alert: Alert
     baseline: DriftBaseline
     trace_id: str
+    span_id: str
 
 
 def _build_dataset(now) -> _Dataset:
@@ -257,15 +284,21 @@ def _build_dataset(now) -> _Dataset:
 
     spans = []
     trace_id = None
+    first_span_id = None
     for i in range(3):
         span = make_llm_span(
             agent_id=AGENT, session_id=SESSION,
             input_tokens=1000, output_tokens=200,
             cache_tokens=50, cache_write_tokens=25, cost_usd=2.0,
             start_time=now - timedelta(minutes=5 + i),
+            # Captured content on every trace span so the get_trace_spans /
+            # get_span parity checks prove the shim carries `attributes`
+            # verbatim (the #653 full-payload contract), not an empty {}.
+            extra_attributes={"gen_ai.prompt.content": f"parity-prompt-{i}", "idx": i},
         )
         if trace_id is None:
             trace_id = span.trace_id
+            first_span_id = span.span_id
         else:
             span = dataclasses.replace(span, trace_id=trace_id)
         spans.append(span)
@@ -293,7 +326,7 @@ def _build_dataset(now) -> _Dataset:
         avg_tool_call_count=2.0, stddev_tool_call_count=0.5,
     )
     return _Dataset(session=session, spans=spans, alert=alert,
-                    baseline=baseline, trace_id=trace_id)
+                    baseline=baseline, trace_id=trace_id, span_id=first_span_id)
 
 
 def _seed(db: StorageBackend, dataset: _Dataset) -> None:
@@ -355,7 +388,10 @@ def _parity_env(tmp_path_factory):
     with _live_server(app) as base_url:
         shim = ApiBackend(base_url)
         try:
-            yield {"db": db, "shim": shim, "now": now, "trace_id": dataset.trace_id}
+            yield {
+                "db": db, "shim": shim, "now": now,
+                "trace_id": dataset.trace_id, "span_id": dataset.span_id,
+            }
         finally:
             shim.close()
     db.close()
@@ -369,7 +405,9 @@ def _parity_env(tmp_path_factory):
 def test_shim_matches_db(_parity_env, method):
     """Every faithfully-mirrored read method returns the same result through the
     serve-mode HTTP shim as through the direct DuckDB backend."""
-    invoke, project = _parity_specs(_parity_env["now"], _parity_env["trace_id"])[method]
+    invoke, project = _parity_specs(
+        _parity_env["now"], _parity_env["trace_id"], _parity_env["span_id"]
+    )[method]
     db_result = project(invoke(_parity_env["db"]))
     shim_result = project(invoke(_parity_env["shim"]))
     assert db_result == shim_result, (
@@ -394,7 +432,7 @@ def test_duckdb_and_in_memory_agree(tmp_path, method):
     _seed(file_db, dataset)
     _seed(mem_db, dataset)
 
-    invoke, project = _parity_specs(now, dataset.trace_id)[method]
+    invoke, project = _parity_specs(now, dataset.trace_id, dataset.span_id)[method]
     try:
         assert project(invoke(file_db)) == project(invoke(mem_db)), (
             f"{method}: DuckDB file backend diverges from InMemoryBackend"

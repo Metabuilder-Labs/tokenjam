@@ -5758,7 +5758,12 @@ function TraceDetailView({ traceId }) {
     const TIMEOUT_MS = 20000;
     const timeout = new Promise((_, rej) =>
       setTimeout(() => rej(new Error('timeout')), TIMEOUT_MS));
-    Promise.race([api('/traces/' + traceId, {}, { noCache: true }), timeout])
+    // attributes=false -> the lightweight waterfall payload (#653/#659): tree +
+    // timing + tokens + cost, WITHOUT every span's captured content (which could
+    // be ~1 GB for a 45k-span trace). The detail panel fetches the selected
+    // span's attributes lazily below. The default (no param) full-attributes
+    // payload is left for exports / the API shim — never requested here.
+    Promise.race([api('/traces/' + traceId + '?attributes=false', {}, { noCache: true }), timeout])
       .then(d => {
         setSpans(d.spans || []);
         setTopCostSpanIds(d.top_cost_span_ids || []);
@@ -5856,7 +5861,21 @@ function TraceDetailView({ traceId }) {
   // total (`spanCount`).
   const RENDER_ROW_CAP = 1000;
   const rowsHidden = Math.max(0, allRows.length - RENDER_ROW_CAP);
-  const rows = rowsHidden > 0 ? allRows.slice(0, RENDER_ROW_CAP) : allRows;
+  // Base rendered set: the first RENDER_ROW_CAP depth-first rows.
+  const cappedRows = rowsHidden > 0 ? allRows.slice(0, RENDER_ROW_CAP) : allRows;
+  // No dead jump badges (#659): a costliest span whose depth-first row index is
+  // past the cap would have a badge (built from the full `byId` map) but no
+  // rendered row, so clicking it did nothing. Always pin any badge target that
+  // fell beyond the cap onto the end of the rendered set so the jump resolves.
+  const topCostSet = new Set(topCostSpanIds);
+  const renderedIds = new Set(cappedRows.map(r => r.span.span_id));
+  const pinnedRows = (rowsHidden > 0)
+    ? allRows.filter(r => topCostSet.has(r.span.span_id) && !renderedIds.has(r.span.span_id))
+    : [];
+  const rows = pinnedRows.length > 0 ? cappedRows.concat(pinnedRows) : cappedRows;
+  // Span ids that actually have a rendered row — the jump badges gate on this
+  // so a badge can never target a hidden row (#659).
+  const renderedRowIds = new Set(rows.map(r => r.span.span_id));
   const nameW = 220;
 
   // Token-first annotation (#215): the magnitude bar + summary read on TOKEN
@@ -5909,7 +5928,12 @@ function TraceDetailView({ traceId }) {
         <span>Costliest spans in this trace:</span>
         ${topCostSpanIds.map((sid, i) => {
           const s = byId[sid];
-          if (!s) return null;
+          // No dead badges (#659): only render a jump badge whose target row is
+          // actually in the rendered `rows` set. Costliest spans past the render
+          // cap are pinned into `rows` above, so this should always pass for a
+          // retained span; the guard means a badge can never point at a hidden
+          // row even if the payload/cap logic changes.
+          if (!s || !renderedRowIds.has(sid)) return null;
           // Token-first, same as every other per-span figure on this page
           // (#187/#249) -- the badge ranks by cost server-side (the
           // underlying signal), but the label always shows the token total.

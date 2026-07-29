@@ -129,8 +129,28 @@ class ApiBackend:
         ]
 
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
+        # No ?attributes=false -> the route defaults to FULL spans, so the shim
+        # reconstructs complete spans (attributes intact) exactly as the DuckDB
+        # backend does. The light waterfall payload is opt-in and used only by
+        # the Lens UI (#653); do NOT add attributes=false here or exports and
+        # every other complete-span consumer silently lose captured content.
         data = self._get(f"/api/v1/traces/{trace_id}")
         return [_dict_to_span(s) for s in data.get("spans", [])]
+
+    def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None:
+        """Targeted single-span fetch over the daemon (#653).
+
+        Mirrors DuckDBBackend.get_span: hits the single-span endpoint (a WHERE
+        span_id=? lookup server-side) rather than pulling the whole trace.
+        Returns None on 404 so the route's 404-on-unknown contract holds.
+        """
+        try:
+            data = self._get(f"/api/v1/traces/{trace_id}/spans/{span_id}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        return _dict_to_span(data)
 
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]:
         params: dict[str, str] = {}

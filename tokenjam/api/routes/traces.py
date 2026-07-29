@@ -149,7 +149,23 @@ TRACE_SPAN_CAP = 2000
 
 
 @router.get("/traces/{trace_id}")
-async def get_trace(request: Request, trace_id: str) -> dict:
+async def get_trace(request: Request, trace_id: str, attributes: bool = True) -> dict:
+    """Trace detail.
+
+    Defaults to FULL spans (each with its `attributes` dict) so
+    `ApiBackend.get_trace_spans` and every existing complete-span consumer
+    (exports, backfill re-reads) keep the same contract they had before #653.
+
+    The Lens waterfall passes `?attributes=false` for the lightweight payload
+    (#653): a big fan-out/agent trace can hold tens of thousands of spans, and
+    shipping every span's FULL captured prompt/tool content produced ~1 GB JSON
+    responses the browser could neither fetch nor render. The attribute-free
+    payload carries only the tree/timing/tokens/cost the waterfall needs; the
+    span-detail panel then fetches ONE span's attributes lazily on expand via
+    GET /traces/{trace_id}/spans/{span_id}. Making the light payload opt-in (not
+    the default) is deliberate — the previous default silently truncated the
+    daemon-backed shim's attributes for all non-UI consumers.
+    """
     db = request.app.state.db
     spans = db.get_trace_spans(trace_id)
     total = len(spans)
@@ -181,11 +197,13 @@ async def get_trace(request: Request, trace_id: str) -> dict:
 
     return {
         "trace_id": trace_id,
-        # Attribute-free waterfall payload (#653): the tree/timing/tokens/cost
-        # the waterfall needs, NOT the full captured content of every span. The
-        # span-detail panel fetches one span's attributes lazily on expand via
-        # GET /traces/{trace_id}/spans/{span_id}.
-        "spans": [_span_to_dict(s) for s in spans],
+        # FULL attributes by default (complete-span consumers / the shim);
+        # attribute-free ONLY when the caller opts in with ?attributes=false
+        # (the Lens waterfall). See the docstring above (#653).
+        "spans": [_span_to_dict(s, include_attributes=attributes) for s in spans],
+        # Whether this response carries per-span `attributes` at all — the light
+        # (waterfall) payload does not; the default (full) payload does.
+        "attributes_included": attributes,
         # True total, always — even when the returned list is capped.
         "span_count": total,
         "returned_count": len(spans),
@@ -207,8 +225,14 @@ async def get_trace_span(request: Request, trace_id: str, span_id: str) -> dict:
     rather than upfront for all of them.
     """
     db = request.app.state.db
-    spans = db.get_trace_spans(trace_id)
-    span = next((s for s in spans if s.span_id == span_id), None)
+    # Targeted single-span fetch (#653): a WHERE span_id=? lookup, NOT the whole
+    # trace. Loading + deserializing every captured attribute of a 45k-span trace
+    # to pick one is O(trace) per expand and re-runs on every re-selection, which
+    # kept the "lazy" detail path slow and memory-heavy — the exact thing the
+    # attribute-free waterfall was supposed to avoid.
+    span = db.get_span(trace_id, span_id) if hasattr(db, "get_span") else next(
+        (s for s in db.get_trace_spans(trace_id) if s.span_id == span_id), None
+    )
     if span is None:
         raise HTTPException(status_code=404, detail="span not found in trace")
     return _span_to_dict(span, include_attributes=True)
