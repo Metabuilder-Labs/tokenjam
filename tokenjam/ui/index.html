@@ -1111,7 +1111,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .tile-grid.compact .rec-hint { font-size: 10px; }
 .tile-grid.compact .health-tile { padding: 8px 10px; }
 .rec-tile {
-  display: block; text-decoration: none; color: inherit;
+  display: block; text-decoration: none; color: inherit; position: relative;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
   padding: 14px 16px; transition: border-color 0.15s;
 }
@@ -1122,6 +1122,13 @@ a.rec-tile.ok:hover { border-color: var(--success); }
    cannot read as a dead link — no pointer, no hover border, default cursor. */
 .rec-tile.static { cursor: default; }
 .rec-tile.static:hover { border-color: var(--border); }
+/* Persistent "opens a detail page" cue on the clickable (data-bearing) tiles: an
+   always-visible arrow, not just a hover state, so a user can tell at a glance
+   which tiles are clickable. Only the <a class="rec-tile"> data tiles carry it. */
+.rec-go { position: absolute; top: 10px; right: 12px; color: var(--text-dim);
+  font-family: 'Geist Mono', monospace; font-size: 13px; line-height: 1;
+  transition: color 0.15s, transform 0.15s; }
+a.rec-tile:hover .rec-go { color: var(--accent); transform: translateX(2px); }
 .rec-name { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .rec-amount { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 700; color: var(--accent); margin: 8px 0 6px; }
 .rec-amount.dim { color: var(--text-faint); font-size: 14px; font-weight: 500; }
@@ -13038,11 +13045,14 @@ function DashboardView({ params, persona }) {
     <div class="ov-head">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div class="page-title" style="margin:0">Dashboard</div>
+        <${PersonaPicker} bare=${true} />
         <${PlanBadge} framing=${framing} />
       </div>
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-        <${PersonaPicker} />
-        <div class="filters" style="margin:0">${winPicker}</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="persona-bar-label">Viewing</span>
+          <div class="filters" style="margin:0">${winPicker}</div>
+        </div>
         <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
       </div>
     </div>
@@ -13180,7 +13190,7 @@ function DashboardView({ params, persona }) {
                         <div class=${amtCls}>${amount}</div>
                         ${explain ? html`<div class="rec-hint">${explain}</div>` : null}`;
                       return hasPage
-                        ? html`<a class=${cls} href=${href}>${inner}</a>`
+                        ? html`<a class=${cls} href=${href}>${inner}<span class="rec-go" aria-hidden="true">→</span></a>`
                         : html`<div class=${cls}>${inner}</div>`;
                     })}
                 </div>` : null}
@@ -13354,11 +13364,19 @@ const PersonaCtx = createContext(null);
 // spot: a page's own header-right group when it has one, otherwise the floated
 // fallback below. Reads context rather than props so a page can place it
 // without every view having to thread persona state down to its header.
-function PersonaPicker() {
+function PersonaPicker({ bare } = {}) {
   const ctx = useContext(PersonaCtx);
   if (!ctx) return null;
   const { persona, detected, known, counts, onChange } = ctx;
   const opts = [['claude-code', 'Claude Code'], ['sdk', 'SDK workflows']];
+  // `bare` (the Dashboard heading) renders just the dropdown, no "Viewing as"
+  // label — it sits next to the "Dashboard" title, where the context is obvious.
+  const select = html`
+    <select class="persona-select" aria-label="Persona"
+            value=${persona} onChange=${(e) => onChange(e.currentTarget.value)}>
+      ${opts.map(([value, label]) => html`
+        <option key=${value} value=${value} selected=${persona === value}>${label}</option>`)}
+    </select>`;
   return html`
     <span class="persona-pick">
       ${/* No id + for pairing here. App keeps every visited primary view
@@ -13366,13 +13384,7 @@ function PersonaPicker() {
             own picker at once and a fixed id would be duplicated across the
             document. The label wraps its control instead, which associates the
             two without needing a global identifier. */''}
-      <label class="persona-bar-label">Viewing as
-        <select class="persona-select" aria-label="Persona"
-                value=${persona} onChange=${(e) => onChange(e.currentTarget.value)}>
-          ${opts.map(([value, label]) => html`
-            <option key=${value} value=${value} selected=${persona === value}>${label}</option>`)}
-        </select>
-      </label>
+      ${bare ? select : html`<label class="persona-bar-label">Viewing as ${select}</label>`}
       ${known && detected && persona !== detected ? html`
         <span class="persona-bar-note">Detected: ${detected === 'claude-code' ? 'Claude Code' : detected}</span>` : null}
       ${known && counts && counts[persona] === 0 ? html`
