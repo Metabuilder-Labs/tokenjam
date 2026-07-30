@@ -190,27 +190,14 @@ code, .mono {
    nav-children, which would otherwise win over these rules. */
 .sidebar[data-persona="claude-code"] a.nav-link[data-lens="observe"] { display: none !important; }
 .sidebar[data-persona="claude-code"] .lens-switch { display: none; }
-.sidebar[data-persona="sdk"] a.nav-link[data-view="sessions"] { display: none !important; }
-/* SDK persona: same clean FLAT list the coding-agent persona shows — no
-   Improve/Observe toggle, and the Observe pages (Traces/Cost/Alerts/Drift/
-   Budget) rendered as flat entries rather than hidden behind a lens. The
-   `data-lens="improve"|"observe"` hide rules above are lens-scoped, so they
-   only bite while the sidebar carries `data-lens`; these rules force every
-   nav-link visible for SDK regardless of the sidebar's current lens, and hide
-   the switcher itself so there is no control that toggles nothing. Review-inbox
-   is CC-only (its relearn writes have no SDK lever), so it stays hidden too.
-   `!important` beats the route effect's inline `display` on nav-children and
-   the lens hide rules alike. */
+/* SDK persona: byte-for-byte the SAME sidebar the coding-agent persona shows.
+   Switching "Viewing as" changes ONLY the page data / empty-state, never the
+   nav items. Both personas use one flat Improve nav — no Improve/Observe lens
+   toggle, and the Observe pages (Traces/Cost/Alerts/Drift/Budget) are hidden
+   (they're in PERSONA_HIDDEN_VIEWS for sdk too, matching CC). Review inbox and
+   Sessions render for SDK exactly as they do for CC. */
+.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: none !important; }
 .sidebar[data-persona="sdk"] .lens-switch { display: none; }
-.sidebar[data-persona="sdk"] a.nav-link[data-lens="improve"],
-.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: flex !important; }
-.sidebar[data-persona="sdk"] a.nav-link[data-view="review"] { display: none !important; }
-/* A nav-child (Summarize / Rules under Optimize) still collapses when its
-   section is inactive — the flat-list rule above must not force those open, or
-   they'd always show. Restore the route effect's per-child display by letting
-   its inline style win: a child whose section is inactive is display:none. */
-.sidebar[data-persona="sdk"] a.nav-link.nav-child[style*="display:none"],
-.sidebar[data-persona="sdk"] a.nav-link.nav-child[style*="display: none"] { display: none !important; }
 /* The Dashboard's health band is Observe-shaped: unread alerts, agents
    drifting, budgets at risk. A coding-agent user has no Observe lens, so the
    band summarises pages they cannot open. Hidden for that persona rather than
@@ -12622,10 +12609,8 @@ function PersonaNoDataNotice({ persona }) {
     <div class="band-msg" style="margin:0 0 18px">
       <b>No ${label} on this machine.</b>
       <p>
-        Nothing has been ingested for this persona, so the figures on this page
-        are not small: they are empty. ${switchBack} to see what this machine
-        actually has, or point an SDK workload at the collector and it will show
-        up here.
+        ${switchBack} to see what this machine actually has, or point an SDK
+        workload at the collector and it will show up here.
       </p>
     </div>`;
 }
@@ -13226,7 +13211,7 @@ function detailNodeFor(route) {
 // but the guard is worth keeping blunt.)
 const PERSONA_HIDDEN_VIEWS = {
   'claude-code': ['traces', 'cost', 'alerts', 'drift', 'budget'],
-  'sdk': ['sessions'],
+  'sdk': ['traces', 'cost', 'alerts', 'drift', 'budget'],
 };
 
 function personaHides(persona, view) {
@@ -13370,12 +13355,13 @@ function App() {
     // Observe user opening the Dashboard stays in Observe (Greptile P1). Fall
     // back to the sidebar's current lens for a neutral view, then 'improve' only
     // on the very first paint before any lens has been set.
-    // The claude-code persona has no Observe pages and its lens-switch is
-    // hidden, so its lens is ALWAYS 'improve'. Deriving it from a lens-neutral
-    // view's fallback would preserve a stale 'observe' left by a prior SDK
-    // session, which then hides every Improve nav link (leaving only Dashboard)
-    // until a reload — the persona-toggle collapse bug.
-    const lens = persona === 'claude-code'
+    // Neither the claude-code nor the sdk persona has Observe pages or a
+    // lens-switch, so both are ALWAYS 'improve' — the two personas share one
+    // flat Improve nav and differ only in page data / empty-state. Deriving the
+    // lens from a lens-neutral view's fallback would preserve a stale 'observe'
+    // left by a prior session, which then hides every Improve nav link (leaving
+    // only Dashboard) until a reload — the persona-toggle collapse bug.
+    const lens = (persona === 'claude-code' || persona === 'sdk')
       ? 'improve'
       : (VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve');
     // `data-persona` drives the nav gating in CSS, alongside `data-lens`.

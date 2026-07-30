@@ -79,21 +79,22 @@ def test_dashboard_is_lens_neutral_and_preserves_active_lens(html: str) -> None:
     assert (
         "dashboard: 'improve'" not in html
     ), "Dashboard must not be classified as improve in VIEW_LENS (it is lens-neutral)"
-    # A NON-claude-code persona (SDK — it has both lenses) still preserves the
-    # active lens on a lens-neutral view; only claude-code forces 'improve'
-    # (guarded by test_claude_code_persona_forces_improve_lens below).
+    # The lens-neutral fallback expression is still present for any future
+    # persona that keeps both lenses; both currently-known personas (claude-code
+    # and sdk) force 'improve' instead (guarded by
+    # test_persona_forces_improve_lens below).
     assert (
         "(VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve')" in html
-    ), "non-claude-code personas must preserve the active lens on a lens-neutral view"
+    ), "the lens-neutral fallback expression must remain"
 
 
-def test_claude_code_persona_forces_improve_lens(html: str) -> None:
-    # The claude-code persona has no Observe pages and its lens-switch is hidden,
-    # so its lens must be FORCED to 'improve'. Deriving it from a lens-neutral
-    # view (Dashboard) would preserve a stale 'observe' left by a prior SDK
-    # session, collapsing the sidebar to Dashboard-only until a reload — the
-    # persona-toggle collapse bug.
-    assert "const lens = persona === 'claude-code'" in html
+def test_persona_forces_improve_lens(html: str) -> None:
+    # Neither the claude-code nor the sdk persona has Observe pages or a
+    # lens-switch, so both must be FORCED to 'improve'. Deriving the lens from a
+    # lens-neutral view (Dashboard) would preserve a stale 'observe' left by a
+    # prior session, collapsing the sidebar to Dashboard-only until a reload —
+    # the persona-toggle collapse bug.
+    assert "const lens = (persona === 'claude-code' || persona === 'sdk')" in html
     assert "? 'improve'" in html
 
 
@@ -278,14 +279,22 @@ def test_switch_back_is_a_clickable_control_calling_the_persona_setter(html: str
     assert "location.reload" not in notice
 
 
-def test_sdk_sidebar_is_flat_with_no_lens_toggle(html: str) -> None:
-    """The SDK persona hides the lens switcher and shows the observe pages as
-    flat entries (same clean structure the claude-code persona shows), so there
-    is no Improve/Observe toggle for SDK."""
+def test_sdk_sidebar_is_identical_to_claude_code(html: str) -> None:
+    """Switching persona changes ONLY the page data / empty-state, never the
+    sidebar items: the SDK sidebar is byte-for-byte the same as claude-code —
+    flat Improve nav, no lens toggle, observe suite hidden, Review inbox +
+    Sessions shown."""
+    # No Improve/Observe lens toggle for SDK (same as CC).
     assert '.sidebar[data-persona="sdk"] .lens-switch { display: none; }' in html
-    # Observe + improve links are forced flat/visible for SDK regardless of the
-    # sidebar's current lens.
-    assert '.sidebar[data-persona="sdk"] a.nav-link[data-lens="improve"],' in html
-    assert '.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: flex !important; }' in html
-    # Review inbox is CC-only, hidden for SDK.
-    assert '.sidebar[data-persona="sdk"] a.nav-link[data-view="review"] { display: none !important; }' in html
+    # The observe suite is hidden for SDK — via the observe-lens hide rule AND
+    # the same PERSONA_HIDDEN_VIEWS list CC uses.
+    assert '.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: none !important; }' in html
+    assert "'sdk': ['traces', 'cost', 'alerts', 'drift', 'budget']," in html
+    # The predecessor's SDK-specific forcing of observe links visible, and its
+    # hiding of Review inbox + Sessions, must be gone — SDK now mirrors CC.
+    assert 'a.nav-link[data-lens="observe"] { display: flex !important; }' not in html
+    assert '.sidebar[data-persona="sdk"] a.nav-link[data-view="review"]' not in html
+    assert '.sidebar[data-persona="sdk"] a.nav-link[data-view="sessions"]' not in html
+    # The lens is forced to 'improve' for both personas so the flat nav renders
+    # regardless of stale lens state.
+    assert "(persona === 'claude-code' || persona === 'sdk')" in html
