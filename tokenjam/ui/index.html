@@ -7742,7 +7742,7 @@ function ScanBar({ scan, busy, error, declined, declinedDetail, onRescan }) {
   const scanning = !!(busy || scan.computing);
   const when = scan.fetchFailed ? 'scan state unavailable'
     : scan.computedAt
-      ? 'computed ' + fmtAgo(scan.computedAt) + (scan.windowDays ? ' \u00b7 ' + scan.windowDays + 'd window' : '')
+      ? 'computed ' + fmtAgo(scan.computedAt)
       : (scan.status === 'error' ? 'no scan has succeeded yet' : 'never computed');
   const qualifier = buildQualifier(scan);
   return html`<span class="rescan-bar">
@@ -12768,9 +12768,7 @@ function PersonaEmptyHeader({ viewKey }) {
     <div class="ov-head">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div class="page-title" style="margin:0">${VIEW_TITLES[viewKey] || ''}</div>
-      </div>
-      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-        <${PersonaPicker} />
+        <${PersonaPicker} bare=${true} />
       </div>
     </div>`;
 }
@@ -13113,7 +13111,7 @@ function DashboardView({ params, persona }) {
                       windows are one seam now (core/optimize/report_window.py)
                       and each surface still names it, because a figure whose
                       window the reader cannot see is not auditable. */ ''}
-                <div class="band-label">Opportunities to optimize token efficiency${scan.windowDays ? html`<span class="band-window">· over the last ${scan.windowDays} days</span>` : null}</div>
+                <div class="band-label">Opportunities to optimize token efficiency<span class="band-window">· click tiles with data to view details</span></div>
                 ${/* recoverableBandState() decided which of the six states this
                       is; the branches below only render. The ONE branch allowed
                       to say there is nothing recoverable is 'none', which
@@ -13385,10 +13383,6 @@ function PersonaPicker({ bare } = {}) {
             document. The label wraps its control instead, which associates the
             two without needing a global identifier. */''}
       ${bare ? select : html`<label class="persona-bar-label">Viewing as ${select}</label>`}
-      ${known && detected && persona !== detected ? html`
-        <span class="persona-bar-note">Detected: ${detected === 'claude-code' ? 'Claude Code' : detected}</span>` : null}
-      ${known && counts && counts[persona] === 0 ? html`
-        <span class="persona-bar-note">No ${persona === 'sdk' ? 'SDK' : 'Claude Code'} sessions on this machine</span>` : null}
     </span>`;
 }
 
