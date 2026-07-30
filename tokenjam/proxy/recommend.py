@@ -50,7 +50,7 @@ def policy_status(db: Any, config: Any, *, limit: int = 20) -> dict:
     try:
         recs = db.get_policy_decisions(PolicyDecisionFilters(limit=limit))
         decisions = [decision_to_display_dict(r) for r in recs]
-    except Exception:  # noqa: BLE001 — read-only view; never raise into the agent
+    except Exception:  # read-only view; never raise into the agent
         decisions = []
     return {
         "suggest_mode": True,
@@ -89,7 +89,7 @@ def _provider_cycle_spend(db: Any, config: Any) -> dict[str, float]:
         providers = [r[0] for r in conn.execute(
             "SELECT DISTINCT provider FROM spans WHERE provider IS NOT NULL"
         ).fetchall()]
-    except Exception:  # noqa: BLE001
+    except Exception:  # 1
         return {}
     now = utcnow()
     budgets = getattr(config, "budgets", None) or {}
@@ -103,7 +103,7 @@ def _provider_cycle_spend(db: Any, config: Any) -> dict[str, float]:
                 "WHERE start_time >= $1 AND start_time < $2 AND provider = $3",
                 [cs, ce, provider],
             ).fetchone()
-        except Exception:  # noqa: BLE001
+        except Exception:  # 1
             continue
         spend = float(row[0] or 0.0) if row else 0.0
         if spend > 0:

@@ -77,6 +77,93 @@ include_captured_content = false
   protocol = "http"            # http | grpc
 ```
 
+## Analyzer scans
+
+The optimize analyzers are **never run on an HTTP request**. Several of them scan
+your full corpus and take tens of seconds to minutes, so a page that computed
+them inline would hang for exactly that long. Instead, the `tj serve` daemon
+computes the report in the background and every surface — the Dashboard's
+recoverable-waste panel, Budgets at risk, the Optimize view, `tj optimize` under
+a running daemon — reads the stored result plus the time it was computed.
+
+A scan runs on three triggers: once when the daemon starts, on the interval
+below, and whenever you press **Rescan** in the web UI.
+
+```toml
+[optimize]
+scan_enabled            = true   # false: the daemon never scans on its own.
+                                 #   Rescan still works; nothing ever computes
+                                 #   inline on a request either way.
+scan_interval_hours     = 6.0    # cadence of the background scan
+scan_window_days        = 30     # lookback the scan observes. Stored with the
+                                 #   result, so a surface labels its figures
+                                 #   with the window they came from.
+scan_min_rescan_seconds = 60     # floor between rescans that actually re-run
+                                 #   the analyzers; 0 disables the limit
+scan_ui_poll_seconds    = 300    # how often an open page asks for a rescan;
+                                 #   0 turns the browser's auto-rescan off
+```
+
+Overlapping scans never stack: a rescan pressed while one is already running is
+a no-op, and the panel keeps showing the last completed result with a scanning
+indicator rather than blanking.
+
+**Before the first scan completes, surfaces say "not computed yet" — not `0` and
+not "nothing found."** Those are different claims, and only the first one is true
+on a fresh install.
+
+`[optimize]` also holds each analyzer's sensitivity threshold (`min_cluster_instances`,
+`cache_efficacy_threshold`, and friends). Every default matches the module constant
+it replaces, so an omitted key changes nothing; see `OptimizeConfig` in
+`tokenjam/core/config.py` for the current list and each field's analyzer.
+
+### Which filesystem the analyzers read
+
+Three analyzers — `deadweight`, `relearn` and `summarize` — take their evidence
+from the **filesystem**, not from the telemetry database. That is by design: the
+database holds spans, while the transcripts, the MCP configuration and the
+always-loaded prompt files those three reason about live on disk. By default
+they read `~/.claude/projects` and your agent homes, which is what you want for
+a normal run.
+
+`--projects-root PATH` says which filesystem instead:
+
+```bash
+tj optimize --projects-root /path/to/fixtures/.claude/projects
+tj serve --db /tmp/demo.duckdb --projects-root /tmp/demo-home/.claude/projects
+```
+
+The equivalent config key is `[optimize] projects_root`. Resolution order, first
+match wins:
+
+1. `--projects-root` / `[optimize] projects_root`
+2. the `TJ_CLAUDE_PROJECTS_ROOT` environment variable
+3. **an explicit `--db`, which scopes the filesystem scans OFF** — see below
+4. `~/.claude/projects`
+
+**Passing `--db` suppresses the filesystem scans unless you also pass
+`--projects-root`.** Naming a database names the corpus you want reasoned about,
+so reading a second, unrelated corpus off the machine into the same report is a
+bug, not a feature: served against a throwaway database, those analyzers would
+otherwise surface findings carrying real file paths from unrelated projects, and
+the review inbox's "where to write it" target would point at a real location
+outside the database you opened. Suppression is also why an empty or scoped
+database paints immediately instead of walking a large transcript tree first.
+
+Suppression is never silent. `tj optimize` prints which analyzers did not run and
+why, and the report carries `filesystem_scan_skipped_reason` so every surface can
+tell **"scanned, found nothing"** from **"did not scan"**. A run with no flag, no
+environment variable and no `--db` is unaffected.
+
+**The scope bounds writes too, not just reads.** The review inbox's Approve step
+refuses any target outside the scope's home directory — with
+`--projects-root /tmp/demo-home/.claude/projects` that root is `/tmp/demo-home`,
+so a scoped daemon can neither be talked into writing to your real `~`, nor into
+escaping the scope with a `..` path or a symlink pointing out of it. The
+suggested target and this check resolve from the same scope, so what the card
+proposes is always something Approve will accept. Without a scope the allowed
+root is your real home, exactly as before.
+
 ## Budget limits
 
 Budget limits merge per-field: each agent inherits default limits unless it explicitly overrides them.

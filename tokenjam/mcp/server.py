@@ -162,6 +162,8 @@ class _HttpDB:
                     start_time=datetime.fromisoformat(t["start_time"]) if t.get("start_time") else None,
                     duration_ms=t.get("duration_ms"),
                     cost_usd=t.get("cost_usd"),
+                    input_tokens=t.get("input_tokens", 0),
+                    output_tokens=t.get("output_tokens", 0),
                     status_code=t.get("status_code"),
                     span_count=t.get("span_count", 0),
                 ))
@@ -445,18 +447,24 @@ def _tool_get_budget_headroom(conn, config, agent_id: str) -> dict:
         status_data = _http_get("/api/v1/status", {"agent_id": agent_id})
         agents = status_data.get("agents", [])
         today_cost = 0.0
+        today_tokens = 0
         session_cost = 0.0
+        session_tokens = 0
         if agents:
             a = agents[0]
             today_cost = float(a.get("cost_today", 0.0))
+            today_tokens = int(a.get("tokens_today", 0) or 0)
             session_cost = float(a.get("total_cost_usd", 0.0))
+            session_tokens = int(a.get("input_tokens", 0) or 0) + int(a.get("output_tokens", 0) or 0)
         return {
             "agent_id": agent_id,
             "daily_limit_usd": daily_limit,
             "daily_spent_usd": today_cost,
+            "daily_spent_tokens": today_tokens,
             "daily_remaining_usd": (daily_limit - today_cost) if daily_limit else None,
             "session_limit_usd": session_limit,
             "session_spent_usd": session_cost,
+            "session_spent_tokens": session_tokens,
             "session_remaining_usd": (session_limit - session_cost) if session_limit else None,
         }
 
@@ -464,26 +472,32 @@ def _tool_get_budget_headroom(conn, config, agent_id: str) -> dict:
 
     from tokenjam.utils.time_parse import utcnow
 
-    today_cost = float(conn.execute(
-        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM spans "
-        "WHERE agent_id = $1 AND CAST(start_time AT TIME ZONE 'UTC' AS DATE) = $2",
+    today_row = conn.execute(
+        "SELECT COALESCE(SUM(cost_usd), 0.0), "
+        "COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0) "
+        "FROM spans WHERE agent_id = $1 AND CAST(start_time AT TIME ZONE 'UTC' AS DATE) = $2",
         [agent_id, utcnow().date()],
-    ).fetchone()[0])
+    ).fetchone()
+    today_cost = float(today_row[0] or 0.0)
+    today_tokens = int(today_row[1] or 0)
 
     active_session = conn.execute(
-        "SELECT COALESCE(total_cost_usd, 0.0) FROM sessions "
-        "WHERE agent_id = $1 AND status = 'active' ORDER BY started_at DESC LIMIT 1",
+        "SELECT COALESCE(total_cost_usd, 0.0), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0) "
+        "FROM sessions WHERE agent_id = $1 AND status = 'active' ORDER BY started_at DESC LIMIT 1",
         [agent_id],
     ).fetchone()
     session_cost = float(active_session[0]) if active_session else 0.0
+    session_tokens = int(active_session[1] or 0) + int(active_session[2] or 0) if active_session else 0
 
     return {
         "agent_id": agent_id,
         "daily_limit_usd": budget.daily_usd,
         "daily_spent_usd": today_cost,
+        "daily_spent_tokens": today_tokens,
         "daily_remaining_usd": (budget.daily_usd - today_cost) if budget.daily_usd else None,
         "session_limit_usd": budget.session_usd,
         "session_spent_usd": session_cost,
+        "session_spent_tokens": session_tokens,
         "session_remaining_usd": (budget.session_usd - session_cost) if budget.session_usd else None,
     }
 
@@ -645,6 +659,8 @@ def _tool_list_traces(db, agent_id: str | None, since: str | None, limit: int) -
                 "start_time": t.start_time.isoformat() if t.start_time else None,
                 "duration_ms": t.duration_ms,
                 "cost_usd": t.cost_usd,
+                "input_tokens": t.input_tokens,
+                "output_tokens": t.output_tokens,
                 "status_code": t.status_code,
                 "span_count": t.span_count,
             }
@@ -1224,8 +1240,8 @@ def setup_project(agent_id: str | None = None, project_path: str | None = None) 
     for this repo. Infers agent_id from the git remote if not provided.
     """
     try:
-        from tokenjam.core.config import find_config_file
-        cp = find_config_file()
+        from tokenjam.core.config import resolve_config_path
+        cp = resolve_config_path()
         return _tool_setup_project(
             config=_config,
             config_path=str(cp) if cp else None,
@@ -1291,6 +1307,7 @@ def _tool_get_optimize_report(
     db, config, agent_id: str | None, since: str | None, findings: list[str] | None,
     budget_provider: str | None, budget_usd: float | None,
 ) -> dict:
+    from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
     from tokenjam.core.optimize import build_report, report_to_dict
     from tokenjam.utils.time_parse import parse_since, utcnow
     if config is None:
@@ -1303,17 +1320,37 @@ def _tool_get_optimize_report(
             )
         }
     since_dt = parse_since(since) if since else parse_since("30d")
+    until_dt = utcnow()
     report = build_report(
         db=db,
         config=config,
         since=since_dt,
-        until=utcnow(),
+        until=until_dt,
         agent_id=agent_id,
         findings=findings,
         budget_provider_filter=budget_provider,
         budget_usd_override=budget_usd,
     )
-    return report_to_dict(report)
+    payload = report_to_dict(report)
+
+    # Plan-tier mix + framing block (#110), mirroring /api/v1/optimize
+    # (api/routes/optimize.py) — this direct-DB fallback path used to skip
+    # both, so it emitted neither `pricing_mode` nor `framing`, contradicting
+    # this tool's own docstring and leaving a caller with no way to tell an
+    # api-billed window from a subscription/local/unknown one.
+    mix = plan_tier_mix(db.conn, since_dt, until_dt, agent_id)
+    payload["plan_tier_mix"] = mix
+    w = report.window
+    payload["framing"] = compute_framing(
+        config,
+        WindowSummary(
+            total_cost_usd=float(getattr(w, "total_cost_usd", 0.0) or 0.0),
+            total_tokens=int(getattr(w, "total_tokens", 0) or 0),
+            sessions=int(getattr(w, "sessions", 0) or 0),
+            plan_tier_mix=mix,
+        ),
+    ).to_dict()
+    return payload
 
 
 @mcp.tool()
@@ -1363,7 +1400,7 @@ def get_optimize_report(
             )
             backend = ApiBackend(_serve_url, api_key)
             try:
-                return backend.fetch_optimize_report(
+                payload = backend.fetch_optimize_report(
                     since=since or "30d",
                     agent_id=agent_id,
                     findings=findings,
@@ -1372,6 +1409,24 @@ def get_optimize_report(
                 )
             finally:
                 backend.close()
+            # The daemon serves a STORED report its background scan produced;
+            # no route runs an analyzer. A cold store carries no report body,
+            # and an LLM reading a bare empty payload would report "no
+            # optimization opportunities found" — an absence claim off a scan
+            # that never ran. Say what is actually true instead.
+            if payload.get("report_available") is False:
+                return {
+                    "error": "scan_not_ready",
+                    "status": payload.get("status", "never_run"),
+                    "message": (
+                        "The tj serve daemon has not stored an analyzer report "
+                        "yet, so there are no findings to report. This is NOT a "
+                        "finding of zero waste. The daemon scans at startup and "
+                        "on a schedule; retry shortly."
+                    ),
+                    "last_error": payload.get("last_error"),
+                }
+            return payload
 
         # Direct-DB mode: reuse the single read-only connection when we have one
         # (fallback path, serve unreachable). We never open a competing

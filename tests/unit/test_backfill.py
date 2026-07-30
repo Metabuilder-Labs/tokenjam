@@ -17,7 +17,7 @@ from tokenjam.core.backfill import (
 )
 from tokenjam.core.config import CaptureConfig
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 
 from tests.factories import make_llm_span, make_tool_span
 
@@ -857,9 +857,14 @@ def _llm_and_tool(parsed):
     return llm, tool
 
 
-def test_capture_off_leaves_attributes_unchanged(tmp_path):
-    """Every toggle explicitly off extracts NO content — attributes stay
-    exactly {"source": ...} on both the LLM and tool span (#3 default-off)."""
+def test_capture_off_extracts_no_content_only_provenance(tmp_path):
+    """Every toggle explicitly off extracts NO content (#3 default-off).
+
+    Asserted as "no content key is present" rather than as an exact attribute
+    dict: provenance — the ingest source, and the call id that lets a second
+    observer of the same call be recognised instead of counted twice — is not
+    content and is stamped regardless of the capture toggles.
+    """
     path = _content_session_file(tmp_path)
 
     parsed = parse_claude_code_session(
@@ -867,8 +872,15 @@ def test_capture_off_leaves_attributes_unchanged(tmp_path):
     )
     assert parsed is not None
     llm, tool = _llm_and_tool(parsed)
-    assert llm.attributes == {"source": "backfill.claude_code"}
-    assert tool.attributes == {"source": "backfill.claude_code"}
+    content_keys = {
+        GenAIAttributes.PROMPT_CONTENT, GenAIAttributes.COMPLETION_CONTENT,
+        GenAIAttributes.TOOL_INPUT, GenAIAttributes.TOOL_OUTPUT,
+        TjAttributes.SYSTEM_PREFIX_CONTENT,
+    }
+    for span in (llm, tool):
+        assert span.attributes["source"] == "backfill.claude_code"
+        assert content_keys.isdisjoint(span.attributes)
+    assert llm.attributes[TjAttributes.CALL_ID] == "msg-cap"
 
 
 def test_capture_default_extracts_prompt_and_tool_input(tmp_path):
@@ -1630,5 +1642,241 @@ def test_bulk_batch_is_idempotent_across_flush_boundary(tmp_path, monkeypatch):
         assert r2.spans_ingested == 0
         assert r2.spans_skipped_existing == 10
         assert _dump_spans(db) == before        # untouched
+    finally:
+        db.close()
+
+
+# --- Stable subagent identity (sub_agent_type) --------------------------------
+#
+# `sub_agent_id` is Claude Code's `agentId`: minted fresh per Task dispatch, so
+# it never recurs across sessions and can form no per-subagent cohort. The
+# stable identity is the dispatched agent TYPE, read off the
+# `agent-<id>.meta.json` sidecar Claude Code writes next to every subagent
+# transcript. See `backfill._subagent_type_for`.
+
+def _subagent_transcript(tmp_path: Path, proj: str, session_id: str,
+                         agent_id: str, records: list[dict],
+                         meta: dict | None) -> Path:
+    """Write ``<proj>/<sid>/subagents/agent-<id>.jsonl`` plus its meta sidecar.
+
+    ``meta=None`` writes no sidecar (the pre-sidecar / unreadable case).
+    """
+    sub_dir = tmp_path / proj.replace("/", "-") / session_id / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    path = sub_dir / f"agent-{agent_id}.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records))
+    if meta is not None:
+        (sub_dir / f"agent-{agent_id}.meta.json").write_text(json.dumps(meta))
+    return path
+
+
+def test_parse_reads_the_stable_subagent_type_from_the_meta_sidecar(tmp_path):
+    """Every span of a subagent transcript carries the dispatched agent TYPE
+    alongside its per-dispatch id — the id keeps its old meaning."""
+    proj = "/Users/me/proj"
+    path = _subagent_transcript(
+        tmp_path, proj, "sess-st", "a1f2e3d4c5b6a7981",
+        records=[_assistant_record(
+            "m-st", "claude-opus-4-7", 5000, 500,
+            "2026-04-01T10:00:01.000Z", "sess-st", proj,
+            tool_uses=[("tu-st", "Read")],
+            is_sidechain=True, agent_id="a1f2e3d4c5b6a7981",
+        )],
+        meta={"agentType": "code-reviewer", "description": "review the diff",
+              "toolUseId": "toolu_01abc", "spawnDepth": 1},
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    assert len(parsed.spans) == 2                       # LLM span + tool span
+    for span in parsed.spans:
+        assert span.sub_agent_id == "a1f2e3d4c5b6a7981"  # per-dispatch, unchanged
+        assert span.sub_agent_type == "code-reviewer"    # stable, new
+
+
+def test_a_main_thread_transcript_never_carries_a_subagent_type(tmp_path):
+    """The type is gated on the same isSidechain flag as the id, so a
+    main-thread span can never pick one up."""
+    path = _make_session_file(
+        tmp_path, session_id="sess-main", cwd="/Users/me/proj",
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-main", "/Users/me/proj",
+        )],
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    assert all(s.sub_agent_type is None for s in parsed.spans)
+
+
+def test_a_per_dispatch_instance_label_is_not_recorded_as_a_stable_type(tmp_path):
+    """An ``in_process_teammate`` is spawned with a caller-chosen one-off
+    ``name`` ("worker-428") that Claude Code writes into ``agentType``. That
+    names no agent definition and recurs no more than the dispatch id does, so
+    recording it as a stable type would silently mis-attribute. It stays NULL.
+    """
+    proj = "/Users/me/proj"
+    path = _subagent_transcript(
+        tmp_path, proj, "sess-tm", "aworker-428-63df1d3c53338de1",
+        records=[_assistant_record(
+            "m-tm", "claude-opus-4-7", 5000, 500,
+            "2026-04-01T10:00:01.000Z", "sess-tm", proj,
+            is_sidechain=True, agent_id="aworker-428-63df1d3c53338de1",
+        )],
+        meta={"agentType": "worker-428", "name": "worker-428",
+              "taskKind": "in_process_teammate", "description": "fix a review finding"},
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    assert all(s.sub_agent_id == "aworker-428-63df1d3c53338de1" for s in parsed.spans)
+    assert all(s.sub_agent_type is None for s in parsed.spans)
+
+
+def test_a_workflow_nested_subagent_still_resolves_its_type(tmp_path):
+    """A workflow dispatch nests one level deeper —
+    ``subagents/workflows/<wf-id>/agent-<id>.jsonl`` — so ``subagents`` is not
+    the immediate parent. Matching on the immediate parent alone silently
+    dropped the type for every one of these (998 transcripts on a real corpus,
+    the second-largest dispatch type there)."""
+    proj = "/Users/me/proj"
+    sub_dir = (tmp_path / proj.replace("/", "-") / "sess-wf"
+               / "subagents" / "workflows" / "wf_5ef70bd5-87f")
+    sub_dir.mkdir(parents=True)
+    path = sub_dir / "agent-awf1.jsonl"
+    path.write_text(json.dumps(_assistant_record(
+        "m-wf", "claude-opus-4-7", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-wf", proj,
+        is_sidechain=True, agent_id="awf1",
+    )))
+    (sub_dir / "agent-awf1.meta.json").write_text(
+        json.dumps({"agentType": "workflow-subagent", "description": "step 1"})
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    assert all(s.sub_agent_type == "workflow-subagent" for s in parsed.spans)
+
+
+def test_a_missing_or_garbled_sidecar_degrades_to_no_type(tmp_path):
+    """No sidecar, and a sidecar that isn't readable JSON, both leave the type
+    NULL rather than raising — the id half is unaffected either way."""
+    proj = "/Users/me/proj"
+    records = [_assistant_record(
+        "m-ns", "claude-opus-4-7", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-ns", proj,
+        is_sidechain=True, agent_id="ans1",
+    )]
+    path = _subagent_transcript(tmp_path, proj, "sess-ns", "ans1", records, meta=None)
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    assert all(s.sub_agent_type is None for s in parsed.spans)
+    assert all(s.sub_agent_id == "ans1" for s in parsed.spans)
+
+    (path.parent / "agent-ans1.meta.json").write_text("{not json")
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    assert all(s.sub_agent_type is None for s in parsed.spans)
+
+
+def test_the_stable_type_forms_a_cohort_the_dispatch_id_never_can(tmp_path):
+    """The acceptance shape: one agent type dispatched once per session across
+    five sessions is ONE identity with five sessions on `sub_agent_type`, and
+    five identities with one session each on `sub_agent_id`."""
+    proj = "/Users/me/proj"
+    for i in range(5):
+        sid = f"sess-co-{i}"
+        _make_session_file(
+            tmp_path, session_id=sid, cwd=proj,
+            records=[_assistant_record(
+                f"m-main-{i}", "claude-opus-4-7", 1000, 200,
+                f"2026-04-0{i + 1}T10:00:00.000Z", sid, proj,
+            )],
+        )
+        _subagent_transcript(
+            tmp_path, proj, sid, f"a{i}f2e3d4c5b6a7981",
+            records=[_assistant_record(
+                f"m-sub-{i}", "claude-opus-4-7", 5000, 500,
+                f"2026-04-0{i + 1}T10:00:01.000Z", sid, proj,
+                is_sidechain=True, agent_id=f"a{i}f2e3d4c5b6a7981",
+            )],
+            meta={"agentType": "code-reviewer", "description": "review"},
+        )
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        by_id = db.conn.execute(
+            "SELECT COUNT(DISTINCT sub_agent_id), MAX(n) FROM ("
+            "  SELECT sub_agent_id, COUNT(DISTINCT session_id) AS n FROM spans"
+            "  WHERE sub_agent_id IS NOT NULL GROUP BY sub_agent_id)"
+        ).fetchone()
+        assert by_id == (5, 1), "every dispatch id is confined to one session"
+        by_type = db.conn.execute(
+            "SELECT COUNT(DISTINCT sub_agent_type), MAX(n) FROM ("
+            "  SELECT sub_agent_type, COUNT(DISTINCT session_id) AS n FROM spans"
+            "  WHERE sub_agent_type IS NOT NULL GROUP BY sub_agent_type)"
+        ).fetchone()
+        assert by_type == (1, 5), "one identity, a five-session cohort"
+    finally:
+        db.close()
+
+
+def test_reingest_retags_the_stable_type_without_disturbing_anything_else(tmp_path):
+    """`--reingest` populates `sub_agent_type` on spans an older backfill wrote
+    before the column existed, inserts nothing, and re-running it again changes
+    nothing further."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-rst", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-rst", proj,
+        )],
+    )
+    _subagent_transcript(
+        tmp_path, proj, "sess-rst", "arst1",
+        records=[_assistant_record(
+            "m-rst", "claude-haiku-4-5", 5000, 500,
+            "2026-04-01T10:00:01.000Z", "sess-rst", proj,
+            tool_uses=[("tu-rst", "Read")], is_sidechain=True, agent_id="arst1",
+        )],
+        meta={"agentType": "code-reviewer", "description": "review"},
+    )
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        # Simulate history ingested before migration 19 landed.
+        db.conn.execute("UPDATE spans SET sub_agent_type = NULL")
+        before_rows = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+        before_tokens = db.conn.execute(
+            "SELECT SUM(input_tokens), SUM(output_tokens), SUM(cost_usd) FROM spans"
+        ).fetchone()
+
+        r = ingest_claude_code(db, root=tmp_path, reingest=True)
+        assert r.spans_ingested == 0
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before_rows
+        assert db.conn.execute(
+            "SELECT SUM(input_tokens), SUM(output_tokens), SUM(cost_usd) FROM spans"
+        ).fetchone() == before_tokens
+        # The subagent's LLM span AND its tool span both carry the type; the
+        # main-thread span is untouched.
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_type = 'code-reviewer'"
+        ).fetchone()[0] == 2
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_id IS NULL "
+            "AND sub_agent_type IS NOT NULL"
+        ).fetchone()[0] == 0
+
+        # Idempotent: a second reingest is a no-op on the data. Snapshot the
+        # identity columns explicitly — `_dump_spans` doesn't carry them.
+        def _identity_dump() -> list[tuple]:
+            return db.conn.execute(
+                "SELECT span_id, sub_agent_id, sub_agent_type FROM spans "
+                "ORDER BY span_id"
+            ).fetchall()
+
+        snapshot = (_dump_spans(db), _identity_dump())
+        ingest_claude_code(db, root=tmp_path, reingest=True)
+        assert (_dump_spans(db), _identity_dump()) == snapshot
     finally:
         db.close()

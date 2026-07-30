@@ -25,6 +25,7 @@ See README.md in this package for details.
 from __future__ import annotations
 
 # Re-export the public surface used by cmd_optimize.py, mcp/server.py, tests.
+from tokenjam.core.optimize import report_store
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY, register
 from tokenjam.core.optimize.runner import (
     ANALYZER_ORDER,
@@ -89,6 +90,7 @@ __all__ = [
     "project_budget",
     "register",
     "report_from_dict",
+    "report_store",
     "report_to_dict",
     "summarize_window",
 ]

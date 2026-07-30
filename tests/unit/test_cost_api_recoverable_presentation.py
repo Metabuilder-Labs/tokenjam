@@ -2,7 +2,7 @@
 `api/routes/cost.py` (A1, analyzer-audit #482).
 
 `/cost/components` used to expose a flat `sum()` of every analyzer's
-`estimated_recoverable_usd` with nothing signaling that the analyzers price
+`past_overspend_usd` with nothing signaling that the analyzers price
 waste from overlapping angles over the same sessions. These tests pin the
 fix: individual analyzer estimates are NEVER touched (the operator does not
 want the headline magnitude deflated), but the response now says, in the
@@ -18,8 +18,8 @@ from tokenjam.api.routes.cost import _collect_recoverable, _recoverable_overlap_
 
 @dataclass
 class _FakeFinding:
-    estimated_recoverable_usd: float | None
-    estimated_recoverable_tokens: int | None
+    past_overspend_usd: float | None
+    past_overspend_tokens: int | None
     estimate_basis: str = ""
     caveat: str = ""
 
@@ -36,22 +36,22 @@ def test_collect_recoverable_sorted_biggest_first():
     report = _FakeReport(
         downgrade=None,
         findings={
-            "cache": _FakeFinding(estimated_recoverable_usd=5.0, estimated_recoverable_tokens=100),
-            "trim": _FakeFinding(estimated_recoverable_usd=50.0, estimated_recoverable_tokens=200),
-            "reuse": _FakeFinding(estimated_recoverable_usd=20.0, estimated_recoverable_tokens=50),
+            "cache": _FakeFinding(past_overspend_usd=5.0, past_overspend_tokens=100),
+            "trim": _FakeFinding(past_overspend_usd=50.0, past_overspend_tokens=200),
+            "reuse": _FakeFinding(past_overspend_usd=20.0, past_overspend_tokens=50),
         },
     )
     out = _collect_recoverable(report)
     assert [r["analyzer"] for r in out] == ["trim", "reuse", "cache"]
-    assert [r["estimated_recoverable_usd"] for r in out] == [50.0, 20.0, 5.0]
+    assert [r["past_overspend_usd"] for r in out] == [50.0, 20.0, 5.0]
 
 
 def test_collect_recoverable_ties_broken_by_tokens():
     report = _FakeReport(
         downgrade=None,
         findings={
-            "cache": _FakeFinding(estimated_recoverable_usd=10.0, estimated_recoverable_tokens=100),
-            "trim": _FakeFinding(estimated_recoverable_usd=10.0, estimated_recoverable_tokens=500),
+            "cache": _FakeFinding(past_overspend_usd=10.0, past_overspend_tokens=100),
+            "trim": _FakeFinding(past_overspend_usd=10.0, past_overspend_tokens=500),
         },
     )
     out = _collect_recoverable(report)
@@ -62,13 +62,13 @@ def test_overlap_note_empty_for_zero_or_one_finding():
     # Zero findings: nothing to disclose, no false "these overlap" claim.
     assert _recoverable_overlap_note([]) == ""
     # A single finding cannot double-count anything by construction.
-    assert _recoverable_overlap_note([{"estimated_recoverable_usd": 10.0}]) == ""
+    assert _recoverable_overlap_note([{"past_overspend_usd": 10.0}]) == ""
 
 
 def test_overlap_note_present_for_two_or_more_findings():
     note = _recoverable_overlap_note([
-        {"estimated_recoverable_usd": 10.0},
-        {"estimated_recoverable_usd": 5.0},
+        {"past_overspend_usd": 10.0},
+        {"past_overspend_usd": 5.0},
     ])
     assert note != ""
     assert "2" in note  # names how many estimates it's disclaiming
@@ -80,8 +80,8 @@ def test_overlap_note_present_for_two_or_more_findings():
 
 def test_overlap_note_scales_the_count_with_the_list():
     note = _recoverable_overlap_note([
-        {"estimated_recoverable_usd": 1.0},
-        {"estimated_recoverable_usd": 1.0},
-        {"estimated_recoverable_usd": 1.0},
+        {"past_overspend_usd": 1.0},
+        {"past_overspend_usd": 1.0},
+        {"past_overspend_usd": 1.0},
     ])
     assert "3" in note

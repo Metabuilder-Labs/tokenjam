@@ -16,7 +16,7 @@ from tokenjam.utils.formatting import console
 @json_option
 @click.pass_context
 def cmd_drift(ctx: click.Context, agent: str | None, output_json_flag: bool) -> None:
-    """Show drift baselines and Z-scores for recent sessions."""
+    """Show behavioral-drift baselines & Z-scores."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     config = ctx.obj["config"]

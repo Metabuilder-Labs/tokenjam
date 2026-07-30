@@ -60,7 +60,7 @@ _INCLUSION_LABELS = {
 @click.pass_context
 def cmd_context(ctx: click.Context, agent: str | None, since: str,
                 output_json_flag: bool) -> None:
-    """Diagnose where your Claude Code quota goes: re-reading vs. real work."""
+    """See where your Claude Code quota goes."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
@@ -238,9 +238,9 @@ def _render(diag: ContextDiagnostic, framing: Framing, *, since: str) -> None:
         padding=(1, 2),
     ))
 
-    # Qualifier banner (plan-tier framing) + honesty caveat, below the panel.
-    if framing.qualifier_text:
-        console.print(f"  [dim]{framing.qualifier_text}[/dim]")
+    # Honesty caveat, below the panel. No billing-mode qualifier banner:
+    # product decision, no differentiated messaging between subscription and
+    # API users.
     console.print(f"  [dim]{diag.caveat}[/dim]")
     for note in diag.notes:
         console.print(f"  [yellow]Note:[/yellow] [dim]{note}[/dim]")

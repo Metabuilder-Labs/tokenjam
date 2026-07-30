@@ -28,7 +28,7 @@ def test_convert_otel_span_extracts_run_markers_from_resource():
         "tokenjam.run_id": "run-xyz",
         "tokenjam.parent_session_id": "parent-abc",
         "service.namespace": "aquanode",
-        "service.instance.id": "founder-os",
+        "service.instance.id": "dev-box",
     })
 
     ns = convert_otel_span(span)
@@ -38,7 +38,7 @@ def test_convert_otel_span_extracts_run_markers_from_resource():
     # Sanity: the sibling resource attrs still resolve (regression guard for the
     # whole resource-extraction block, not just the new markers).
     assert ns.service_namespace == "aquanode"
-    assert ns.service_instance_id == "founder-os"
+    assert ns.service_instance_id == "dev-box"
 
 
 def test_convert_otel_span_run_markers_absent_is_none():

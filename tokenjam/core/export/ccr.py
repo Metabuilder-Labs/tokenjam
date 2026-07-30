@@ -11,11 +11,9 @@ reads and translates into their CCR config by hand. There is no `--apply`:
 TokenJam writes only to `~/.config/tokenjam/exports/` and never touches CCR's
 config. Standard JSON parsers reject `//`, so the file is served as JSONC.
 
-Plan-tier-aware (same doctrine as claude_code.py):
-  - API users:          rules carry `estimated_savings_usd_month`.
-  - Subscription/local: rules carry `estimated_tokens_freed` (never dollars
-                        against a flat-rate plan).
-  - Unknown plan-tier:  rules carry a reconfigure note, no figure.
+Every rule carries `estimated_savings_usd_month`, regardless of billing mode
+(product decision: dollars are always legitimate; tj no longer
+differentiates its output between subscription and API users).
 """
 from __future__ import annotations
 

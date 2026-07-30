@@ -38,10 +38,20 @@ def backfill_progress(
 ) -> Iterator[ProgressCallback]:
     """Yield a `progress(parsed, result)` callback for `ingest_claude_code`.
 
-    `total` is the cheap pre-count of in-scope sessions
+    `total` is the cheap pre-count of in-scope transcript FILES
     (`count_claude_code_sessions_in_scope`), or `None` when unknown — the
     counter then shows a running count with no "/total". `quiet=True` yields a
     no-op callback (mirrors `tj backfill claude-code --quiet`).
+
+    The counter says "transcripts", not "sessions", and the distinction is the
+    point. Both the numerator (`BackfillResult.sessions_seen`) and the total
+    count `.jsonl` FILES walked, and a Claude Code session is more than one
+    file: every `Task` dispatch writes its own `subagents/agent-*.jsonl`
+    sharing the parent's `session_id`. On a real corpus roughly half the files
+    under the projects root are subagent transcripts, so a file count reads
+    about twice the session count, and calling it "sessions" put two different
+    answers to one question on the same screen. Nothing about what gets
+    ingested changed: subagent transcripts are still read, and they must be.
 
     `console` overrides where the counter renders (default: the shared stdout
     console) — `tj quickstart --json` passes the stderr console so the
@@ -59,7 +69,8 @@ def backfill_progress(
             f"{result.sessions_seen:,}/{total:,}" if total is not None
             else f"{result.sessions_seen:,}"
         )
-        return f"Backfilling {count} sessions · {format_tokens(tokens_seen)} tokens read"
+        return (f"Backfilling {count} transcripts · "
+                f"{format_tokens(tokens_seen)} tokens read")
 
     def _accumulate(parsed: ParsedSession) -> None:
         nonlocal tokens_seen
@@ -93,4 +104,38 @@ def backfill_progress(
     yield _tick_plain
 
 
-__all__ = ["backfill_progress", "ProgressCallback"]
+@contextmanager
+def transient_status(message: str, *, console: Console | None = None) -> Iterator[None]:
+    """Hold a single self-erasing status line for the duration of the block.
+
+    For a slow stretch that has no per-item tick to count. Built from the SAME
+    `Progress` construction as `backfill_progress` above (same spinner, same
+    `◆` prefix, same `transient=True`), so a command that runs one after the
+    other reads as one continuous process rather than two different UIs.
+
+    `transient=True` is the contract: Rich erases the line on exit, so whatever
+    renders next starts on a clean screen with no residue above it.
+
+    On a NON-terminal (piped output, CI, redirected logs) this prints nothing
+    at all, deliberately. Rich's live redraw cannot erase there, so the only
+    options are permanent residue above the output or silence, and residue in a
+    machine-read or scrolled-back log is the worse of the two. A caller whose
+    non-TTY runs need a sign of life has one already: `backfill_progress`
+    degrades to periodic plain lines rather than going quiet.
+    """
+    target_console = console if console is not None else _default_console
+    if not target_console.is_terminal:
+        yield
+        return
+
+    with Progress(
+        SpinnerColumn(style="cyan"),
+        TextColumn("[bold]◆[/bold] {task.description}"),
+        console=target_console,
+        transient=True,
+    ) as progress:
+        progress.add_task(message, total=None)
+        yield
+
+
+__all__ = ["backfill_progress", "transient_status", "ProgressCallback"]

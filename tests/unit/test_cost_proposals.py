@@ -7,9 +7,16 @@ touches a real ``~/.tj`` / ``~/.claude`` (mirrors ``test_relearn_apply``).
 """
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from tokenjam.utils.time_parse import utcnow
 
 import pytest
+
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_SKILL,
+)
 
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
@@ -22,7 +29,7 @@ from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
 from tokenjam.core.optimize.analyzers.prompt_bloat import BloatPrompt, PromptBloatFinding
 from tokenjam.core.optimize.cost_proposals import (
     cost_proposals_from_report,
-    estimated_recoverable_rollup,
+    past_overspend_rollup,
 )
 from tokenjam.core.optimize.types import (
     DowngradeFinding,
@@ -51,20 +58,20 @@ def _report():
         candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
         alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
         examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
-        estimated_recoverable_usd=3.0, percent_of_tokens=35.0,
+        past_overspend_usd=3.0, percent_of_tokens=35.0,
         estimate_basis="downsize basis",
     )
     cache = CacheEfficacyFinding(
         flagged=[CacheEfficacyRow("anthropic", "claude-sonnet-5", 100_000, 5_000,
                                   0.05, "full", True)],
-        estimated_recoverable_usd=1.2, estimate_basis="cache basis",
+        past_overspend_usd=1.2, estimate_basis="cache basis",
     )
     trim = PromptBloatFinding(
         enabled=True,
         per_prompt=[BloatPrompt(agent_id="svc-a", sample_chars="x", prompt_chars=8000,
                                 significant_chars=3000, bloat_chars=5000,
                                 estimated_token_reduction=1250)],
-        estimated_recoverable_usd=0.8, estimate_basis="trim basis",
+        past_overspend_usd=0.8, estimate_basis="trim basis",
     )
     w = WindowSummary(since=MARKER, until=NOW, days=5, sessions=10, spans=100,
                       total_tokens=1, total_cost_usd=5.0, thin_data=False)
@@ -93,11 +100,11 @@ def test_adapter_proposals_are_advise_only_cost_kind():
 def test_adapter_carries_evidence_and_estimate_per_analyzer():
     props = {p.analyzer: p for p in cost_proposals_from_report(_report())}
     assert "claude-opus-4-8" in props["downsize"].evidence
-    assert props["downsize"].estimated_recoverable_usd == 3.0
+    assert props["downsize"].past_overspend_usd == 3.0
     assert props["cache"].target_key == {"provider": "anthropic", "model": "claude-sonnet-5"}
-    assert props["cache"].estimated_recoverable_usd is not None
+    assert props["cache"].past_overspend_usd is not None
     assert props["trim"].target_key == {"agent_id": "svc-a"}
-    assert props["trim"].estimated_recoverable_tokens == 1250
+    assert props["trim"].past_overspend_tokens == 1250
 
 
 def test_adapter_empty_report_yields_nothing():
@@ -120,7 +127,7 @@ def _mark(db, cfg, prop):
         "signature": prop.signature, "analyzer": prop.analyzer, "title": prop.title,
         "target_key": prop.target_key, "baseline": prop.baseline,
         "advise_text": prop.advise_text, "agent_id": prop.agent_id,
-        "estimated_recoverable_usd": prop.estimated_recoverable_usd,
+        "past_overspend_usd": prop.past_overspend_usd,
     })
 
 
@@ -180,6 +187,36 @@ def test_store_cost_and_relearn_coexist_without_clobber(tmp_path):
     assert relearn_store.read_cache(path=path)["finding"]["sessions_scanned"] == 9
 
 
+def test_relearn_recompute_preserves_cost_window_and_excluded(tmp_path):
+    """A relearn detector recompute must not silently forget a non-default
+    cost window or the excluded block a prior cost-proposals recompute wrote.
+
+    Both routes fall back to the same `FALLBACK_COST_WINDOW_DAYS` today, so a
+    dropped `cost_window_days` was invisible on live data -- but the moment a
+    caller stores a non-default window, `write_cache` (the relearn job's own
+    write into the shared cache file) must round-trip it rather than reset
+    the headline's label back to the default on the next relearn pass.
+    """
+    path = tmp_path / "relearn_cache.json"
+    relearn_store.write_cost_proposals(
+        [{"kind": "cost", "analyzer": "trim", "signature": "cost:trim:x"}],
+        path=path,
+        window_days=14,
+        excluded={"summarize": {"past_overspend_usd": 3.5}},
+    )
+    cost_block = relearn_store.read_cost_proposals(path=path)
+    assert cost_block["cost_window_days"] == 14
+    assert cost_block["cost_excluded"] == {"summarize": {"past_overspend_usd": 3.5}}
+
+    # A relearn recompute lands on the SAME cache file, on its own cadence.
+    relearn_store.write_cache(RelearnFinding(sessions_scanned=11), path=path)
+
+    cost_block_after = relearn_store.read_cost_proposals(path=path)
+    assert cost_block_after["cost_proposals"][0]["signature"] == "cost:trim:x"
+    assert cost_block_after["cost_window_days"] == 14
+    assert cost_block_after["cost_excluded"] == {"summarize": {"past_overspend_usd": 3.5}}
+
+
 # --- Subagent right-sizing: the apply-capable 4th analyzer --------------------
 
 def _sub_finding(models=("claude-opus-4-8",)):
@@ -196,8 +233,8 @@ def _sub_finding(models=("claude-opus-4-8",)):
     ]
     return SubagentRightsizingFinding(
         flagged=flagged, percent_of_cost=0.66, flagged_cost_usd=1.2,
-        subagent_cost_usd=1.5, estimated_recoverable_usd=0.4,
-        estimated_recoverable_tokens=60500,
+        subagent_cost_usd=1.5, past_overspend_usd=0.4,
+        past_overspend_tokens=60500,
     )
 
 
@@ -209,7 +246,7 @@ def test_subagent_proposal_is_apply_capable_cc_origin():
     assert p.analyzer == "subagent"
     assert p.apply_capable is True
     assert p.advise_only is False        # CC-origin has a workspace surface
-    assert p.rung == 1 and p.scope == "project"
+    assert p.delivery == DELIVERY_CLAUDE_MD_RULE and p.scope == "project"
     assert p.proposed_fix                # a sizing rubric note to write
     assert p.target_key == {"models": ["claude-opus-4-8"], "subagent": True}
 
@@ -251,7 +288,7 @@ def _deadweight_finding(dead_servers=None, tax_table=None):
     return DeadweightFinding(
         sessions_scanned=10, configured_servers=1,
         servers=dead_servers, dead_servers=dead_servers, tax_table=tax_table,
-        estimated_recoverable_tokens=sum(s.estimated_tax_tokens_window for s in dead_servers) or None,
+        past_overspend_tokens=sum(s.estimated_tax_tokens_window for s in dead_servers) or None,
         estimate_basis="sum of each dead server's schema-injection tax "
                        "observed over this window",
     )
@@ -272,10 +309,10 @@ def test_deadweight_proposal_shape_and_fields():
     assert "0 tool calls" in p.evidence
     assert p.target_key == {"server": "apollo", "scope": "project", "source": "/repo/.mcp.json"}
     assert p.baseline["example_sessions"] == ["s0", "s1", "s2"]
-    assert p.estimated_recoverable_tokens == 225_000
+    assert p.past_overspend_tokens == 225_000
     # The base fixture's server carries no priced model -- the adapter must
     # never invent a rate, so the card stays tokens-only for this server.
-    assert p.estimated_recoverable_usd is None
+    assert p.past_overspend_usd is None
     assert "claude mcp remove apollo --scope project" in p.suggestion
 
 
@@ -290,7 +327,7 @@ def test_deadweight_proposal_carries_priced_usd_from_server():
         estimated_tax_usd_window=1.40625,
     )
     p = _deadweight_to_proposals(_deadweight_finding(dead_servers=[server]))[0]
-    assert p.estimated_recoverable_usd == 1.40625
+    assert p.past_overspend_usd == 1.40625
     assert p.baseline["priced_model"] == "claude-opus-4-8"
 
 
@@ -341,8 +378,8 @@ def test_deadweight_tax_table_never_becomes_a_second_proposal():
     )
     props = _deadweight_to_proposals(finding)
     assert len(props) == 1
-    assert props[0].estimated_recoverable_tokens == 225_000
-    assert finding.estimated_recoverable_tokens == 225_000  # never the tax-table's 505,000 sum
+    assert props[0].past_overspend_tokens == 225_000
+    assert finding.past_overspend_tokens == 225_000  # never the tax-table's 505,000 sum
 
 
 # --- deadweight finding round-trips through report_to_dict/report_from_dict --
@@ -363,7 +400,7 @@ def test_deadweight_finding_survives_report_dict_round_trip():
     assert len(finding.dead_servers) == 1
     assert finding.dead_servers[0].name == "apollo"
     assert finding.dead_servers[0].example_sessions == ["s0", "s1", "s2"]
-    assert finding.estimated_recoverable_tokens == 225_000
+    assert finding.past_overspend_tokens == 225_000
     assert len(finding.tax_table) == 1
     assert finding.tax_table[0].source == "MCP schema: apollo"
 
@@ -390,8 +427,8 @@ def _workflow_finding(clusters=None, **overrides):
     clusters = clusters if clusters is not None else [_workflow_cluster()]
     fields = dict(
         clusters=clusters, sessions_examined=25, degraded=False,
-        estimated_recoverable_usd=sum(c.total_cost_usd for c in clusters) or None,
-        estimated_recoverable_tokens=sum(c.total_tokens for c in clusters) or None,
+        past_overspend_usd=sum(c.total_cost_usd for c in clusters) or None,
+        past_overspend_tokens=sum(c.total_tokens for c in clusters) or None,
         estimate_basis="script basis",
     )
     fields.update(overrides)
@@ -407,13 +444,13 @@ def test_script_proposal_shape_and_apply_fields():
     assert p.analyzer == "script"
     assert p.signature.startswith("cost:script:")
     assert "bash" in p.evidence
-    assert p.estimated_recoverable_usd == 0.5
-    assert p.estimated_recoverable_tokens == 12_500
+    assert p.past_overspend_usd == 0.5
+    assert p.past_overspend_tokens == 12_500
     assert p.estimate_basis == "script basis"
-    # Apply-capable: a rung-2 skill note, same class of surface as `subagent`.
+    # Apply-capable: a skill note, same class of surface as `subagent`.
     assert p.advise_only is False
     assert p.apply_capable is True
-    assert p.rung == 2
+    assert p.delivery == DELIVERY_SKILL
     assert p.scope == "project"
     assert p.proposed_fix
     assert p.baseline["apply_sessions"] == 25
@@ -470,8 +507,8 @@ def _reuse_finding(clusters=None, **overrides):
     clusters = clusters if clusters is not None else [_reuse_cluster()]
     fields = dict(
         clusters=clusters,
-        estimated_recoverable_usd=sum(c.cache_reuse_recoverable_usd for c in clusters) or None,
-        estimated_recoverable_tokens=sum(c.cache_reuse_recoverable_tokens for c in clusters) or None,
+        past_overspend_usd=sum(c.cache_reuse_recoverable_usd for c in clusters) or None,
+        past_overspend_tokens=sum(c.cache_reuse_recoverable_tokens for c in clusters) or None,
         estimate_basis="reuse basis",
     )
     fields.update(overrides)
@@ -488,11 +525,11 @@ def test_reuse_proposal_shape_and_apply_fields():
     assert p.signature == "cost:reuse:abc123456789"
     assert "bash, read" in p.evidence
     # Conservative cache-reuse figure, never the script-replacement upper bound.
-    assert p.estimated_recoverable_usd == 0.03
-    assert p.estimated_recoverable_tokens == 900
+    assert p.past_overspend_usd == 0.03
+    assert p.past_overspend_tokens == 900
     assert p.advise_only is False
     assert p.apply_capable is True
-    assert p.rung == 1
+    assert p.delivery == DELIVERY_CLAUDE_MD_RULE
     assert p.scope == "project"
     assert p.proposed_fix
     assert p.baseline["apply_sessions"] == 4
@@ -519,7 +556,7 @@ def _verbosity_finding(**overrides):
     from tokenjam.core.optimize.analyzers.output_verbosity import VerbosityFinding
     fields = dict(
         total_candidates=6, sessions_examined=40, cohorts_examined=3,
-        estimated_recoverable_usd=0.9, estimated_recoverable_tokens=9_000,
+        past_overspend_usd=0.9, past_overspend_tokens=9_000,
         estimate_basis="verbosity basis", suggested_max_tokens=800,
     )
     fields.update(overrides)
@@ -539,11 +576,13 @@ def test_verbosity_proposal_shape_and_apply_fields():
     assert p.analyzer == "verbosity"
     assert p.signature == "cost:verbosity"
     assert "6 session" in p.evidence
-    assert p.estimated_recoverable_usd == 0.9
-    assert p.estimated_recoverable_tokens == 9_000
+    assert p.past_overspend_usd == 0.9
+    assert p.past_overspend_tokens == 9_000
     assert p.advise_only is True
     assert p.apply_capable is False
-    assert p.rung == 0
+    # No mechanism named at all is what "no write is offered" now looks
+    # like: an empty string, not a zero that had to mean "off the ladder".
+    assert p.delivery == ""
     assert p.scope == ""
     assert p.proposed_fix == ""
     # The remedy snippet + the concrete suggested cap both land in the
@@ -581,8 +620,8 @@ def test_script_reuse_verbosity_wired_into_cost_analyzers_and_report_adapter():
 
 # --- Persona-gated fix modality (script / reuse / verbosity) ----------------
 #
-# script/reuse's apply path is a rung-1 CLAUDE.md note or rung-2
-# .claude/skills/<slug>/SKILL.md — an artifact nothing in an SDK service's
+# script/reuse's apply path is a CLAUDE.md rule or a
+# .claude/skills/<slug>/SKILL.md skill — an artifact nothing in an SDK service's
 # request path ever reads. An "sdk"/"unknown" persona must never see
 # apply_capable=True for them; the identical recommendation must still reach
 # them as a copy-pasteable `suggestion`. A "claude-code" window must be
@@ -619,7 +658,9 @@ def test_sdk_persona_gets_snippet_not_write(adapter_name, finder):
     p = props[0]
     assert p.apply_capable is False
     assert p.advise_only is True
-    assert p.rung == 0
+    # No mechanism named at all is what "no write is offered" now looks
+    # like: an empty string, not a zero that had to mean "off the ladder".
+    assert p.delivery == ""
     assert p.scope == ""
     assert p.proposed_fix == ""
     assert p.suggestion  # the recommendation still reaches the sdk user
@@ -669,7 +710,7 @@ def test_claude_code_persona_is_byte_identical_to_pre_gating_shape(adapter_name,
     p = props[0]
     assert p.advise_only is False
     assert p.apply_capable is True
-    assert p.rung in (1, 2)
+    assert p.delivery in (DELIVERY_CLAUDE_MD_RULE, DELIVERY_SKILL)
     assert p.scope == "project"
     assert p.proposed_fix
     assert p.suggestion == ""  # unchanged from before this gating existed
@@ -708,7 +749,9 @@ def test_verbosity_never_offers_the_write_for_any_persona(persona):
     p = props[0]
     assert p.apply_capable is False
     assert p.advise_only is True
-    assert p.rung == 0
+    # No mechanism named at all is what "no write is offered" now looks
+    # like: an empty string, not a zero that had to mean "off the ladder".
+    assert p.delivery == ""
     assert p.scope == ""
     assert p.proposed_fix == ""
     assert p.suggestion == p.advise_text  # the recommendation still reaches everyone
@@ -742,15 +785,16 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
 
     rep.persona = "claude-code"
     by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
-    # `reuse` keeps its workspace write for this persona. `script` and
-    # `verbosity` are skipped for it entirely by the pre-dispatch persona gate
-    # (script's cluster signature can't match heterogeneous coding work;
-    # verbosity's only remedy is a global be-terser rule), so no card is built
-    # for them at all. Independently of that gate, verbosity never offers the
-    # write for ANY persona it IS run for — see
+    # `script`, `reuse`, and `verbosity` are all skipped for this persona
+    # entirely by the pre-dispatch persona gate (script's cluster signature
+    # can't match heterogeneous coding work; reuse's clustering has no content
+    # signal and prices a null-tool-signature catch-all as if it were a
+    # repeated plan; verbosity's only remedy is a global be-terser rule), so
+    # no card is built for any of them. Independently of that gate, verbosity
+    # never offers the write for ANY persona it IS run for — see
     # test_verbosity_never_offers_the_write_for_any_persona.
-    assert by_analyzer["reuse"].apply_capable is True
     assert "script" not in by_analyzer
+    assert "reuse" not in by_analyzer
     assert "verbosity" not in by_analyzer
 
     # A report with no persona set at all (e.g. hand-built, pre-gating test
@@ -761,20 +805,19 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
         assert by_analyzer[name].apply_capable is False
 
 
-# --- Component E: the estimated-recoverable rollup --------------------------
+# --- THE rollup — one aggregate, over one canonical field ------------------
 
 def test_rollup_sums_across_analyzers_and_reports_window():
     proposals = [
         {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
-         "estimated_recoverable_usd": 3.0},
+         "past_overspend_usd": 3.0},
         {"signature": "cost:cache:anthropic:claude-sonnet-5", "analyzer": "cache",
-         "title": "t2", "estimated_recoverable_usd": 1.2},
+         "title": "t2", "past_overspend_usd": 1.2},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["estimated_recoverable_usd"] == 4.2
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_usd"] == 4.2
     assert rollup["proposal_count"] == 2
     assert rollup["window_days"] == 30
-    assert rollup["estimate_confidence"] == "estimated"
     by_analyzer = {a["analyzer"]: a for a in rollup["by_analyzer"]}
     assert by_analyzer["downsize"]["count"] == 1
     assert by_analyzer["cache"]["usd"] == 1.2
@@ -785,22 +828,21 @@ def test_rollup_dedupes_by_signature_never_double_counting():
     # only contribute once — the second copy is dropped, not summed again.
     proposals = [
         {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
-         "estimated_recoverable_usd": 3.0},
+         "past_overspend_usd": 3.0},
         {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1-stale",
-         "estimated_recoverable_usd": 3.0},
+         "past_overspend_usd": 3.0},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["estimated_recoverable_usd"] == 3.0
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_usd"] == 3.0
     assert rollup["proposal_count"] == 1
 
 
 def test_rollup_empty_state():
-    rollup = estimated_recoverable_rollup([])
-    assert rollup["estimated_recoverable_usd"] == 0.0
+    rollup = past_overspend_rollup([])
+    assert rollup["past_overspend_usd"] == 0.0
     assert rollup["proposal_count"] == 0
     assert rollup["by_analyzer"] == []
-    assert rollup["contributing"] == []
-    assert "no open" in rollup["estimate_basis"]
+    assert "no open" in rollup["basis"]
 
 
 def test_rollup_skips_proposals_with_no_dollar_estimate():
@@ -809,13 +851,13 @@ def test_rollup_skips_proposals_with_no_dollar_estimate():
     # silently misstate what's summed "across N proposals").
     proposals = [
         {"signature": "cost:trim:agentA", "analyzer": "trim", "title": "t",
-         "estimated_recoverable_usd": None},
+         "past_overspend_usd": None},
         {"signature": "cost:downsize", "analyzer": "downsize", "title": "t2",
-         "estimated_recoverable_usd": 2.5},
+         "past_overspend_usd": 2.5},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
+    rollup = past_overspend_rollup(proposals)
     assert rollup["proposal_count"] == 1
-    assert rollup["estimated_recoverable_usd"] == 2.5
+    assert rollup["past_overspend_usd"] == 2.5
 
 
 def test_rollup_is_generic_over_an_unregistered_future_analyzer():
@@ -824,20 +866,20 @@ def test_rollup_is_generic_over_an_unregistered_future_analyzer():
     # here, as long as they carry the shared CostProposal fields.
     proposals = [
         {"signature": "cost:deadweight:some-mcp-server", "analyzer": "deadweight",
-         "title": "Unused MCP server", "estimated_recoverable_usd": 0.75},
+         "title": "Unused MCP server", "past_overspend_usd": 0.75},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["estimated_recoverable_usd"] == 0.75
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_usd"] == 0.75
     assert rollup["proposal_count"] == 1
     assert rollup["by_analyzer"][0]["analyzer"] == "deadweight"
 
 
 def test_rollup_ignores_a_proposal_with_no_signature():
     proposals = [{"analyzer": "downsize", "title": "no sig",
-                  "estimated_recoverable_usd": 5.0}]
-    rollup = estimated_recoverable_rollup(proposals)
+                  "past_overspend_usd": 5.0}]
+    rollup = past_overspend_rollup(proposals)
     assert rollup["proposal_count"] == 0
-    assert rollup["estimated_recoverable_usd"] == 0.0
+    assert rollup["past_overspend_usd"] == 0.0
 
 
 def test_rollup_all_open_cards_carry_none_renders_empty_state():
@@ -847,16 +889,15 @@ def test_rollup_all_open_cards_carry_none_renders_empty_state():
     # looks like a real (if tiny) measured sum.
     proposals = [
         {"signature": "cost:cache:thrash:agentA", "analyzer": "cache", "title": "t1",
-         "estimated_recoverable_usd": None},
+         "past_overspend_usd": None},
         {"signature": "cost:deadweight:mcp-x", "analyzer": "deadweight", "title": "t2",
-         "estimated_recoverable_usd": None},
+         "past_overspend_usd": None},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["estimated_recoverable_usd"] == 0.0
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_usd"] == 0.0
     assert rollup["proposal_count"] == 0
     assert rollup["by_analyzer"] == []
-    assert rollup["contributing"] == []
-    assert "no open" in rollup["estimate_basis"]
+    assert "no open" in rollup["basis"]
 
 
 def test_rollup_mixed_none_and_real_estimates_across_analyzers():
@@ -867,19 +908,17 @@ def test_rollup_mixed_none_and_real_estimates_across_analyzers():
     # or into "N proposals" — only the two real-valued cards contribute.
     proposals = [
         {"signature": "cost:cache:thrash:agentA", "analyzer": "cache", "title": "not worth it",
-         "estimated_recoverable_usd": None},
+         "past_overspend_usd": None},
         {"signature": "cost:deadweight:mcp-x", "analyzer": "deadweight", "title": "deferred server",
-         "estimated_recoverable_usd": None},
+         "past_overspend_usd": None},
         {"signature": "cost:downsize", "analyzer": "downsize", "title": "real card 1",
-         "estimated_recoverable_usd": 3.0},
+         "past_overspend_usd": 3.0},
         {"signature": "cost:cache:anthropic:claude-sonnet-5", "analyzer": "cache", "title": "real card 2",
-         "estimated_recoverable_usd": 1.5},
+         "past_overspend_usd": 1.5},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["estimated_recoverable_usd"] == 4.5
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_usd"] == 4.5
     assert rollup["proposal_count"] == 2   # only the two real-valued cards
-    signatures = {c["signature"] for c in rollup["contributing"]}
-    assert signatures == {"cost:downsize", "cost:cache:anthropic:claude-sonnet-5"}
     by_analyzer = {a["analyzer"]: a for a in rollup["by_analyzer"]}
     assert by_analyzer["cache"]["count"] == 1     # only the real-valued cache card
     assert by_analyzer["cache"]["usd"] == 1.5
@@ -895,16 +934,16 @@ def test_rollup_sums_tokens_independently_of_the_dollar_estimate():
     # with — here that would report 900 instead of the true 1400.
     proposals = [
         {"signature": "a", "analyzer": "downsize", "title": "t1",
-         "estimated_recoverable_usd": 3.0, "estimated_recoverable_tokens": 900},
+         "past_overspend_usd": 3.0, "past_overspend_tokens": 900},
         {"signature": "b", "analyzer": "cache", "title": "t2",
-         "estimated_recoverable_tokens": 500},
+         "past_overspend_tokens": 500},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["estimated_recoverable_tokens"] == 1400
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_tokens"] == 1400
     assert rollup["token_proposal_count"] == 2
     assert rollup["deduplicated_proposal_count"] == 2
     # The dollar sum still counts only the dollar-bearing proposal.
-    assert rollup["estimated_recoverable_usd"] == 3.0
+    assert rollup["past_overspend_usd"] == 3.0
     assert rollup["proposal_count"] == 1
 
 
@@ -914,29 +953,29 @@ def test_rollup_reports_partial_token_coverage_rather_than_implying_all():
     # say so instead of claiming coverage it does not have.
     proposals = [
         {"signature": "a", "analyzer": "downsize", "title": "t1",
-         "estimated_recoverable_usd": 3.0, "estimated_recoverable_tokens": 900},
+         "past_overspend_usd": 3.0, "past_overspend_tokens": 900},
         {"signature": "b", "analyzer": "cache", "title": "t2",
-         "estimated_recoverable_usd": 1.0},
+         "past_overspend_usd": 1.0},
         {"signature": "c", "analyzer": "trim", "title": "t3",
-         "estimated_recoverable_usd": 2.0},
+         "past_overspend_usd": 2.0},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["estimated_recoverable_tokens"] == 900
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_tokens"] == 900
     assert rollup["token_proposal_count"] == 1
     assert rollup["deduplicated_proposal_count"] == 3
-    assert "1 of 3" in rollup["estimate_basis"]
-    assert "floor, not a total" in rollup["estimate_basis"]
+    assert "1 of 3" in rollup["basis"]
+    assert "floor, not a total" in rollup["basis"]
 
 
 def test_rollup_token_sum_dedupes_by_signature_too():
     proposals = [
         {"signature": "a", "analyzer": "downsize", "title": "t1",
-         "estimated_recoverable_tokens": 900},
+         "past_overspend_tokens": 900},
         {"signature": "a", "analyzer": "downsize", "title": "t1-stale",
-         "estimated_recoverable_tokens": 900},
+         "past_overspend_tokens": 900},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["estimated_recoverable_tokens"] == 900
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_tokens"] == 900
     assert rollup["token_proposal_count"] == 1
 
 
@@ -945,133 +984,98 @@ def test_rollup_with_no_token_estimates_reports_zero_coverage():
     # than rendering a zero, so the counts must make that state distinguishable.
     proposals = [
         {"signature": "a", "analyzer": "downsize", "title": "t1",
-         "estimated_recoverable_usd": 3.0},
+         "past_overspend_usd": 3.0},
     ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["estimated_recoverable_tokens"] == 0
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_tokens"] == 0
     assert rollup["token_proposal_count"] == 0
-    assert "floor, not a total" not in rollup["estimate_basis"]
+    assert "floor, not a total" not in rollup["basis"]
 
 
-# --- #326: relearn clusters fold into the SAME headline, and the excluded
-# (summarize) total is carried through rather than silently dropped -------- #
+# --- the rollup has one entry point; excluded is carried -------------------- #
 
-def test_rollup_folds_relearn_monthly_usd_into_projected_only():
-    proposals = [
+def test_the_rollup_has_no_per_analyzer_side_channel():
+    """relearn used to be folded into the aggregate by a dedicated
+    ``relearn_clusters=`` parameter, on its OWN 30-day basis, landing in a
+    ``projected_usd_30d`` key that no other analyzer's window figure shared.
+    Two time bases in one aggregate is exactly the ambiguity the field collapse
+    removed: every contribution arrives as an ordinary row on the one canonical
+    field, or not at all. THAT is what this test guards, and it is unchanged.
+
+    WHAT CHANGED, AND WHY IT IS NOT THE SHAPE ABOVE COMING BACK. relearn used to
+    be the "or not at all" case, and its money therefore sat outside the Review
+    inbox's headline while its rows sat inside the inbox's list. That made the
+    tail's combined figure and the below-floor "still counted in the total above"
+    note false for most of the money they described, so relearn is now the "as an
+    ordinary row" case: ``core/optimize/inbox_contribution.py`` turns each open
+    cluster into a plain row carrying ``past_overspend_usd``/``_tokens``, and the
+    route hands those rows to this function alongside the cost proposals.
+
+    Four properties are what make that the sanctioned path rather than the
+    retired one, and the assertions below pin all four:
+
+      1. **No parameter.** The relearn-shaped kwarg still raises ``TypeError``.
+         Nothing about relearn is known to this function; it sees rows.
+      2. **One time basis.** The row's figure is the detector's own bounded
+         bucket for the window this rollup is LABELLED with (a date filter over
+         the same occurrences at the same price, never a rescale), so the label
+         over the total stays true for every row under it.
+      3. **No second key.** The result grows no relearn-specific key, no paced
+         key and no second total. It is the same dict shape as before.
+      4. **Attributable, not smuggled.** The contribution shows up as an ordinary
+         ``by_analyzer`` entry, so a reader can see whose money it is instead of
+         finding an unexplained delta.
+
+    A row with no canonical figure still contributes nothing and earns no
+    ``by_analyzer`` entry, whichever producer it came from.
+    """
+    with pytest.raises(TypeError):
+        past_overspend_rollup([], relearn_clusters=[{"signature": "relearn:a"}])  # type: ignore[call-arg]
+
+    rollup = past_overspend_rollup([
         {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
-         "estimated_recoverable_usd": 3.0},
-    ]
-    relearn_clusters = [
-        {"signature": "relearn:a", "estimated_monthly_usd": 5.0,
-         "estimated_monthly_tokens": 1000},
-        {"signature": "relearn:b", "estimated_monthly_usd": 2.5,
-         "estimated_monthly_tokens": 500},
-    ]
-    rollup = estimated_recoverable_rollup(proposals, relearn_clusters=relearn_clusters)
-    # The window-observed field is UNCHANGED by relearn — different time
-    # basis, never mixed in.
-    assert rollup["estimated_recoverable_usd"] == 3.0
-    # Relearn's own contribution is broken out...
-    assert rollup["relearn_monthly_usd"] == 7.5
-    assert rollup["relearn_monthly_tokens"] == 1500
-    assert rollup["relearn_cluster_count"] == 2
-    assert rollup["relearn_priced_cluster_count"] == 2
-    # ...and folded into the 30-day projected total alongside the cost
-    # proposals' own (unscaled here — the guardrails block projection with
-    # no active_days/n_sessions given, so cost proposals' window figure
-    # passes through as-is at scale 1.0).
-    assert rollup["projected_usd_30d"] == pytest.approx(3.0 + 7.5)
-    assert rollup["projected_tokens_30d"] == 1500
-
-
-def test_rollup_dedupes_relearn_clusters_by_signature():
-    relearn_clusters = [
-        {"signature": "relearn:a", "estimated_monthly_usd": 5.0},
-        {"signature": "relearn:a", "estimated_monthly_usd": 5.0},
-    ]
-    rollup = estimated_recoverable_rollup([], relearn_clusters=relearn_clusters)
-    assert rollup["relearn_monthly_usd"] == 5.0
-    assert rollup["relearn_cluster_count"] == 1
-
-
-def test_rollup_skips_relearn_clusters_with_no_dollar_estimate():
-    relearn_clusters = [
-        {"signature": "relearn:a", "estimated_monthly_usd": None,
-         "estimated_monthly_tokens": 400},
-    ]
-    rollup = estimated_recoverable_rollup([], relearn_clusters=relearn_clusters)
-    assert rollup["relearn_monthly_usd"] == 0.0
-    assert rollup["relearn_priced_cluster_count"] == 0
-    assert rollup["relearn_cluster_count"] == 1
-    # Tokens are still counted independently of the dollar estimate, same
-    # rule as the cost-proposal loop above.
-    assert rollup["relearn_monthly_tokens"] == 400
-    assert rollup["projected_tokens_30d"] == 400
+         "past_overspend_usd": 3.0},
+        {"signature": "cost:nothing", "analyzer": "hypothetical", "title": "t2",
+         "past_overspend_usd": None, "past_overspend_tokens": None},
+        # An ordinary row that happens to come from relearn: the canonical field,
+        # nothing relearn-shaped about how it is passed or read.
+        {"signature": "relearn-window:cwd", "analyzer": "relearn", "title": "t3",
+         "past_overspend_usd": 2.0},
+    ])
+    assert rollup["past_overspend_usd"] == 5.0
+    assert rollup["proposal_count"] == 2
+    assert [e["analyzer"] for e in rollup["by_analyzer"]] == ["downsize", "relearn"]
+    # No paced key survives anywhere on the block, and no second total either.
+    assert not [k for k in rollup if "monthly" in k or "projected" in k]
+    assert not [k for k in rollup if "observed_cost" in k or k == "cost_disclosure"]
+    # And nothing relearn-specific on the result: the retired mechanism's tell was
+    # a key of its own beside the canonical total.
+    assert not [k for k in rollup if "relearn" in k]
+    # One label over every row that fed the total.
+    assert rollup["window_days"] == 30
 
 
 def test_rollup_excluded_is_carried_through_never_summed():
-    excluded = {"summarize": {"estimated_monthly_usd": 4135.35, "href": "#/optimize"}}
-    rollup = estimated_recoverable_rollup([], excluded=excluded)
+    excluded = {"summarize": {"past_overspend_usd": 4135.35, "href": "#/optimize"}}
+    rollup = past_overspend_rollup([], excluded=excluded)
     assert rollup["excluded"] == excluded
-    assert rollup["estimated_recoverable_usd"] == 0.0
-    assert rollup["projected_usd_30d"] == 0.0
+    assert rollup["past_overspend_usd"] == 0.0
 
 
 def test_rollup_excluded_defaults_to_empty_dict_not_none():
-    rollup = estimated_recoverable_rollup([])
+    rollup = past_overspend_rollup([])
     assert rollup["excluded"] == {}
 
 
-def test_rollup_empty_relearn_clusters_untouched_baseline():
-    # No relearn_clusters passed at all — the new fields exist but are inert,
-    # so an existing caller unaware of #326 keeps seeing the same totals.
-    proposals = [
-        {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
-         "estimated_recoverable_usd": 3.0},
-    ]
-    rollup = estimated_recoverable_rollup(proposals)
-    assert rollup["relearn_monthly_usd"] == 0.0
-    assert rollup["relearn_cluster_count"] == 0
-    assert rollup["projected_usd_30d"] == 3.0
+# --- no per-analyzer projection: the figure is the window observation ------ #
 
-
-# --- Review inbox monthly-basis fields (#273: single central projection) ---- #
-
-def test_downsize_monthly_uses_the_same_central_projection_as_everyone_else():
-    # #273: downsize no longer self-projects into the shared monthly field
-    # (model_downgrade.py's own `monthly_savings_usd` used to be copied
-    # straight onto the proposal) — its estimated_monthly_usd now comes from
-    # the SAME central ratio every other analyzer's does, applied uniformly
-    # in `cost_proposals_from_report`.
-    props = {p.analyzer: p for p in cost_proposals_from_report(_report())}
-    dsz = props["downsize"]
-    # `_report()`'s window (5 days, 10 sessions) is far below the projection
-    # guardrails (>=14 window days, >=8 active days, >=20 sessions), so no
-    # projection applies: the monthly figure equals the observed one.
-    assert dsz.estimated_monthly_usd == pytest.approx(dsz.estimated_recoverable_usd)
-    # The window-wide downsize card never sets a token estimate, so there is
-    # nothing to project a monthly token figure from either — no more
-    # silently claiming "0 monthly tokens" for an unmeasured quantity.
-    assert dsz.estimated_recoverable_tokens is None
-    assert dsz.estimated_monthly_tokens is None
-
-
-def test_thin_window_reports_observed_not_a_fabricated_projection():
-    # Below the guardrails (here: 10 window days < the 14-day floor), every
-    # analyzer's monthly figure is left AT its window figure — never scaled
-    # by a ratio computed from too little data.
-    at_10d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=10.0)}
-    cache_10d = at_10d["cost:cache:anthropic:claude-sonnet-5"]
-    assert cache_10d.estimated_monthly_usd == pytest.approx(cache_10d.estimated_recoverable_usd)
-
-
-def test_projection_ratio_scales_every_cost_analyzer_the_same_way():
-    # A window that clears every guardrail (>=14 window days, >=8 active
-    # days, >=20 sessions): 10 active days over a 30-day window ->
-    # ratio = min(30/10, 3.0) = 3.0, floored no further since window_days<=30
-    # already yields 3.0. Every analyzer — including downsize — gets scaled
-    # by this SAME ratio; #273's whole point is that there is no longer a
-    # per-analyzer special case here.
+def test_no_analyzer_figure_is_paced_however_rich_the_window():
+    """The central 30-day pace ratio used to multiply every analyzer's window
+    figure into an ``estimated_monthly_*`` twin. On a window that CLEARS every
+    old guardrail (30 days, 10 active days, 25 sessions -> the old ratio would
+    have been min(30/10, 3.0) = 3.0), every card must still carry exactly its
+    observed window figure, and no paced field at all.
+    """
     rep = _report()
     rep.window = WindowSummary(
         since=MARKER, until=NOW, days=30, sessions=25, spans=100,
@@ -1079,25 +1083,33 @@ def test_projection_ratio_scales_every_cost_analyzer_the_same_way():
     )
     scaled = {p.signature: p for p in cost_proposals_from_report(rep, window_days=30.0)}
 
-    cache = scaled["cost:cache:anthropic:claude-sonnet-5"]
-    assert cache.estimated_monthly_usd == pytest.approx(cache.estimated_recoverable_usd * 3.0)
+    # A thin window that CANNOT clear the old guardrails produces byte-identical
+    # figures: with pacing gone, the window's richness is irrelevant.
+    thin = _report()
+    thin_props = {p.signature: p for p in cost_proposals_from_report(thin, window_days=30.0)}
+    for sig, prop in thin_props.items():
+        assert scaled[sig].past_overspend_usd == prop.past_overspend_usd, sig
+        assert scaled[sig].past_overspend_tokens == prop.past_overspend_tokens, sig
+    # Straight from the findings `_report()` builds, unmultiplied.
+    assert scaled["cost:trim:svc-a"].past_overspend_usd == pytest.approx(0.8)
+    assert scaled["cost:downsize"].past_overspend_usd == pytest.approx(3.0)
 
-    trim = scaled["cost:trim:svc-a"]
-    assert trim.estimated_monthly_usd == pytest.approx(trim.estimated_recoverable_usd * 3.0)
-    assert trim.estimated_monthly_tokens == round(trim.estimated_recoverable_tokens * 3.0)
-
-    downsize = scaled["cost:downsize"]
-    assert downsize.estimated_monthly_usd == pytest.approx(downsize.estimated_recoverable_usd * 3.0)
+    retired = {"estimated_monthly_usd", "estimated_monthly_tokens",
+               "estimated_recoverable_usd", "estimated_recoverable_tokens"}
+    for prop in scaled.values():
+        assert not (set(asdict(prop)) & retired), f"{prop.analyzer} carries a retired field"
 
 
-def test_default_window_is_already_the_monthly_basis_no_scaling():
-    # `cost_proposals_from_report`'s default `window_days` (30.0) still falls
-    # below `_report()`'s thin fixture window's guardrails, so an un-scoped
-    # call needs no scaling: the monthly figure equals the window figure
-    # exactly (the observed-only state, not a coincidental ratio of 1.0).
-    by_sig = {p.signature: p for p in cost_proposals_from_report(_report())}
-    cache = by_sig["cost:cache:anthropic:claude-sonnet-5"]
-    assert cache.estimated_monthly_usd == pytest.approx(cache.estimated_recoverable_usd)
+def test_the_window_length_never_rescales_a_figure():
+    # Same report read over a 10-day window and a 30-day one: the figures are
+    # the analyzer's own observations either way. `window_days` is a LABEL for
+    # the write budget's standing-cost horizon, never a divisor.
+    at_10d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=10.0)}
+    at_30d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=30.0)}
+    assert at_10d.keys() == at_30d.keys()
+    for sig, prop in at_10d.items():
+        assert prop.past_overspend_usd == at_30d[sig].past_overspend_usd, sig
+    assert at_30d["cost:trim:svc-a"].past_overspend_usd == pytest.approx(0.8)
 
 
 # --- resend adapter (behavioral requirement #6) ------------------------------ #
@@ -1107,11 +1119,13 @@ def test_resend_finding_produces_an_advisory():
     from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
 
     assert "resend" in COST_ANALYZERS
-    assert "summarize" not in COST_ANALYZERS   # has its own curate/diff screen
+    # summarize is a real peer card now (routes to its own curate/diff
+    # screen instead of an inline apply — see test_summarize_* below).
+    assert "summarize" in COST_ANALYZERS
 
     finding = ResendFinding(
         sessions_examined=5, repeat_share=0.6, repeat_tokens=10_000,
-        estimated_recoverable_tokens=6_830, estimated_recoverable_usd=0.5,
+        past_overspend_tokens=6_830, past_overspend_usd=0.5,
         estimate_basis="resend basis", fix_compaction="Run /compact.",
         caveat="conservative lower bound",
     )
@@ -1123,8 +1137,8 @@ def test_resend_finding_produces_an_advisory():
     prop = props["resend"]
     assert prop.kind == "cost"
     assert prop.advise_only is True
-    assert prop.estimated_recoverable_usd == 0.5
-    assert prop.estimated_recoverable_tokens == 6_830
+    assert prop.past_overspend_usd == 0.5
+    assert prop.past_overspend_tokens == 6_830
     assert "60%" in prop.evidence
     assert "5 session" in prop.evidence
     assert prop.advise_text.startswith("Run /compact.")
@@ -1142,7 +1156,7 @@ def _resend_finding():
     from tokenjam.core.optimize.analyzers.context_resend import ResendFinding
     return ResendFinding(
         sessions_examined=5, repeat_share=0.6, repeat_tokens=10_000,
-        estimated_recoverable_tokens=6_830, estimated_recoverable_usd=0.5,
+        past_overspend_tokens=6_830, past_overspend_usd=0.5,
         estimate_basis="resend basis", fix_compaction="Run /compact.",
         fix_cache_control='{"cache_control": {"type": "ephemeral"}}',
         caveat="conservative lower bound",
@@ -1163,14 +1177,20 @@ def test_resend_suppresses_cache_control_snippet_for_claude_code():
     assert prop.advise_text.startswith(SUBAGENT_OFFLOAD_FIX)
     assert "Run /compact." in prop.advise_text   # kept, but only as secondary relief
     # The one-paste artifact is the SECOND half of the compound fix: the agent
-    # file's model + reasoning-effort pin. The offload rule is a WRITE, carried
-    # on `proposed_fix` and applied rather than pasted.
+    # file's model pin. The offload rule is a WRITE, carried on `proposed_fix`
+    # and applied rather than pasted.
     assert "model:" in prop.one_paste_fix
-    assert "reasoning_effort:" in prop.one_paste_fix
+    # INVERTED (Critical Rule 23). This used to assert `reasoning_effort:` was
+    # PRESENT — a key Claude Code does not read at all, so the user pasted it,
+    # believed effort was pinned, and nothing changed. The suite was enforcing
+    # the defect. The real key is `effort`, and it is emitted only where the
+    # observation supports a value; a guessed effort in a frontmatter block is
+    # indistinguishable from a measured one to the reader.
+    assert "reasoning_effort" not in prop.one_paste_fix
 
 
 def test_resend_claude_code_offers_apply_capable_compound_write():
-    # Durable claude-code lever: a rung-1 CLAUDE.md rule, apply-capable via the
+    # Durable claude-code lever: a CLAUDE.md rule, apply-capable via the
     # same `_persona_gated_write_fields` machinery script/reuse/verbosity use.
     # ONE card carries BOTH halves of the lever — offload the context-heavy
     # work, and right-size what you offload it to — so this consolidates the
@@ -1184,43 +1204,74 @@ def test_resend_claude_code_offers_apply_capable_compound_write():
     prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
     assert prop.advise_only is False
     assert prop.apply_capable is True
-    assert prop.rung == 1
+    assert prop.delivery == DELIVERY_CLAUDE_MD_RULE
     assert prop.scope == "project"
     assert SUBAGENT_OFFLOAD_FIX in prop.proposed_fix
     assert RIGHTSIZE_FIX_TEMPLATE in prop.proposed_fix
 
 
-def test_resend_cost_of_waste_is_carried_but_never_the_recoverable_figure():
-    # The gross observation rides its own fields and must never be confused
-    # with — or summed into — what the fix returns.
+def test_resend_carries_one_dollar_figure_and_the_headline_reads_it():
+    # resend was the one analyzer that shipped a SECOND, larger dollar figure
+    # (the full observed cost of the re-sent volume). It is deleted from the
+    # contract, so the card carries exactly one, and the field it rode on cannot
+    # be set at all — an adapter that tried would now raise rather than quietly
+    # attach an untracked number.
+    import dataclasses
+
     from tokenjam.core.optimize.cost_proposals import (
         _resend_to_proposals,
-        estimated_recoverable_rollup,
+        past_overspend_rollup,
     )
 
     finding = _resend_finding()
-    finding.cost_of_waste_usd = 4_200.0
-    finding.cost_of_waste_tokens = 9_800_000_000
     prop = _resend_to_proposals(finding, persona="claude-code")[0]
 
-    assert prop.cost_of_waste_usd == 4_200.0
-    assert prop.estimated_recoverable_usd == 0.5
-    # The Review inbox headline reads only the recoverable fields.
-    rollup = estimated_recoverable_rollup([prop])
-    assert rollup["estimated_recoverable_usd"] == 0.5
-    assert rollup["estimated_recoverable_tokens"] == 6_830
+    fields = {f.name for f in dataclasses.fields(prop)}
+    assert not [f for f in fields if "cost_of_waste" in f or "observed_cost" in f]
+    assert prop.past_overspend_usd == 0.5
+    # The Review inbox headline reads that one field.
+    rollup = past_overspend_rollup([prop])
+    assert rollup["past_overspend_usd"] == 0.5
+    assert rollup["past_overspend_tokens"] == 6_830
 
 
-def test_resend_sdk_persona_gets_no_write_and_leads_with_compact():
-    # The SDK branch is unchanged: no coding-agent harness reads a CLAUDE.md
-    # note there, so no write is offered and /compact remains the lead fix.
+def test_resend_unknown_persona_gets_no_write_and_leads_with_compact():
+    # "unknown" is untouched by the SDK /compact fix below: no coding-agent
+    # harness reads a CLAUDE.md note there, so no write is offered and
+    # /compact remains the lead fix.
     from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
 
-    for persona in ("sdk", "unknown"):
-        prop = _resend_to_proposals(_resend_finding(), persona=persona)[0]
-        assert prop.advise_only is True
-        assert prop.apply_capable is False
-        assert prop.advise_text == "Run /compact."
+    prop = _resend_to_proposals(_resend_finding(), persona="unknown")[0]
+    assert prop.advise_only is True
+    assert prop.apply_capable is False
+    assert prop.advise_text == "Run /compact."
+
+
+def test_resend_sdk_persona_never_sees_compact():
+    # `/compact` is a Claude Code interactive command an SDK caller has no
+    # access to. When a priced cache_control example exists, the advise text
+    # must lead with adopting it instead, never with /compact.
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    prop = _resend_to_proposals(_resend_finding(), persona="sdk")[0]
+    assert prop.advise_only is True
+    assert prop.apply_capable is False
+    assert "/compact" not in prop.advise_text
+    assert "cache_control" in prop.advise_text
+
+
+def test_resend_sdk_persona_without_a_snippet_gets_a_neutral_fallback():
+    # No priced example -> fix_cache_control is empty. The fallback must be
+    # persona-neutral and actionable, and must still never mention /compact.
+    from tokenjam.core.optimize.analyzers.context_resend import RESEND_SDK_TRIM_FIX
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    finding = _resend_finding()
+    finding.fix_cache_control = ""
+    prop = _resend_to_proposals(finding, persona="sdk")[0]
+    assert "/compact" not in prop.advise_text
+    assert prop.advise_text == RESEND_SDK_TRIM_FIX
+    assert prop.one_paste_fix == RESEND_SDK_TRIM_FIX
 
 
 def test_resend_mixed_persona_offers_write_and_keeps_snippet():
@@ -1237,7 +1288,11 @@ def test_resend_mixed_persona_offers_write_and_keeps_snippet():
     # the SDK share keeps its cache_control snippet on `suggestion`, while the
     # one-paste slot carries the claude-code share's right-sizing frontmatter
     # (the offload rule itself is a WRITE on `proposed_fix`, applied not pasted).
-    assert "reasoning_effort:" in prop.one_paste_fix
+    # INVERTED (Critical Rule 23) — see the sibling test: `reasoning_effort` is
+    # not a key Claude Code reads, so asserting its presence pinned a
+    # silently-ignored line into the product.
+    assert "reasoning_effort" not in prop.one_paste_fix
+    assert "model:" in prop.one_paste_fix
     assert "cache_control" not in prop.one_paste_fix
 
 
@@ -1271,8 +1326,18 @@ def test_resend_persona_flows_through_the_report_dispatch():
     # resend adapter (it was the one adapter that didn't take persona).
     from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
 
+    from dataclasses import replace
+
     rep = _report()
-    rep.findings["resend"] = _resend_finding()
+    # Scaled past the $5 write floor (`write_budget.MIN_NET_WRITE_USD`): the
+    # report dispatch runs the write budget, which declines a permanent block
+    # for a 50-cent return, and this test is about persona threading rather
+    # than about whether a rule is worth writing. Tokens move with the dollars
+    # so the implied rate stays inside a real price band (CLAUDE.md rule 28).
+    rep.findings["resend"] = replace(
+        _resend_finding(),
+        past_overspend_usd=60.0, past_overspend_tokens=20_000_000,
+    )
     rep.persona = "claude-code"
     prop = {p.analyzer: p for p in cost_proposals_from_report(rep)}["resend"]
     assert prop.suggestion == "", "report persona must reach the resend adapter"
@@ -1373,19 +1438,16 @@ def test_read_cost_proposals_reports_error_state_before_any_success(tmp_path):
 
 # --- Real-data validation follow-ups: dollar-first headline, sort, formatting -
 
-def test_downsize_agent_row_leaves_monthly_to_the_central_projection():
-    # Reproduces the founder's real "Model over-sizing in claude-code
+def test_downsize_agent_row_carries_the_window_delta_never_the_row_projection():
+    # Reproduces a real "Model over-sizing in claude-code
     # (claude-opus-4-7 to claude-haiku-4-5)" card: a per-agent price row is
     # the path that produced it (_downsize_agent_proposals, not the window-
-    # wide aggregate _report() fixture above exercises). #273: the adapter no
-    # longer self-projects `row.projected_30d_delta_usd` onto
-    # estimated_monthly_usd (that figure is `window_days`-based, computed
-    # inside model_downgrade.py — exactly the per-analyzer self-projection
-    # the approved design forbids for the shared field) — calling the
-    # adapter directly (bypassing `cost_proposals_from_report`'s central
-    # pass) leaves it unset. The evidence paragraph's own "$X per 30 days"
-    # arithmetic disclosure is untouched; it's a plain string built from the
-    # row, independent of this field.
+    # wide aggregate _report() fixture above exercises). The card's one dollar
+    # field is the row's OBSERVED window delta; `row.projected_30d_delta_usd`
+    # (a 30-day projection computed inside model_downgrade.py) must never
+    # reach it. The evidence paragraph's own "$X per 30 days" arithmetic
+    # disclosure is untouched; it's a plain string built from the row, and it
+    # is labelled as a projection where it appears.
     from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
     from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
 
@@ -1393,6 +1455,7 @@ def test_downsize_agent_row_leaves_monthly_to_the_central_projection():
         "session_id": f"s{i}", "agent_id": "claude-code", "provider": "anthropic",
         "model": "claude-opus-4-7", "alt_model": "claude-haiku-4-5",
         "input_tokens": 1, "output_tokens": 48, "cache_tokens": 3142, "cache_write_tokens": 6716,
+        "started_at": utcnow() - timedelta(days=1),
     } for i in range(32)]
     rows = build_agent_price_rows(candidates, window_days=30.0)
     assert rows and rows[0].delta_usd > 0
@@ -1405,8 +1468,9 @@ def test_downsize_agent_row_leaves_monthly_to_the_central_projection():
     props = _downsize_agent_proposals(_Finding(), config=None)
     assert len(props) == 1
     prop = props[0]
-    assert prop.estimated_monthly_usd is None
-    assert prop.estimated_recoverable_usd == rows[0].delta_usd
+    assert prop.past_overspend_usd == rows[0].delta_usd
+    assert not hasattr(prop, "estimated_monthly_usd")
+    assert prop.past_overspend_usd != rows[0].projected_30d_delta_usd
     # The evidence paragraph's own "$X per 30 days" arithmetic line still
     # cites the row's own projection, unaffected by the CostProposal field.
     monthly = rows[0].projected_30d_delta_usd
@@ -1420,7 +1484,7 @@ def _downsize_finding():
         candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
         alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
         examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
-        estimated_recoverable_usd=3.0, percent_of_tokens=35.0,
+        past_overspend_usd=3.0, percent_of_tokens=35.0,
         estimate_basis="downsize basis",
     )
 
@@ -1470,6 +1534,7 @@ def test_downsize_agent_card_apply_blocked_gets_cc_lever_for_claude_code():
         "session_id": f"s{i}", "agent_id": "claude-code", "provider": "anthropic",
         "model": "claude-opus-4-7", "alt_model": "claude-haiku-4-5",
         "input_tokens": 1, "output_tokens": 48, "cache_tokens": 3142, "cache_write_tokens": 6716,
+        "started_at": utcnow() - timedelta(days=1),
     } for i in range(32)]
     rows = build_agent_price_rows(candidates, window_days=30.0)
 
@@ -1481,13 +1546,26 @@ def test_downsize_agent_card_apply_blocked_gets_cc_lever_for_claude_code():
     props = _downsize_agent_proposals(_Finding(), config=None, persona="claude-code")
     assert len(props) == 1
     p = props[0]
-    assert "Applying it here is not on offer" in p.advise_text
     assert "switch your own interactive model" in p.advise_text
+    # INVERTED (Critical Rule 23). This used to assert the generic
+    # "Applying it here is not on offer:" wording, which arrived attached to a
+    # redeploy-shaped offer. On Claude Code `agent_id` is
+    # `claude-code-<cwd-basename>` — a PROJECT DIRECTORY with ephemeral
+    # sessions, no process and no model id written down — so there is nothing
+    # to redeploy or restart, and naming three things that do not exist reads
+    # as the product not understanding the user's setup.
+    assert "redeploy" not in p.advise_text.lower()
+    assert "restart the agent" not in p.advise_text.lower()
+    assert "project directory, not a deployed service" in p.advise_text
+    # The OBSERVATION is untouched by that gate (Critical Rule 32).
+    assert p.past_overspend_usd is not None and p.past_overspend_usd > 0
 
-    # sdk/unknown never get the CC lever appended.
+    # sdk/unknown never get the CC lever appended, and DO keep the redeploy
+    # instruction, which is correct for a real deployed service.
     for persona in ("sdk", "unknown"):
         p2 = _downsize_agent_proposals(_Finding(), config=None, persona=persona)[0]
         assert "switch your own interactive model" not in p2.advise_text
+        assert "redeploy" in p2.one_paste_fix.lower()
 
 
 # --- Persona gating: placement (batch) ---------------------------------------
@@ -1505,8 +1583,8 @@ def _placement_finding():
     )
     return BatchPlacementFinding(
         candidates=[candidate], window_cost_usd=10.0, candidate_cost_usd=4.0,
-        percent_of_window_cost=40.0, estimated_recoverable_usd=2.0,
-        estimated_recoverable_tokens=200_000, estimate_basis="placement basis",
+        percent_of_window_cost=40.0, past_overspend_usd=2.0,
+        past_overspend_tokens=200_000, estimate_basis="placement basis",
     )
 
 
@@ -1547,44 +1625,112 @@ def test_placement_gated_by_report_persona_through_the_dispatcher():
     assert "placement" in analyzers
 
 
-def test_backfill_legacy_monthly_fields_fills_only_absent_keys():
-    from tokenjam.core.optimize.cost_proposals import backfill_legacy_monthly_fields
+def test_a_pre_collapse_cache_entry_migrates_to_the_one_canonical_field():
+    from tokenjam.core.optimize.cost_proposals import (
+        backfill_legacy_past_overspend_fields,
+    )
 
-    # A cache entry written before the monthly fields existed on
-    # `CostProposal`: the keys are simply absent from the dict, not
-    # present-and-None.
+    # Written before the collapse: the same quantity under its forward-framed
+    # name, plus its paced twin. The first migrates; the second is dropped.
     legacy = {
         "signature": "cost:downsize:claude-code",
         "estimated_recoverable_usd": 36.65,
         "estimated_recoverable_tokens": 10_144_061,
+        "estimated_monthly_usd": 39.27,
+        "estimated_monthly_tokens": 10_869_075,
     }
-    out = backfill_legacy_monthly_fields(legacy)
-    assert out["estimated_monthly_usd"] == 36.65
-    assert out["estimated_monthly_tokens"] == 10_144_061
-    assert legacy == {  # the input dict itself is never mutated
-        "signature": "cost:downsize:claude-code",
-        "estimated_recoverable_usd": 36.65,
-        "estimated_recoverable_tokens": 10_144_061,
-    }
-
-
-def test_backfill_legacy_monthly_fields_never_overwrites_a_fresh_value():
-    from tokenjam.core.optimize.cost_proposals import backfill_legacy_monthly_fields
-
-    fresh = {
-        "estimated_recoverable_usd": 36.65, "estimated_monthly_usd": 36.65,
-        "estimated_recoverable_tokens": 0, "estimated_monthly_tokens": None,
-    }
-    out = backfill_legacy_monthly_fields(fresh)
-    assert out["estimated_monthly_usd"] == 36.65   # key was present -> untouched
-    assert out["estimated_monthly_tokens"] is None  # key was present (even as None) -> untouched
-
-
-def test_backfill_legacy_monthly_fields_no_op_when_no_window_figure_either():
-    # An advise-only analyzer with no dollar dimension at all (e.g. subagent
-    # rubric): both fields stay absent, never fabricated from nothing.
-    from tokenjam.core.optimize.cost_proposals import backfill_legacy_monthly_fields
-
-    out = backfill_legacy_monthly_fields({"signature": "cost:subagent:bar"})
+    out = backfill_legacy_past_overspend_fields(legacy)
+    assert out["past_overspend_usd"] == 36.65
+    assert out["past_overspend_tokens"] == 10_144_061
+    assert "estimated_recoverable_usd" not in out
     assert "estimated_monthly_usd" not in out
     assert "estimated_monthly_tokens" not in out
+    assert legacy["estimated_recoverable_usd"] == 36.65  # input never mutated
+
+
+def test_a_current_cache_entry_is_left_exactly_as_written():
+    from tokenjam.core.optimize.cost_proposals import (
+        backfill_legacy_past_overspend_fields,
+    )
+
+    fresh = {
+        "signature": "cost:downsize:claude-code",
+        "past_overspend_usd": 36.65, "past_overspend_tokens": 0,
+        "past_overspend_basis": "downsize basis. Observed over the analyzed window",
+    }
+    assert backfill_legacy_past_overspend_fields(fresh) == fresh
+
+
+def test_an_entry_with_no_dollar_dimension_never_gets_one_fabricated():
+    # An advise-only analyzer with no dollar dimension at all (e.g. subagent
+    # rubric): the canonical keys are PRESENT but None — "not measured", never
+    # a 0.0 that reads as "worth nothing".
+    from tokenjam.core.optimize.cost_proposals import (
+        backfill_legacy_past_overspend_fields,
+    )
+
+    out = backfill_legacy_past_overspend_fields({"signature": "cost:subagent:bar"})
+    assert out["past_overspend_usd"] is None
+    assert out["past_overspend_tokens"] is None
+
+
+def _untyped_per_agent_downgrade():
+    """A `downgrade` finding whose `per_agent` rows are plain dicts — exactly
+    what `report_from_dict` produced before the row type was declared. Every
+    `row.delta_usd` inside the adapter then raises."""
+    from tokenjam.core.optimize.analyzers.model_downgrade import DowngradeFinding
+
+    return DowngradeFinding(
+        candidate_sessions=5, total_sessions=50,
+        actual_cost_usd=10.0, alternative_cost_usd=4.0,
+        monthly_savings_usd=6.0, percent_of_sessions=10.0,
+        examples=[], suggestions={"claude-opus-5": "claude-sonnet-5"},
+        past_overspend_usd=6.0,
+        per_agent=[{"agent_id": "a", "delta_usd": 6.0, "provider": "anthropic"}],
+    )
+
+
+# --- a skipped analyzer is a hole in the headline, never a silent one ------- #
+
+def test_an_adapter_that_raises_is_reported_rather_than_silently_dropped():
+    """The inbox surviving one bad analyzer is right; surviving it INVISIBLY is
+    what let a whole analyzer's figure disappear from the headline while the
+    Dashboard tile went on publishing it.
+
+    The concrete incident: a stored report rehydrated `downgrade.per_agent` as
+    plain dicts, `row.delta_usd` raised, and the broad `except` around each
+    adapter dropped every downsize row. The total came out smaller and looked
+    complete — no error, no empty state, nothing to notice.
+    """
+    from tokenjam.core.optimize.cost_proposals import (
+        _adapter_failure_entries,
+        cost_proposals_from_report,
+    )
+
+    report = _report()
+    report.downgrade = _untyped_per_agent_downgrade()
+
+    seen: dict[str, str] = {}
+    proposals = cost_proposals_from_report(
+        report, on_adapter_error=lambda n, e: seen.__setitem__(n, f"{type(e).__name__}: {e}"),
+    )
+
+    assert "downsize" in seen, (
+        "an adapter raised and nothing recorded which analyzer it was"
+    )
+    assert not [p for p in proposals if p.analyzer == "downsize"]
+    # ...and the failure becomes a disclosure with NO figure: what it would
+    # have contributed is exactly what could not be computed.
+    entry = _adapter_failure_entries(seen)["downsize"]
+    assert entry["past_overspend_usd"] is None
+    assert "unknown, not zero" in entry["note"]
+
+
+def test_the_bare_skip_still_works_for_a_caller_with_nowhere_to_report():
+    """`on_adapter_error` is optional: a caller that cannot disclose anything
+    still gets a live inbox rather than an exception."""
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    report = _report()
+    report.downgrade = _untyped_per_agent_downgrade()
+    assert not [p for p in cost_proposals_from_report(report) if p.analyzer == "downsize"]

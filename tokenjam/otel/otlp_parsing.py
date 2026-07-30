@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from tokenjam.core.ingest import SpanRejectedError
 from tokenjam.core.models import NormalizedSpan, SpanKind, SpanStatus
 from tokenjam.otel.semconv import (
     GenAIAttributes,
@@ -104,10 +105,20 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
     # Parse timestamps (OTLP uses nanoseconds as strings)
     start_ns = int(raw.get("startTimeUnixNano", 0))
     end_ns = int(raw.get("endTimeUnixNano", 0))
-    start_time = (
-        datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc)
-        if start_ns else datetime.now(tz=timezone.utc)
-    )
+    # A span with no start timestamp is REJECTED, not repaired. Both
+    # plausible-looking substitutes are worse than declining it: the
+    # `datetime.now()` this used to do dates the row to when tj happened to
+    # receive it, which reads as a real observation and silently moves
+    # historical work into the present window, and a zero epoch dates it to 1970
+    # and drags every MIN() and day union back with it. Both callers already
+    # count rejections — `api/routes/spans.py` returns them in the 200 body, and
+    # `ingest_adapters/otlp.py` tallies `spans_rejected` — so declining is
+    # visible while a fabricated timestamp never was.
+    if not start_ns:
+        raise SpanRejectedError(
+            "span carries no startTimeUnixNano, so it has no observed time"
+        )
+    start_time = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc)
     end_time = (
         datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc)
         if end_ns else None
@@ -216,6 +227,22 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
         service_instance_id=attrs.get(ResourceAttributes.SERVICE_INSTANCE_ID),
         run_id=attrs.get(TjAttributes.RUN_ID),
         parent_session_id=attrs.get(TjAttributes.PARENT_SESSION_ID),
+        # -- SDK cost-attribution dimensions --
+        # environment/service_version/commit_sha are typically resource-level
+        # (set once per process/deployment); tenant_id/feature/prompt template
+        # identity are typically span-level (per call). Both merge into `attrs`
+        # above (span wins on conflict), so a producer may set either at
+        # whichever level fits its instrumentation.
+        tenant_id=attrs.get(TjAttributes.TENANT_ID),
+        feature=attrs.get(TjAttributes.FEATURE),
+        environment=attrs.get(ResourceAttributes.DEPLOYMENT_ENVIRONMENT_NAME),
+        service_version=attrs.get(ResourceAttributes.SERVICE_VERSION),
+        commit_sha=(
+            attrs.get(ResourceAttributes.VCS_REF_HEAD_REVISION)
+            or attrs.get(ResourceAttributes.VCS_REPOSITORY_REF_REVISION)
+        ),
+        prompt_template_id=attrs.get(TjAttributes.PROMPT_TEMPLATE_ID),
+        prompt_template_version=attrs.get(TjAttributes.PROMPT_TEMPLATE_VERSION),
     )
 
 

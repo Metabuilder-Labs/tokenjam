@@ -76,14 +76,14 @@ class ProxyObserver:
                 obs.reason, forwarded,
                 (obs.policy or {}).get("overall_action"),
             )
-        except Exception:  # noqa: BLE001 — recording must never break pass-through
+        except Exception:  # recording must never break pass-through
             pass
         # Durable sink (#221) — persist the decision + savings ledger. Best-effort:
         # never let a persistence failure break proxy pass-through.
         if self._sink is not None:
             try:
                 self._sink(obs)
-            except Exception:  # noqa: BLE001
+            except Exception:  # 1
                 logger.exception("proxy observation sink failed (ignored)")
         return obs
 

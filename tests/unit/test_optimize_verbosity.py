@@ -163,7 +163,7 @@ def test_output_input_ratio_is_descriptive_not_the_flag(db):
 # -- Recoverable-savings contract (#111) --
 
 def test_recoverable_is_output_above_baseline_at_output_rates(db):
-    """estimated_recoverable_usd = over-baseline output priced at OUTPUT rates."""
+    """past_overspend_usd = over-baseline output priced at OUTPUT rates."""
     from tokenjam.core.pricing import get_rates
 
     for i in range(MIN_COHORT_SESSIONS):
@@ -172,11 +172,11 @@ def test_recoverable_is_output_above_baseline_at_output_rates(db):
     _seed_session(db, "big", output_tokens=200 + over, i=50, model="claude-haiku-4-5")
 
     finding = _run(db)
-    assert finding.estimated_recoverable_tokens == over
+    assert finding.past_overspend_tokens == over
     rates = get_rates("anthropic", "claude-haiku-4-5")
     assert rates is not None
     expected = round((over / 1_000_000) * rates.output_per_mtok, 6)
-    assert finding.estimated_recoverable_usd == pytest.approx(expected)
+    assert finding.past_overspend_usd == pytest.approx(expected)
     assert finding.estimate_confidence == "heuristic"
     assert finding.estimate_basis  # non-empty basis surfaced
 
@@ -184,8 +184,8 @@ def test_recoverable_is_output_above_baseline_at_output_rates(db):
 def test_empty_window_contributes_no_recoverable(db):
     """A dead telemetry window yields a finding with no recoverable figure."""
     finding = _run(db)
-    assert finding.estimated_recoverable_usd is None
-    assert finding.estimated_recoverable_tokens is None
+    assert finding.past_overspend_usd is None
+    assert finding.past_overspend_tokens is None
     assert finding.candidates == []
 
 
@@ -230,8 +230,8 @@ def test_report_round_trips(db):
     restored = report_from_dict(d)
     orig = report.findings["verbosity"]
     back = restored.findings["verbosity"]
-    assert back.estimated_recoverable_tokens == orig.estimated_recoverable_tokens
-    assert back.estimated_recoverable_usd == orig.estimated_recoverable_usd
+    assert back.past_overspend_tokens == orig.past_overspend_tokens
+    assert back.past_overspend_usd == orig.past_overspend_usd
     assert back.suggested_max_tokens == orig.suggested_max_tokens
     assert len(back.candidates) == len(orig.candidates)
     assert back.candidates[0].session_id == orig.candidates[0].session_id

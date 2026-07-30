@@ -40,7 +40,7 @@ class TestUsagePathPrompt:
 
     @pytest.mark.parametrize(
         "choice,expected",
-        [(1, "claude_code"), (2, "codex"), (3, "sdk"), (4, "combination")],
+        [(1, "claude-code"), (2, "codex"), (3, "sdk"), (4, "combination")],
     )
     def test_returns_selected_key(self, choice, expected, monkeypatch):
         import click as _click
@@ -64,7 +64,7 @@ def _routing_stubs(monkeypatch):
     )
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._onboard_claude_code",
-        lambda *a, **k: called.__setitem__("claude_code", True),
+        lambda *a, **k: called.__setitem__("claude-code", True),
     )
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._onboard_codex",
@@ -79,7 +79,7 @@ def _routing_stubs(monkeypatch):
 
 @pytest.mark.parametrize(
     "answer,key",
-    [("1", "claude_code"), ("2", "codex"), ("4", "combination")],
+    [("1", "claude-code"), ("2", "codex"), ("4", "combination")],
 )
 def test_bare_onboard_routes_to_selected_path(_routing_stubs, answer, key):
     res = CliRunner().invoke(cmd_onboard, [], input=f"{answer}\n", obj={})
@@ -121,9 +121,9 @@ def test_bare_onboard_sdk_choice_falls_through_to_generic(_routing_stubs, monkey
     )
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        # path=3(sdk) → plan prompt(1=api) → api ceiling(0) → daily budget(0)
+        # path=3(sdk) → daily budget(1) → analysis span(2=90d) → ceiling(0)
         res = runner.invoke(
-            cmd_onboard, ["--no-daemon"], input="3\n1\n0\n", obj={},
+            cmd_onboard, ["--no-daemon"], input="3\n1\n2\n0\n", obj={},
         )
     assert res.exit_code == 0, res.output
     # No per-path onboarder fired.
@@ -226,7 +226,7 @@ class TestSetupCompleteHome:
         assert "last 30 days" in out
         # No second command list here: the onboard flows print their own
         # curated next-steps block just above this close — a duplicate
-        # next-best-actions list was founder-flagged (2026-07). Just the
+        # next-best-actions list was flagged as redundant (2026-07). Just the
         # help pointer.
         assert "tj optimize" not in out
         assert "tj --help" in out
@@ -614,7 +614,9 @@ class TestCombinationBillingHoistedUpFront:
         with runner.isolated_filesystem(temp_dir=tmp_path):
             # path=4 (combination) → Claude yes → Codex yes → SDK no →
             # Claude plan 3 (max_5x) → OpenAI plan 2 (plus) → project name →
-            # backfill scope 1 (recent). Subscription tiers skip ceiling/budget.
+            # analysis span 1 (30d). #643: the separate backfill-scope menu is
+            # gone; the single "how far back" question drives the backfill.
+            # Subscription tiers skip ceiling/budget.
             res = runner.invoke(
                 cmd_onboard, ["--no-daemon"],
                 input="4\ny\ny\nn\n3\n2\nmyproj\n1\n", obj={},
@@ -625,7 +627,7 @@ class TestCombinationBillingHoistedUpFront:
             "How do you pay for Claude?",
             "How do you pay for OpenAI / Codex?",
             "Project name",
-            "Backfill your Claude Code history",
+            "How far back should tj analyze?",
             "::CODEX_LEG_RAN::",
         ]
         indices = [out.index(s) for s in order]

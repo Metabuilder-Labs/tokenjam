@@ -212,11 +212,76 @@ def test_delete_spans_before_cutoff(db):
     db.insert_span(span_new)
 
     cutoff = now - timedelta(days=90)
-    deleted = db.delete_spans_before(cutoff)
-    assert deleted == 1
+    spans_deleted, sessions_deleted = db.delete_spans_before(cutoff)
+    assert spans_deleted == 1
 
     remaining = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()
     assert remaining[0] == 1
+    # The session straddles the cutoff and still has a live span, so it stays:
+    # a session is orphaned by the delete only once it has NO spans left.
+    assert sessions_deleted == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+
+
+def test_delete_spans_before_cutoff_takes_the_sessions_it_orphans(db):
+    """Deleting only spans left the parent sessions asserting a day had data.
+
+    `core/data_span` unions `sessions.started_at` into the day set it measures
+    the available span from, so every orphan went on claiming a day carried data
+    after the data for that day was destroyed — the deletion skewed the measure
+    of what survived it.
+    """
+    _insert_agent(db)
+    now = utcnow()
+    old = now - timedelta(days=100)
+
+    aged_out = make_session(started_at=old, ended_at=old + timedelta(minutes=1))
+    db.upsert_session(aged_out)
+    db.insert_span(make_llm_span(session_id=aged_out.session_id, start_time=old))
+
+    live = make_session()
+    db.upsert_session(live)
+    db.insert_span(make_llm_span(
+        session_id=live.session_id, start_time=now - timedelta(days=1),
+    ))
+
+    spans_deleted, sessions_deleted = db.delete_spans_before(now - timedelta(days=90))
+    assert (spans_deleted, sessions_deleted) == (1, 1)
+
+    surviving = [
+        r[0] for r in db.conn.execute("SELECT session_id FROM sessions").fetchall()
+    ]
+    assert surviving == [live.session_id]
+
+
+def test_delete_spans_before_cutoff_takes_an_aged_out_session_with_no_spans(db):
+    """A pre-cutoff session with no spans is aged-out history like any other.
+
+    Left behind it would go on asserting, to `core/data_span`, that a day
+    beyond the retention horizon carried data.
+    """
+    _insert_agent(db)
+    now = utcnow()
+    empty = make_session(
+        started_at=now - timedelta(days=100),
+        ended_at=now - timedelta(days=100) + timedelta(minutes=1),
+    )
+    db.upsert_session(empty)
+
+    spans_deleted, sessions_deleted = db.delete_spans_before(now - timedelta(days=90))
+    assert (spans_deleted, sessions_deleted) == (0, 1)
+    assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+
+def test_delete_spans_before_cutoff_keeps_a_live_session_with_no_spans_yet(db):
+    """An open session that has not written a span is not aged out."""
+    _insert_agent(db)
+    now = utcnow()
+    db.upsert_session(make_session(started_at=now, ended_at=None))
+
+    spans_deleted, sessions_deleted = db.delete_spans_before(now - timedelta(days=90))
+    assert (spans_deleted, sessions_deleted) == (0, 0)
+    assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
 
 
 # -- Traces --
@@ -237,6 +302,97 @@ def test_get_traces_with_filters(db):
     # Filter by different agent returns nothing
     traces = db.get_traces(TraceFilters(agent_id="other-agent"))
     assert len(traces) == 0
+
+
+# -- Trace cost ranking --
+
+def test_get_traces_sort_cost_orders_highest_first(db):
+    _insert_agent(db)
+    now = utcnow()
+    cheap = make_llm_span(agent_id="test-agent", cost_usd=0.01, trace_id="cheap", start_time=now)
+    pricey = make_llm_span(
+        agent_id="test-agent", cost_usd=5.0, trace_id="pricey",
+        start_time=now - timedelta(minutes=1),  # older, so "recent" sort would put it 2nd
+    )
+    db.insert_span(cheap)
+    db.insert_span(pricey)
+
+    traces = db.get_traces(TraceFilters(sort="cost"))
+    assert [t.trace_id for t in traces] == ["pricey", "cheap"]
+
+    # Default ("recent") sort is unaffected — reverse-chronological.
+    traces = db.get_traces(TraceFilters())
+    assert [t.trace_id for t in traces] == ["cheap", "pricey"]
+
+
+def test_get_traces_min_cost_usd_filters_and_matches_count(db):
+    _insert_agent(db)
+    now = utcnow()
+    for i, cost in enumerate([0.01, 1.0, 10.0]):
+        db.insert_span(make_llm_span(
+            agent_id="test-agent", cost_usd=cost, trace_id=f"t{i}", start_time=now,
+        ))
+
+    traces = db.get_traces(TraceFilters(min_cost_usd=1.0))
+    assert {t.trace_id for t in traces} == {"t1", "t2"}
+    assert db.count_traces(TraceFilters(min_cost_usd=1.0)) == 2
+    assert db.count_traces(TraceFilters()) == 3
+
+
+def test_get_traces_flags_statistical_cost_outlier(db):
+    """Tukey's-fence rule: Q3 + 1.5*IQR over priced traces in the window."""
+    _insert_agent(db)
+    now = utcnow()
+    # 7 traces at $1 + 1 trace at $50 -> the $50 trace is a clear outlier once
+    # there are enough priced traces to trust the quartiles.
+    for i in range(7):
+        db.insert_span(make_llm_span(
+            agent_id="test-agent", cost_usd=1.0, trace_id=f"cheap-{i}", start_time=now,
+        ))
+    db.insert_span(make_llm_span(
+        agent_id="test-agent", cost_usd=50.0, trace_id="spike", start_time=now,
+    ))
+
+    traces = {t.trace_id: t for t in db.get_traces(TraceFilters())}
+    assert traces["spike"].is_outlier is True
+    assert all(not t.is_outlier for tid, t in traces.items() if tid != "spike")
+
+    stats = db.get_trace_cost_stats(TraceFilters())
+    assert stats.sample_size == 8
+    assert stats.threshold_usd is not None
+    assert stats.q3_usd is not None and stats.q1_usd is not None
+
+
+def test_get_traces_outlier_requires_minimum_sample(db):
+    """Below MIN_OUTLIER_SAMPLE priced traces, nothing is flagged — a handful
+    of traces can't support a reliable quartile-based rule."""
+    _insert_agent(db)
+    now = utcnow()
+    db.insert_span(make_llm_span(agent_id="test-agent", cost_usd=1.0, trace_id="a", start_time=now))
+    db.insert_span(make_llm_span(agent_id="test-agent", cost_usd=100.0, trace_id="b", start_time=now))
+
+    traces = db.get_traces(TraceFilters())
+    assert all(not t.is_outlier for t in traces)
+
+    stats = db.get_trace_cost_stats(TraceFilters())
+    assert stats.sample_size == 2
+    assert stats.threshold_usd is None
+
+
+def test_get_traces_zero_cost_trace_never_flagged_outlier(db):
+    """A $0/unpriced trace is not an 'outlier' even in a window with a real
+    spike — is_outlier only ever fires on a trace with positive cost."""
+    _insert_agent(db)
+    now = utcnow()
+    for i in range(7):
+        db.insert_span(make_llm_span(
+            agent_id="test-agent", cost_usd=1.0, trace_id=f"cheap-{i}", start_time=now,
+        ))
+    db.insert_span(make_llm_span(agent_id="test-agent", cost_usd=50.0, trace_id="spike", start_time=now))
+    db.insert_span(make_llm_span(agent_id="test-agent", cost_usd=0.0, trace_id="free", start_time=now))
+
+    traces = {t.trace_id: t for t in db.get_traces(TraceFilters())}
+    assert traces["free"].is_outlier is False
 
 
 # -- Alerts --
@@ -440,6 +596,108 @@ def test_get_cost_summary_by_tool(db):
     groups = {r.group: r.call_count for r in results}
     assert groups == {"Read": 3, "Bash": 2}
     assert "None" not in groups
+
+
+# -- SDK cost-attribution dimensions (#SDK dashboard shape) --
+
+def test_get_cost_summary_by_tenant(db):
+    """`group_by="tenant"` sums spend per tenant_id, biggest spender first, and
+    excludes spans that never set tenant_id (degrade-honestly contract — an
+    unattributed span must not fold into a misleading bucket)."""
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=5.0, tenant_id="acme-corp",
+        session_id=session.session_id,
+    ))
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=1.0, tenant_id="small-co",
+        session_id=session.session_id,
+    ))
+    # No tenant_id set — must be excluded from the grouping, not folded into
+    # a "(none)" bucket.
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=100.0,
+        session_id=session.session_id,
+    ))
+
+    results = db.get_cost_summary(CostFilters(group_by="tenant"))
+    groups = {r.group: r.cost_usd for r in results}
+    assert set(groups) == {"acme-corp", "small-co"}
+    assert abs(groups["acme-corp"] - 5.0) < 0.001
+    assert abs(groups["small-co"] - 1.0) < 0.001
+    # Biggest spender first.
+    assert results[0].group == "acme-corp"
+
+
+def test_get_cost_summary_by_feature_environment_prompt_version(db):
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=2.0,
+        feature="support-triage", environment="production",
+        prompt_template_version="3",
+        session_id=session.session_id,
+    ))
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=1.0,
+        feature="onboarding", environment="staging",
+        prompt_template_version="1",
+        session_id=session.session_id,
+    ))
+
+    by_feature = {r.group: r.cost_usd for r in db.get_cost_summary(CostFilters(group_by="feature"))}
+    assert abs(by_feature["support-triage"] - 2.0) < 0.001
+    assert abs(by_feature["onboarding"] - 1.0) < 0.001
+
+    by_env = {r.group: r.cost_usd for r in db.get_cost_summary(CostFilters(group_by="environment"))}
+    assert abs(by_env["production"] - 2.0) < 0.001
+    assert abs(by_env["staging"] - 1.0) < 0.001
+
+    by_version = {r.group: r.cost_usd for r in db.get_cost_summary(CostFilters(group_by="prompt_version"))}
+    assert abs(by_version["3"] - 2.0) < 0.001
+    assert abs(by_version["1"] - 1.0) < 0.001
+
+
+def test_get_cost_summary_tenant_equality_filter(db):
+    """The tenant_id/feature/environment/prompt_version equality filters scope
+    the summary independently of group_by (e.g. a per-model breakdown for one
+    tenant's spend)."""
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=3.0, tenant_id="acme-corp",
+        session_id=session.session_id,
+    ))
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=7.0, tenant_id="other-co",
+        session_id=session.session_id,
+    ))
+
+    results = db.get_cost_summary(CostFilters(group_by="model", tenant_id="acme-corp"))
+    assert len(results) == 1
+    assert abs(results[0].cost_usd - 3.0) < 0.001
+    assert results[0].model == "claude-haiku-4-5"
+
+
+def test_get_cost_summary_returns_empty_when_dimension_never_set(db):
+    """An attribution dim with zero data in the window returns an EMPTY list —
+    never a misleading '(none)' bucket — so the API/UI can render an honest
+    empty state distinct from 'zero spend'."""
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=9.0, session_id=session.session_id,
+    ))
+
+    assert db.get_cost_summary(CostFilters(group_by="tenant")) == []
 
 
 # -- InMemoryBackend resets --

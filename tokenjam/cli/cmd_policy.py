@@ -61,7 +61,7 @@ class PolicyRow:
 
 @click.group("policy", invoke_without_command=False)
 def cmd_policy() -> None:
-    """Unified view of policy-adjacent configuration (read-only preview)."""
+    """View policy-related config in one place."""
 
 
 @cmd_policy.command("list")
@@ -121,7 +121,7 @@ def _fetch_proxy_json(config: TjConfig, path: str) -> dict | None:
         resp = httpx.get(url, timeout=2.0)
         if resp.status_code == 200:
             return resp.json()
-    except Exception:  # noqa: BLE001 — proxy may simply be down
+    except Exception:  # proxy may simply be down
         return None
     return None
 
@@ -137,7 +137,7 @@ def _read_decisions_from_db(config: TjConfig, since, limit: int):
     from tokenjam.proxy.audit import decision_to_display_dict, reconcile_savings
     try:
         db = open_db(config.storage)
-    except Exception:  # noqa: BLE001 — locked / missing → caller falls back
+    except Exception:  # locked / missing → caller falls back
         return None
     try:
         recs = db.get_policy_decisions(PolicyDecisionFilters(since=since, limit=limit))
@@ -247,6 +247,9 @@ def _print_savings_summary(savings: dict) -> None:
         f"[dim]({savings.get('decisions', 0)} decisions, label={savings.get('label')})[/dim]"
     )
     console.print(f"[dim]{escape(savings.get('disclaimer', ''))}[/dim]")
+    console.print(
+        "[dim]Run [bold]tj optimize[/bold] for detail on recoverable savings.[/dim]"
+    )
 
 
 def _collect_rows(config: TjConfig) -> list[PolicyRow]:
@@ -420,12 +423,3 @@ def _capture_rows(capture: CaptureConfig) -> list[PolicyRow]:
         f"tool_outputs={str(capture.tool_outputs).lower()}",
     ]
     return [PolicyRow("capture", ", ".join(parts), "[capture]")]
-
-
-def _exposed_for_tests() -> dict[str, Any]:
-    """Expose internals to unit tests without polluting the public surface."""
-    return {
-        "collect_rows": _collect_rows,
-        "PolicyRow": PolicyRow,
-        "PREVIEW_NOTE": PREVIEW_NOTE,
-    }

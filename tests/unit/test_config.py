@@ -4,9 +4,12 @@ from pathlib import Path
 import pytest
 
 from tokenjam.core.config import (
-    find_config_file, load_config, _parse, _serialise, TjConfig, AgentConfig,
-    BudgetConfig, DefaultsConfig, SensitiveAction, SecurityConfig, CaptureConfig,
-    OptimizeConfig, StorageConfig, resolve_effective_budget, validate_budget_value,
+    find_config_file, load_config, resolve_config_path, _parse, _serialise,
+    TjConfig, AgentConfig, BudgetConfig, DefaultsConfig, SensitiveAction,
+    SecurityConfig, CaptureConfig, OptimizeConfig, StorageConfig,
+    CodingGroupConfig, GroupBudgetConfig,
+    resolve_effective_budget, resolve_group_budget,
+    validate_budget_value, validate_cycle_start_day,
 )
 
 
@@ -57,6 +60,57 @@ class TestFindConfigFile:
             tmp_path / ".config" / "tj" / "config.toml",
         ])
         assert find_config_file() is None
+
+
+class TestResolveConfigPath:
+    """resolve_config_path is the single source of truth every call site (CLI
+    writers, `tj doctor`, `tj mcp`, the MCP server) must go through so config
+    discovery honors TJ_CONFIG the same way load_config does -- a bare
+    find_config_file() call ignores TJ_CONFIG entirely."""
+
+    def test_honors_tj_config_env_var(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "proj.toml"
+        cfg.write_bytes(b'version = "1"\n')
+        monkeypatch.setenv("TJ_CONFIG", str(cfg))
+        assert resolve_config_path() == cfg
+
+    def test_explicit_override_beats_tj_config_env_var(self, tmp_path, monkeypatch):
+        env_cfg = tmp_path / "env.toml"
+        env_cfg.write_bytes(b'version = "1"\n')
+        explicit_cfg = tmp_path / "explicit.toml"
+        explicit_cfg.write_bytes(b'version = "1"\n')
+        monkeypatch.setenv("TJ_CONFIG", str(env_cfg))
+        assert resolve_config_path(str(explicit_cfg)) == explicit_cfg
+
+    def test_falls_back_to_search_paths_when_tj_config_unset(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TJ_CONFIG", raising=False)
+        import tokenjam.core.config as cfg_mod
+        local_config = tmp_path / ".tj" / "config.toml"
+        local_config.parent.mkdir(parents=True)
+        local_config.write_bytes(b'version = "1"\n')
+        monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
+            Path("tokenjam.toml"),
+            Path(".tj/config.toml"),
+            tmp_path / ".config" / "tj" / "config.toml",
+        ])
+        assert resolve_config_path() == Path(".tj/config.toml")
+
+    def test_raises_when_tj_config_points_at_missing_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TJ_CONFIG", str(tmp_path / "nope.toml"))
+        with pytest.raises(FileNotFoundError, match="Config file not found"):
+            resolve_config_path()
+
+    def test_returns_none_when_nothing_discoverable(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TJ_CONFIG", raising=False)
+        import tokenjam.core.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
+            Path("tokenjam.toml"),
+            Path(".tj/config.toml"),
+            tmp_path / ".config" / "tj" / "config.toml",
+        ])
+        assert resolve_config_path() is None
 
 
 class TestLoadConfig:
@@ -379,6 +433,88 @@ class TestResolveEffectiveBudget:
         assert eff.session_usd == 5.0
 
 
+class TestCodingAgentGroupBudget:
+    """[coding_agents.<group_id>.budget] — daily-only ceilings for a coding
+    TOOL group ("claude-code" / "codex"), a separate top-level TOML table
+    from [agents.*] so a group id like "claude-code" never collides with a
+    literal per-agent [agents.claude-code] entry."""
+
+    def test_group_roundtrip(self):
+        config = TjConfig(
+            version="1",
+            coding_agents={
+                "claude-code": CodingGroupConfig(budget=GroupBudgetConfig(daily_usd=50.0)),
+                "codex": CodingGroupConfig(budget=GroupBudgetConfig(daily_usd=20.0)),
+            },
+        )
+        serialised = _serialise(config)
+        assert serialised["coding_agents"]["claude-code"]["budget"]["daily_usd"] == 50.0
+        restored = _parse(serialised)
+        assert restored.coding_agents["claude-code"].budget.daily_usd == 50.0
+        assert restored.coding_agents["codex"].budget.daily_usd == 20.0
+
+    def test_absent_coding_agents_section_parses_empty(self):
+        assert _parse({"version": "1"}).coding_agents == {}
+
+    def test_group_namespace_does_not_collide_with_bare_agent_of_same_name(self):
+        """A literal [agents.claude-code] entry (bare agent_id) and a
+        [coding_agents.claude-code] group cap must coexist independently."""
+        raw = {
+            "version": "1",
+            "agents": {"claude-code": {"description": "literal bare agent"}},
+            "coding_agents": {"claude-code": {"budget": {"daily_usd": 42.0}}},
+        }
+        config = _parse(raw)
+        assert config.agents["claude-code"].description == "literal bare agent"
+        assert config.coding_agents["claude-code"].budget.daily_usd == 42.0
+
+    def test_defaults_coding_budget_roundtrip(self):
+        config = TjConfig(
+            version="1",
+            defaults=DefaultsConfig(coding_budget=GroupBudgetConfig(daily_usd=100.0)),
+        )
+        restored = _parse(_serialise(config))
+        assert restored.defaults.coding_budget.daily_usd == 100.0
+
+
+class TestResolveGroupBudget:
+    def test_group_override_wins_over_defaults(self):
+        config = TjConfig(
+            version="1",
+            defaults=DefaultsConfig(coding_budget=GroupBudgetConfig(daily_usd=10.0)),
+            coding_agents={"claude-code": CodingGroupConfig(budget=GroupBudgetConfig(daily_usd=50.0))},
+        )
+        assert resolve_group_budget("claude-code", config).daily_usd == 50.0
+
+    def test_unconfigured_group_inherits_zone_default(self):
+        """A newly-appearing tool with no [coding_agents.<id>] entry yet
+        inherits the coding-zone default instead of arriving uncapped."""
+        config = TjConfig(
+            version="1",
+            defaults=DefaultsConfig(coding_budget=GroupBudgetConfig(daily_usd=25.0)),
+        )
+        assert resolve_group_budget("codex", config).daily_usd == 25.0
+
+    def test_no_defaults_no_override_returns_none(self):
+        config = TjConfig(version="1")
+        assert resolve_group_budget("claude-code", config).daily_usd is None
+
+
+class TestBackwardCompatSessionUsd:
+    def test_existing_session_usd_survives_a_roundtrip_that_also_touches_daily(self):
+        """A POST that only changes daily_usd must not erase a session_usd
+        the user already had configured on the same scope."""
+        config = TjConfig(
+            version="1",
+            agents={"legacy-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0, session_usd=1.5))},
+        )
+        # Simulate a write that only touches daily_usd, as the redesigned UI does.
+        config.agents["legacy-agent"].budget.daily_usd = 8.0
+        restored = _parse(_serialise(config))
+        assert restored.agents["legacy-agent"].budget.daily_usd == 8.0
+        assert restored.agents["legacy-agent"].budget.session_usd == 1.5
+
+
 class TestValidateBudgetValue:
     def test_positive_returns_value(self):
         assert validate_budget_value(5.0, "daily_usd") == 5.0
@@ -389,3 +525,18 @@ class TestValidateBudgetValue:
     def test_negative_raises(self):
         with pytest.raises(ValueError, match="must be non-negative"):
             validate_budget_value(-1.0, "daily_usd")
+
+
+class TestValidateCycleStartDay:
+    def test_in_range_returns_value(self):
+        assert validate_cycle_start_day(15) == 15
+        assert validate_cycle_start_day(1) == 1
+        assert validate_cycle_start_day(28) == 28
+
+    def test_zero_raises(self):
+        with pytest.raises(ValueError, match="between 1 and 28"):
+            validate_cycle_start_day(0)
+
+    def test_above_28_raises(self):
+        with pytest.raises(ValueError, match="between 1 and 28"):
+            validate_cycle_start_day(29)

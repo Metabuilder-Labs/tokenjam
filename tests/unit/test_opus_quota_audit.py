@@ -1,7 +1,7 @@
 """Unit tests for the segment-level premium quota audit (`tj quota-audit`, issue #5).
 
 The audit walks assistant turns per session in ``start_time`` order and reports
-ONE honest figure (founder D1): the share of premium (Opus/Fable) quota that
+ONE honest figure (D1): the share of premium (Opus/Fable) quota that
 went to Sonnet-shaped *work* — whole Sonnet-shaped sessions PLUS mechanical
 stretches inside otherwise-hard sessions — on exact per-turn model attribution
 (D2), as a labelled estimate with a wide bootstrap CI (D3).
@@ -26,6 +26,7 @@ from click.testing import CliRunner
 import tokenjam.core.optimize.analyzers.model_downgrade as md
 from tokenjam.core.config import ProviderBudget, TjConfig
 from tokenjam.core.db import InMemoryBackend
+from tokenjam.core.model_tiers import PREMIUM_TIER_LABEL
 from tokenjam.core.optimize.analyzers.model_downgrade import audit_opus_quota
 from tokenjam.core.optimize.types import (
     OPUS_QUOTA_AUDIT_CAVEAT,
@@ -460,7 +461,12 @@ def test_cli_renders_quota_audit_with_caveat(db, monkeypatch):
     # Retrospective mirror headline (not dollars), new grain-accurate noun.
     assert "went to Sonnet-shaped work" in flat
     assert "reclaimable" not in flat.lower()
-    assert "Opus/Fable" in out
+    # Names which tier is audited. Asserted via the constant rather than the
+    # literal it happened to hold: the literal used to be "Opus/Fable", which
+    # pinned the copy to a moment when Mythos was billed at the premium rate but
+    # not yet classified — so the label naming every premium tier is checked in
+    # test_model_tiers.py, and this only checks the CLI actually prints it.
+    assert PREMIUM_TIER_LABEL in out
     # The single number is presented as a labelled estimate.
     assert "estimate" in flat
     # Subscription users get the habit nudge, not dollars.
@@ -472,6 +478,11 @@ def test_cli_renders_quota_audit_with_caveat(db, monkeypatch):
     # Honesty caveat present.
     assert "spot-check" in OPUS_QUOTA_AUDIT_CAVEAT.lower()
     assert "safe to downgrade" in out
+    # The subscription-billed qualifier banner was removed by product
+    # decision: tj no longer differentiates its messaging between
+    # subscription and API users.
+    assert "subscription-billed" not in out
+    assert "list-price equivalent" not in out
 
 
 def test_cli_api_persona_shows_dollar_counterfactual(db, monkeypatch):
@@ -558,8 +569,7 @@ def test_cli_json_output_has_segment_fields(db, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["percent_quota_misallocated"] > 0
-    # DEPRECATED alias still mirrors the headline (0.5.4 compat).
-    assert payload["percent_quota_reclaimable"] == payload["percent_quota_misallocated"]
+    assert "percent_quota_reclaimable" not in payload
     assert payload["candidate_sessions"] >= 1
     assert payload["segment_count"] >= 1
     assert payload["segment_estimate_confidence"] == "estimate"

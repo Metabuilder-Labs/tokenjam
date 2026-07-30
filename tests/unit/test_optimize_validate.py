@@ -210,6 +210,28 @@ def test_run_validation_flags_quality_regression():
     assert result.measurements[0].quality_preserved is False
 
 
+def test_run_validation_token_totals_include_cache_read_and_write():
+    """`baseline_tokens`/`candidate_tokens` must sum all four token types.
+    Before the fix, a replayed call's cache_read_tokens/cache_write_tokens
+    were dropped from the aggregate even though the cost calculation
+    (calculate_cost) already correctly priced them (Cache token types in
+    aggregates, root CLAUDE.md)."""
+    provider = MockProvider({
+        "claude-opus-4-8": Completion(
+            text="Answer", input_tokens=10, output_tokens=5,
+            cache_read_tokens=200_000, cache_write_tokens=50_000,
+        ),
+        "claude-haiku-4-5": Completion(
+            text="answer\n", input_tokens=10, output_tokens=5,
+            cache_read_tokens=100_000, cache_write_tokens=0,
+        ),
+    })
+    result = run_validation([_one_sample()], provider)
+
+    assert result.baseline_tokens == 10 + 5 + 200_000 + 50_000
+    assert result.candidate_tokens == 10 + 5 + 100_000
+
+
 def test_run_validation_aggregates_multiple_calls():
     provider = MockProvider({
         "claude-opus-4-8": Completion(text="same", input_tokens=1000,

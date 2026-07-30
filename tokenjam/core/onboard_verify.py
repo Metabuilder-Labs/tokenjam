@@ -84,7 +84,7 @@ def poll_for_first_span(
             traces = backend.get_traces(
                 TraceFilters(since=since, agent_id=agent_id, limit=1)
             )
-        except Exception as exc:  # noqa: BLE001 — surface, don't crash onboarding
+        except Exception as exc:  # surface, don't crash onboarding
             return VerifyResult(False, monotonic() - start, error=str(exc))
 
         if traces:
@@ -101,10 +101,10 @@ def poll_for_first_span(
 def not_confirmed_cause(persona: str) -> str:
     """Return the most likely reason no span arrived, phrased for the persona.
 
-    ``persona`` is one of ``"sdk"``, ``"claude_code"``, ``"codex"``; anything
+    ``persona`` is one of ``"sdk"``, ``"claude-code"``, ``"codex"``; anything
     else falls back to a generic message that covers both failure modes.
     """
-    if persona == "claude_code":
+    if persona == "claude-code":
         return (
             "Claude Code only sends telemetry after a restart, and backfilled "
             "history doesn't count as live — this waits for a new span. Restart "
@@ -156,7 +156,7 @@ def open_read_backend(config) -> tuple[object | None, str | None, str | None]:
 
     try:
         return open_db(config.storage), "direct", None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # 1
         msg = str(exc).lower()
         if "lock" in msg or "already open" in msg or "i/o error" in msg:
             return (

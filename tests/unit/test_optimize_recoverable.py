@@ -48,7 +48,7 @@ def _insert_small_opus_session(db, session_id="a"):
 
 
 def test_downsize_recoverable_uses_window_basis(db):
-    # estimated_recoverable_usd is the WINDOW savings (actual − alternative),
+    # past_overspend_usd is the WINDOW savings (actual − alternative),
     # not the 30-day projection — so it shares a time basis with the other
     # analyzers (#122). monthly_savings_usd stays separate for the CLI.
     _insert_small_opus_session(db)
@@ -56,9 +56,9 @@ def test_downsize_recoverable_uses_window_basis(db):
     finding = analyze_model_downgrade(db.conn, since, until, None, 30.0)
     assert finding is not None
     window_savings = max(finding.actual_cost_usd - finding.alternative_cost_usd, 0.0)
-    assert finding.estimated_recoverable_usd == pytest.approx(window_savings, abs=1e-6)
-    assert finding.estimated_recoverable_usd > 0
-    assert finding.estimated_recoverable_tokens == finding.candidate_tokens
+    assert finding.past_overspend_usd == pytest.approx(window_savings, abs=1e-6)
+    assert finding.past_overspend_usd > 0
+    assert finding.past_overspend_tokens == finding.candidate_tokens
     assert finding.estimate_basis
     assert finding.estimate_confidence == "heuristic"
 
@@ -69,7 +69,47 @@ def test_downsize_window_basis_differs_from_monthly_projection(db):
     _insert_small_opus_session(db)
     since, until = _window()
     finding = analyze_model_downgrade(db.conn, since, until, None, 7.0)
-    assert finding.estimated_recoverable_usd != finding.monthly_savings_usd
+    assert finding.past_overspend_usd != finding.monthly_savings_usd
+
+
+def test_downsize_tiny_session_prices_cache_write_on_alt_side(db):
+    """The tiny-session secondary case's alternative-model pricing must
+    include cache-write tokens, not just input/output/cache-read. The old
+    `_alt_unit_cost` arithmetic priced only input + output + cache-read for
+    the alternative model while `actual_cost` (the `cost_usd` column) already
+    billed cache-write on the original model -- an asymmetric comparison that
+    inflated `past_overspend_usd` by the alternative model's cache-write cost
+    on every candidate session. A candidate with non-zero cache_write_tokens
+    must therefore price SMALLER than the broken (cache-write-dropped)
+    arithmetic would have."""
+    from tokenjam.core.pricing import get_rates
+
+    start = utcnow() - timedelta(days=2)
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1_000, output_tokens=200, cache_write_tokens=50_000,
+        cost_usd=1.0, session_id="cw1", start_time=start,
+    ))
+    since, until = _window()
+    finding = analyze_model_downgrade(db.conn, since, until, None, 30.0)
+    assert finding is not None
+    assert finding.candidate_sessions == 1
+
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    assert rates is not None
+    correct_alt_cost = (
+        1_000 / 1e6 * rates.input_per_mtok
+        + 200 / 1e6 * rates.output_per_mtok
+        + 50_000 / 1e6 * rates.cache_write_per_mtok
+    )
+    broken_alt_cost = (  # the old arithmetic: cache-write silently dropped
+        1_000 / 1e6 * rates.input_per_mtok
+        + 200 / 1e6 * rates.output_per_mtok
+    )
+    correct_savings = max(1.0 - correct_alt_cost, 0.0)
+    broken_savings = max(1.0 - broken_alt_cost, 0.0)
+    assert correct_savings < broken_savings
+    assert finding.past_overspend_usd == pytest.approx(correct_savings, abs=1e-6)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,9 +176,9 @@ def test_script_recoverable_sums_cluster_session_cost(db):
     finding = report.findings["script"]
     assert finding.clusters, "expected one cluster of 20 identical sessions"
     # 20 sessions × $0.10 = $2.00
-    assert finding.estimated_recoverable_usd == pytest.approx(2.00, abs=0.001)
+    assert finding.past_overspend_usd == pytest.approx(2.00, abs=0.001)
     # 20 sessions × (500 + 100) tokens = 12_000
-    assert finding.estimated_recoverable_tokens == 12_000
+    assert finding.past_overspend_tokens == 12_000
     assert finding.estimate_basis
 
 
@@ -156,8 +196,8 @@ def test_script_recoverable_none_when_no_clusters(db):
                           findings=["script"])
     finding = report.findings["script"]
     assert not finding.clusters
-    assert finding.estimated_recoverable_usd is None
-    assert finding.estimated_recoverable_tokens is None
+    assert finding.past_overspend_usd is None
+    assert finding.past_overspend_tokens is None
 
 
 # --------------------------------------------------------------------------- #
@@ -177,20 +217,20 @@ def test_recoverable_fields_survive_report_to_dict_round_trip(db):
     payload = report_to_dict(report)
 
     # downsize lives in the typed slot
-    assert "estimated_recoverable_usd" in payload["downgrade"]
+    assert "past_overspend_usd" in payload["downgrade"]
     assert "estimate_basis" in payload["downgrade"]
     # wave-2 findings carry the fields too
     for name in ("cache", "script", "trim"):
         if name in payload.get("findings", {}):
-            assert "estimated_recoverable_usd" in payload["findings"][name]
+            assert "past_overspend_usd" in payload["findings"][name]
             assert "estimate_confidence" in payload["findings"][name]
 
     assert "bench_command" in payload["downgrade"]
 
     # and they round-trip back through report_from_dict
     rebuilt = report_from_dict(payload)
-    assert (rebuilt.downgrade.estimated_recoverable_usd
-            == report.downgrade.estimated_recoverable_usd)
+    assert (rebuilt.downgrade.past_overspend_usd
+            == report.downgrade.past_overspend_usd)
     assert rebuilt.downgrade.bench_command == report.downgrade.bench_command
     assert rebuilt.downgrade.bench_command is not None
 
@@ -208,6 +248,6 @@ def test_trim_recoverable_none_when_capture_off(db):
                           findings=["trim"])
     finding = report.findings["trim"]
     assert finding.enabled is False
-    assert finding.estimated_recoverable_usd is None
+    assert finding.past_overspend_usd is None
     # Not-ready path doesn't set a basis (default empty string).
     assert finding.estimate_basis == ""

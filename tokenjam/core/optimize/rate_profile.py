@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from tokenjam.core.optimize.span_pricing import SPAN_UTC_DAY_SQL
+
 
 @dataclass(frozen=True)
 class RateProfile:
@@ -83,15 +85,24 @@ def blended_rate_profile(
     try:
         rows = conn.execute(
             "SELECT provider, model, "
-            "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_tokens), 0) "
-            "FROM spans WHERE " + " AND ".join(clauses) + " GROUP BY provider, model",
+            "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_tokens), 0), "
+            "MIN(start_time) "
+            "FROM spans WHERE " + " AND ".join(clauses)
+            + f" GROUP BY provider, model, {SPAN_UTC_DAY_SQL}",
             params,
         ).fetchall()
     except Exception:
         return None
 
-    from tokenjam.core.pricing import get_rates
+    from tokenjam.core.optimize.span_pricing import rates_at
 
+    # Grouped by (provider, model, UTC day) rather than (provider, model): each
+    # bucket then prices at the rate that actually billed it, so a window
+    # straddling a rate change blends the real rates instead of repricing all
+    # of it at today's. A UTC day never straddles a boundary — every
+    # `valid_from` in the pricing table is a date. See
+    # `tokenjam.core.optimize.span_pricing` for the convention.
+    #
     # Each rate is weighted by ITS OWN matching token class, not a shared
     # combined total -- input tokens for the input rate, cache-read tokens for
     # the cache-read ratio. Weighting either by output/cache-write volume (a
@@ -103,12 +114,12 @@ def blended_rate_profile(
     weighted_cache_read = 0.0
     cache_read_tokens_total = 0
     models: list[str] = []
-    for provider, model, input_tokens, cache_read_tokens in rows:
+    for provider, model, input_tokens, cache_read_tokens, day_start in rows:
         input_tokens = int(input_tokens or 0)
         cache_read_tokens = int(cache_read_tokens or 0)
         if input_tokens <= 0 and cache_read_tokens <= 0:
             continue
-        rates = get_rates(str(provider or "unknown"), str(model))
+        rates = rates_at(str(provider or "unknown"), str(model), day_start)
         if rates is None or rates.input_per_mtok <= 0:
             continue
         if input_tokens > 0:
@@ -131,11 +142,11 @@ def blended_rate_profile(
         cache_read_per_mtok = weighted_cache_read / cache_read_tokens_total
     else:
         weighted_cache_read_by_input = 0.0
-        for provider, model, input_tokens, _cache_read_tokens in rows:
+        for provider, model, input_tokens, _cache_read_tokens, day_start in rows:
             input_tokens = int(input_tokens or 0)
             if input_tokens <= 0:
                 continue
-            rates = get_rates(str(provider or "unknown"), str(model))
+            rates = rates_at(str(provider or "unknown"), str(model), day_start)
             if rates is None or rates.input_per_mtok <= 0:
                 continue
             weighted_cache_read_by_input += rates.cache_read_per_mtok * input_tokens

@@ -4,7 +4,16 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from tokenjam.core.models import NormalizedSpan
-from tokenjam.core.pricing import get_rates, ModelRates, DEFAULT_INPUT_PER_MTOK, DEFAULT_OUTPUT_PER_MTOK
+from tokenjam.core.pricing import (
+    DEFAULT_CACHE_READ_PER_MTOK,
+    DEFAULT_CACHE_WRITE_PER_MTOK,
+    DEFAULT_INPUT_PER_MTOK,
+    DEFAULT_OUTPUT_PER_MTOK,
+    STANDARD_VARIANT,
+    ModelRates,
+    classify_pricing_source,
+    get_rates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +31,27 @@ def calculate_cost(
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    *,
+    at: datetime | None = None,
+    variant: str = STANDARD_VARIANT,
 ) -> float:
     """
     Calculate USD cost for a single LLM call.
+
+    `at` is when the call happened: pricing has a time axis, so a call made
+    before a rate change prices at the rate that actually billed it (defaults to
+    now, which is what a live call wants). `variant` is how it was bought —
+    `fast` mode and the Batch API bill the same model id at different rates.
+
+    **That `at=None` default is for LIVE callers only.** Ingest is the reference
+    use: `CostEngine.process_span` below passes `at=span.start_time` and
+    `variant=rate_variant_for_span(span)`, so a cost computed once at write time
+    never moves under a later rate change. Anything reading BACKWARDS — every
+    optimize analyzer — must pass the instant explicitly, and goes through
+    :mod:`tokenjam.core.optimize.span_pricing`, which makes it a required
+    argument and states the aggregation convention (price each span at its own
+    timestamp, then sum; never price an aggregate at a single date). Do not add
+    a new backward-looking caller here that relies on the default.
 
     Returns cost rounded to 8 decimal places.
     Falls back to default rates if the provider/model is not in the pricing table.
@@ -39,21 +66,32 @@ def calculate_cost(
     ):
         return 0.0
 
-    rates = get_rates(provider, model)
+    rates = get_rates(provider, model, at=at, variant=variant)
     if rates is None:
         # Warn once per (provider, model) per process — see _UNKNOWN_MODEL_WARNED.
         key = (provider, model)
         if key not in _UNKNOWN_MODEL_WARNED:
             _UNKNOWN_MODEL_WARNED.add(key)
             logger.warning(
-                "No pricing data for %s/%s — using default rates (cost figures "
-                "may be inaccurate). Upgrade tokenjam for current pricing, or "
-                "add an override to ~/.config/tj/pricing.toml — see `tj pricing list`.",
+                "No pricing data for %s/%s — using default rates, including "
+                "guessed cache rates (cost figures may be inaccurate, "
+                "especially for cache-heavy traffic). Upgrade tokenjam for "
+                "current pricing, or add an override to "
+                "~/.config/tj/pricing.toml — see `tj pricing list`.",
                 provider, model,
             )
+        # cache_read/write_per_mtok are non-zero guesses, not 0.0: a model with
+        # NO pricing entry that is mostly cache traffic would otherwise have
+        # ~all of its real cost priced at zero, silently, rather than merely
+        # estimated (see DEFAULT_CACHE_READ_PER_MTOK). specified=False marks
+        # both as guesses, not a quoted rate for this model.
         rates = ModelRates(
             input_per_mtok=DEFAULT_INPUT_PER_MTOK,
             output_per_mtok=DEFAULT_OUTPUT_PER_MTOK,
+            cache_read_per_mtok=DEFAULT_CACHE_READ_PER_MTOK,
+            cache_write_per_mtok=DEFAULT_CACHE_WRITE_PER_MTOK,
+            cache_read_specified=False,
+            cache_write_specified=False,
         )
 
     cost = (
@@ -63,6 +101,30 @@ def calculate_cost(
         + (cache_write_tokens / 1_000_000) * rates.cache_write_per_mtok
     )
     return round(cost, 8)
+
+
+#: Request-param values that name a non-standard way of buying the same model.
+#: `speed` is Anthropic's fast mode (`speed="fast"`); anything else observed
+#: there is passed through as a variant name so a future variant prices itself
+#: as soon as the table carries a row for it, with `get_rates` warning once when
+#: it doesn't.
+_SPEED_PARAM = "speed"
+
+
+def rate_variant_for_span(span: NormalizedSpan) -> str:
+    """Which pricing variant a span was billed under (`standard` when unknown).
+
+    Read from the captured request params rather than inferred: `speed="fast"`
+    is a request parameter the caller sent, so it is the only honest evidence
+    that the premium rate applied. A span whose capture never saw it prices at
+    the standard rate — understating a fast call, which is the safe direction
+    for a figure checked against a bill, and `get_rates` says so in a warning.
+    """
+    params = span.request_params or {}
+    speed = params.get(_SPEED_PARAM)
+    if isinstance(speed, str) and speed and speed.lower() != STANDARD_VARIANT:
+        return speed.lower()
+    return STANDARD_VARIANT
 
 
 class CostEngine:
@@ -94,10 +156,22 @@ class CostEngine:
         ):
             return
 
-        # Record whether the span was already pre-priced before we compute.
-        # Pre-priced spans have their session cost handled by _build_or_update_session
-        # in ingest.py; updating the session again here would double-count.
-        was_pre_priced = span.cost_usd is not None
+        # Whatever cost the span arrived carrying has ALREADY been added to the
+        # session total by `_build_or_update_session` in ingest.py (it does
+        # `existing.total_cost_usd += span.cost_usd` for any non-None value, and
+        # seeds a new session's total from it). An unpriced span contributed
+        # nothing, so its prior contribution is 0.
+        #
+        # This used to be a boolean skip: pre-priced spans got no session update
+        # at all, on the reasoning that ingest had already handled them. But we
+        # then OVERWRITE `spans.cost_usd` with tj's own figure below, so the
+        # session kept the upstream number while the span row carried ours, and
+        # `SUM(spans.cost_usd)` — which `recompute_session_totals_from_spans`
+        # documents as the source of truth — permanently disagreed with
+        # `sessions.total_cost_usd`. Incrementing by the DELTA instead makes the
+        # session follow the span row under every combination (unpriced,
+        # pre-priced, or re-priced) with no special case and no extra read.
+        prior_cost = span.cost_usd or 0.0
 
         cost = calculate_cost(
             provider=span.provider,
@@ -106,9 +180,22 @@ class CostEngine:
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
             cache_write_tokens=cache_write_tokens,
+            # Price the call at the rate in effect WHEN IT HAPPENED, and at the
+            # rate for how it was bought. Cost is computed once at ingest and
+            # stored, so a later rate change never moves this figure.
+            at=span.start_time,
+            variant=rate_variant_for_span(span),
         )
 
         span.cost_usd = cost
+        # Provenance: HOW that cost resolved (real rate vs. a guessed
+        # fallback), stamped on the span so it survives past ingest — see
+        # classify_pricing_source and the `pricing_source` column (spans
+        # migration adding it). Without this a fallback-priced span and a
+        # correctly-priced one are indistinguishable once only the dollar
+        # figure remains, which is exactly how the unpriced-cache-at-zero bug
+        # went unnoticed.
+        span.pricing_source = classify_pricing_source(span.provider, span.model)
 
         # Persist through the StorageBackend protocol (issue #309 — this used to
         # reach into self.db.conn directly). Backends that can't persist (e.g.
@@ -117,13 +204,15 @@ class CostEngine:
         update = getattr(self.db, "update_span_cost", None)
         if update is None:
             return
-        update(span.span_id, cost)
+        update(span.span_id, cost, span.pricing_source)
 
-        # Only accumulate into the session total when we computed the cost here.
-        # Skip the session update for pre-priced spans to avoid double-counting
-        # (their session cost is handled by ingest's _build_or_update_session).
-        if span.session_id and not was_pre_priced:
-            self.db.increment_session_cost(span.session_id, cost)
+        # Move the session total by exactly what this span's stored cost moved,
+        # so `sessions.total_cost_usd` tracks `SUM(spans.cost_usd)` for the
+        # session. A zero delta (we agreed with the incoming figure, or the span
+        # is being reprocessed with the same rates) writes nothing.
+        delta = cost - prior_cost
+        if span.session_id and delta:
+            self.db.increment_session_cost(span.session_id, delta)
 
 
 # ---------------------------------------------------------------------------

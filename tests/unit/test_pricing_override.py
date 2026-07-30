@@ -45,7 +45,7 @@ def test_env_override_adds_new_model(tmp_path, monkeypatch):
     f = tmp_path / "pricing.toml"
     _write(f, "[myprovider.custom-1]\ninput_per_mtok = 1.0\noutput_per_mtok = 2.0\n")
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(f))
-    pricing.load_pricing_table.cache_clear()
+    pricing.clear_pricing_cache()
 
     rates = pricing.get_rates("myprovider", "custom-1")
     assert rates is not None
@@ -61,7 +61,7 @@ def test_env_override_overrides_packaged_rate(tmp_path, monkeypatch):
         "input_per_mtok = 99.0\noutput_per_mtok = 100.0\n",
     )
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(f))
-    pricing.load_pricing_table.cache_clear()
+    pricing.clear_pricing_cache()
 
     rates = pricing.get_rates("anthropic", "claude-haiku-4-5")
     assert rates is not None
@@ -73,7 +73,7 @@ def test_env_override_leaves_unrelated_models_intact(tmp_path, monkeypatch):
     f = tmp_path / "pricing.toml"
     _write(f, "[anthropic.claude-haiku-4-5]\ninput_per_mtok = 99.0\noutput_per_mtok = 100.0\n")
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(f))
-    pricing.load_pricing_table.cache_clear()
+    pricing.clear_pricing_cache()
 
     # A model not mentioned in the override keeps its packaged rate.
     rates = pricing.get_rates("openai", "gpt-4o")
@@ -84,7 +84,7 @@ def test_env_override_leaves_unrelated_models_intact(tmp_path, monkeypatch):
 def test_default_user_path_is_used_when_present(tmp_path, monkeypatch):
     cfg = tmp_path / ".config" / "tj" / "pricing.toml"
     _write(cfg, "[anthropic.claude-haiku-4-5]\ninput_per_mtok = 0.01\noutput_per_mtok = 0.02\n")
-    pricing.load_pricing_table.cache_clear()
+    pricing.clear_pricing_cache()
 
     rates = pricing.get_rates("anthropic", "claude-haiku-4-5")
     assert rates is not None
@@ -93,7 +93,7 @@ def test_default_user_path_is_used_when_present(tmp_path, monkeypatch):
 
 def test_missing_env_file_warns_and_falls_back(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(tmp_path / "nope.toml"))
-    pricing.load_pricing_table.cache_clear()
+    pricing.clear_pricing_cache()
 
     with caplog.at_level(logging.WARNING, logger="tokenjam.core.pricing"):
         rates = pricing.get_rates("anthropic", "claude-haiku-4-5")
@@ -108,7 +108,7 @@ def test_malformed_override_warns_and_falls_back(tmp_path, monkeypatch, caplog):
     f = tmp_path / "pricing.toml"
     _write(f, "this is not = valid = toml [[[")
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(f))
-    pricing.load_pricing_table.cache_clear()
+    pricing.clear_pricing_cache()
 
     with caplog.at_level(logging.WARNING, logger="tokenjam.core.pricing"):
         rates = pricing.get_rates("anthropic", "claude-haiku-4-5")

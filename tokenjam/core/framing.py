@@ -130,7 +130,7 @@ def _declared_budget_plans(config: Any) -> list[tuple[str, str]]:
             plan = (budget_block[provider] or {}).get("plan")
             if plan:
                 entries.append((str(provider), str(plan)))
-    except Exception:  # noqa: BLE001
+    except Exception:  # 1
         return []
     return entries
 
@@ -206,7 +206,7 @@ def config_declared_plan(config: Any) -> str | None:
             plan = (budget_block[provider] or {}).get("plan")
             if plan:
                 return str(plan)
-    except Exception:  # noqa: BLE001 — best-effort fallback, never fatal
+    except Exception:  # best-effort fallback, never fatal
         return None
     return None
 
@@ -299,8 +299,12 @@ class Framing:
     api_share_pct: float = 0.0
     display_rule: str = DISPLAY_SHOW_DOLLARS
     qualifier_text: str | None = None
-    # Window totals carried so renderers can compute token-share without a
-    # second query (used by render_savings in subscription mode).
+    # Window totals carried so callers can compute a token-share without a
+    # second query. `render_savings`/`render_dollar` in this module no longer
+    # read `window_total_tokens` (dollars render identically across pricing
+    # modes now), but `cmd_context`/`cmd_tokenmaxx`'s `_quota_share` helpers
+    # and the web UI's `fmtFramedSavings` still do, for the token-only
+    # "X% of cycle tokens" figure that is orthogonal to dollar display.
     window_total_tokens: int = 0
     window_total_cost_usd: float = 0.0
 
@@ -446,22 +450,26 @@ def _fmt_usd(value: float) -> str:
 
 
 def render_dollar(value: float | None, framing: Framing) -> str:
-    """Render a single dollar value framed for the pricing mode.
+    """Render a single dollar value.
 
-    Returns e.g. ``"$148"`` (api), ``"12.4% of cycle"`` (subscription with a
-    known plan fee), or ``"—"`` (local, or no value).
+    Standing product decision: tj does not differentiate between a
+    subscription-billed user and an API-billed user — both want the same
+    dollar figure, and both face the same incentive (ignore cost, burn quota
+    or pay more). Dollars are therefore shown verbatim for every pricing mode
+    that has a dollar figure at all (api, subscription, unknown); a
+    subscription account used to have that same figure converted into
+    "X% of cycle", which was suppression by plan, not a genuine absence of
+    data, so that branch is gone.
+
+    ``local`` is different in kind: local inference has no marginal cost, so
+    there is no dollar figure to show at all — that placeholder path stays.
+
+    Returns e.g. ``"$148"``, or ``"—"`` (local inference, or no value).
     """
     if value is None:
         return "—"
-    mode = framing.pricing_mode
-    if mode == "local":
+    if framing.pricing_mode == "local":
         return "—"
-    if mode == "subscription":
-        if framing.plan_monthly_usd:
-            pct = 100.0 * value / framing.plan_monthly_usd
-            return f"{pct:.1f}% of cycle"
-        return "—"
-    # api / unknown — dollars shown (qualifier carried separately on Framing)
     return _fmt_usd(value)
 
 
@@ -470,27 +478,23 @@ def render_savings(
     value_tokens: int | None,
     framing: Framing,
 ) -> str:
-    """Render a savings / recoverable figure framed for the pricing mode.
+    """Render a savings / recoverable figure.
 
-    - api / unknown: dollars (``"$148"``)
-    - subscription: token-share of the cycle (``"12.4% of cycle tokens"``)
-    - local: token count (``"1.2M tokens"``)
+    - api / subscription / unknown: dollars (``"$148"``) — identical across
+      plan tiers by product decision (see :func:`render_dollar`). A
+      subscription account used to get a token-share-of-cycle percentage
+      here instead of dollars; that plan-based suppression is gone.
+    - local: token count (``"1.2M tokens"``) — local inference genuinely has
+      no dollar figure (no marginal cost), so this path is a real absence of
+      data, not a display choice, and stays as-is.
 
     Returns ``"—"`` when the relevant figure is unavailable.
     """
-    mode = framing.pricing_mode
-    if mode == "subscription":
-        if value_tokens is None:
-            return "—"
-        if framing.window_total_tokens > 0:
-            pct = 100.0 * value_tokens / framing.window_total_tokens
-            return f"{pct:.1f}% of cycle tokens"
-        return f"{format_tokens(value_tokens)} tokens"
-    if mode == "local":
+    if framing.pricing_mode == "local":
         if value_tokens is None:
             return "—"
         return f"{format_tokens(value_tokens)} tokens"
-    # api / unknown
+    # api / subscription / unknown
     if value_usd is None:
         return "—"
     return _fmt_usd(value_usd)
@@ -588,7 +592,13 @@ def agent_persona_mix(
     agent_id window, same ``sessions`` table). Classification uses
     :func:`tokenjam.core.alerts.is_interactive_coding_agent` (Claude Code or
     Codex), not a Claude-Code-only prefix check. Returns
-    ``{"claude_code": N, "other": M}``.
+    ``{"claude-code": N, "other": M}``.
+
+    The bucket key is spelled exactly as the persona value in :data:`PERSONAS`.
+    It used to be ``claude_code`` while the persona it feeds was
+    ``claude-code``, which is one concept wearing two spellings: the kind of
+    near-miss that reads as a typo, invites a third spelling, and silently
+    returns 0 from any lookup that guesses the wrong one.
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -604,14 +614,21 @@ def agent_persona_mix(
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = "SELECT agent_id FROM sessions" + where
     rows = conn.execute(sql, params).fetchall()
-    mix = {"claude_code": 0, "other": 0}
+    mix = {"claude-code": 0, "other": 0}
     for (aid,) in rows:
         aid_str = aid if isinstance(aid, str) else (str(aid) if aid is not None else None)
         if is_interactive_coding_agent(aid_str):
-            mix["claude_code"] += 1
+            mix["claude-code"] += 1
         else:
             mix["other"] += 1
     return mix
+
+
+# Every value `dominant_persona` can return, in the order a UI should offer
+# them. Named here rather than re-listed at each call site so a caller that
+# has to enumerate personas (the analyzer-guide route) cannot drift from the
+# function that actually produces them.
+PERSONAS: tuple[str, ...] = ("claude-code", "sdk", "mixed", "unknown")
 
 
 def dominant_persona(
@@ -619,7 +636,8 @@ def dominant_persona(
 ) -> str:
     """Classify the analyzed window's dominant user persona.
 
-    Returns one of ``"claude-code"``, ``"sdk"``, ``"mixed"``, ``"unknown"``.
+    Returns one of ``"claude-code"``, ``"sdk"``, ``"mixed"``, ``"unknown"`` --
+    i.e. a member of :data:`PERSONAS`.
 
     Primary signal is :func:`tokenjam.core.alerts.is_interactive_coding_agent`
     via :func:`agent_persona_mix` (Claude Code or Codex agent id). Falls back
@@ -636,7 +654,7 @@ def dominant_persona(
         if declared_plan == "api":
             return "sdk"
         return "unknown"
-    cc_fraction = agent_mix.get("claude_code", 0) / total
+    cc_fraction = agent_mix.get("claude-code", 0) / total
     if cc_fraction >= _PERSONA_DOMINANT_FRACTION:
         return "claude-code"
     if cc_fraction <= (1 - _PERSONA_DOMINANT_FRACTION):

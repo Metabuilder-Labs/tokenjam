@@ -25,6 +25,20 @@ def _app(db, config):
     return create_app(config=config, db=db, ingest_pipeline=IngestPipeline(db=db, config=config))
 
 
+def _warm_scan(db, config):
+    """Run the background analyzer scan the daemon owns, so the routes have a
+    STORED report to serve.
+
+    No route runs an analyzer any more (see core/optimize/report_store.py), so
+    a test that wants the recoverable overlay has to warm the store first —
+    exactly as `tj serve` does at boot. Without this the routes correctly serve
+    the cold state, which is what the cold-vs-empty tests below assert.
+    """
+    from tokenjam.core.optimize import report_store
+
+    return report_store.recompute_now(db, config)
+
+
 def _seed(db, plan_tier="api"):
     now = utcnow()
     for i in range(3):
@@ -62,6 +76,7 @@ async def test_cost_cache_endpoint_hitrate_and_captured():
     db = InMemoryBackend()
     cfg = TjConfig(version="1")
     _seed(db)
+    _warm_scan(db, cfg)
     transport = httpx.ASGITransport(app=_app(db, cfg))
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         d = (await c.get("/api/v1/cost/cache?since=30d")).json()
@@ -76,7 +91,7 @@ async def test_cost_cache_endpoint_hitrate_and_captured():
     assert p["captured_tokens"] == 4000
     # window totals + estimated recoverable from the cache analyzer
     assert d["total_captured_tokens"] == 12_000
-    assert d["estimated_recoverable_usd"] is not None
+    assert d["past_overspend_usd"] is not None
     # framing block present (single compute path)
     assert d["framing"]["pricing_mode"] == "api"
 
@@ -134,6 +149,7 @@ async def test_components_split_priced_per_component():
     db = InMemoryBackend()
     cfg = TjConfig(version="1")
     _seed_downsize_and_cache(db)
+    _warm_scan(db, cfg)
     transport = httpx.ASGITransport(app=_app(db, cfg))
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         d = (await c.get("/api/v1/cost/components?since=30d")).json()
@@ -153,6 +169,7 @@ async def test_components_recoverable_is_registry_driven_and_honest():
     db = InMemoryBackend()
     cfg = TjConfig(version="1")
     _seed_downsize_and_cache(db)
+    _warm_scan(db, cfg)
     transport = httpx.ASGITransport(app=_app(db, cfg))
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         d = (await c.get("/api/v1/cost/components?since=30d")).json()
@@ -182,12 +199,13 @@ async def test_components_recoverable_total_is_not_presented_as_achievable():
     db = InMemoryBackend()
     cfg = TjConfig(version="1")
     _seed_downsize_and_cache(db)  # yields downsize + cache + reuse, all > 0
+    _warm_scan(db, cfg)
     transport = httpx.ASGITransport(app=_app(db, cfg))
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         d = (await c.get("/api/v1/cost/components?since=30d")).json()
     assert len(d["recoverable"]) >= 2
     # Magnitude unchanged: still the flat sum of the individual figures.
-    expected_total = sum(r["estimated_recoverable_usd"] or 0.0 for r in d["recoverable"])
+    expected_total = sum(r["past_overspend_usd"] or 0.0 for r in d["recoverable"])
     assert d["total_recoverable_usd"] == pytest.approx(expected_total)
     # But it must no longer be presented as an achievable total.
     assert d["recoverable_additive"] is False
@@ -203,10 +221,11 @@ async def test_components_largest_recoverable_is_the_top_ranked_entry():
     db = InMemoryBackend()
     cfg = TjConfig(version="1")
     _seed_downsize_and_cache(db)
+    _warm_scan(db, cfg)
     transport = httpx.ASGITransport(app=_app(db, cfg))
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         d = (await c.get("/api/v1/cost/components?since=30d")).json()
-    usds = [r["estimated_recoverable_usd"] or 0.0 for r in d["recoverable"]]
+    usds = [r["past_overspend_usd"] or 0.0 for r in d["recoverable"]]
     assert usds == sorted(usds, reverse=True)
     assert d["largest_recoverable_usd"] == usds[0]
     assert d["largest_recoverable_analyzer"] == d["recoverable"][0]["analyzer"]
@@ -252,35 +271,41 @@ async def test_components_empty_window_is_safe():
 
 
 @pytest.mark.asyncio
-async def test_components_never_invokes_the_full_corpus_relearn_scan(monkeypatch):
-    """`/cost/components` must not run `relearn`: its own docstring says HTTP
-    callers MUST cache it, not compute it per-request (it's a full-corpus,
-    tens-of-seconds scan), and its `RelearnFinding` never carries
-    `estimated_recoverable_usd` — so it contributes nothing to this
-    endpoint's output either way. Tracks invocation via a flag rather than
-    raising, since the route wraps `build_report` in a broad
-    try/except and would otherwise silently swallow an assertion."""
+async def test_components_never_invokes_any_analyzer(monkeypatch):
+    """`/cost/components` must not run ANY analyzer on the request thread.
+
+    This started as a narrower guard — "don't run `relearn`", whose own
+    docstring says HTTP callers MUST cache it rather than compute it
+    per-request. The narrow version was true and still let the route dispatch
+    every OTHER analyzer inline, which is what made this panel take tens of
+    seconds to minutes on a real corpus. The guard is now the general claim:
+    the route reads the stored report and dispatches nothing.
+
+    Tracked via a flag rather than an assertion inside the analyzer, because
+    the route's broad try/except would otherwise swallow it.
+    """
     from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
 
-    called = {"relearn": False}
-    real_relearn = ANALYZER_REGISTRY["relearn"]
-
-    def _tracking_relearn(ctx):
-        called["relearn"] = True
-        return real_relearn(ctx)
-
-    monkeypatch.setitem(ANALYZER_REGISTRY, "relearn", _tracking_relearn)
+    called: list[str] = []
+    for name, fn in list(ANALYZER_REGISTRY.items()):
+        def _tracking(ctx, _name=name, _fn=fn):
+            called.append(_name)
+            return _fn(ctx)
+        monkeypatch.setitem(ANALYZER_REGISTRY, name, _tracking)
 
     db = InMemoryBackend()
     cfg = TjConfig(version="1")
     _seed_downsize_and_cache(db)
+    _warm_scan(db, cfg)
+    called.clear()   # the warm-up scan is allowed to dispatch; the request is not
+
     transport = httpx.ASGITransport(app=_app(db, cfg))
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         resp = await c.get("/api/v1/cost/components?since=30d")
 
     assert resp.status_code == 200
-    assert called["relearn"] is False
-    # The other analyzers (downsize, cache/reuse via _seed_downsize_and_cache)
-    # still ran and still surface — this isn't a blanket "findings broken".
+    assert called == [], f"request thread dispatched analyzers: {called}"
+    # The stored report's findings still surface — this is not a blanket
+    # "findings broken".
     d = resp.json()
-    assert d["recoverable"], "excluding relearn must not silence every other analyzer"
+    assert d["recoverable"], "serving from the store must not silence the overlay"

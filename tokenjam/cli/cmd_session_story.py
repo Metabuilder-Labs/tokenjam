@@ -78,7 +78,7 @@ _KIND_STYLE = {
 @click.pass_context
 def cmd_session_story(ctx: click.Context, session_id: str | None,
                       last: bool, output_json_flag: bool) -> None:
-    """Show turn-by-turn HOW a Claude Code session attempted its task.
+    """Replay a Claude Code session turn-by-turn.
 
     Reconstructs the session's method — its ordered moves and, for each
     delegation, the subagent's mandate + what it did — from the on-disk
@@ -141,7 +141,7 @@ def _run_via_serve(db: Any, *, session_id: str | None, output_json: bool) -> Non
     if session_id is None:
         try:
             session_id = db.find_last_substantial_session(MIN_SUBSTANTIAL_TOOL_CALLS)
-        except Exception as exc:  # noqa: BLE001 — surface any HTTP/transport error
+        except Exception as exc:  # surface any HTTP/transport error
             raise click.ClickException(
                 f"Failed to list sessions from tj serve: {exc}"
             ) from exc
@@ -151,7 +151,7 @@ def _run_via_serve(db: Any, *, session_id: str | None, output_json: bool) -> Non
 
     try:
         payload = db.fetch_session_story(session_id, subagents=True)
-    except Exception as exc:  # noqa: BLE001 — surface any HTTP/transport error
+    except Exception as exc:  # surface any HTTP/transport error
         raise click.ClickException(
             f"Failed to fetch the session story from tj serve: {exc}"
         ) from exc

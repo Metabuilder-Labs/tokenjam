@@ -23,9 +23,6 @@ from tokenjam.core.framing import provider_pricing_mode
 OBSERVE_ONLY = "observe_only"  # forward UNMODIFIED; never a policy decision
 POLICY = "policy"              # api/usage-billed → policy path (suggest-mode stub here)
 
-# Providers the proxy understands. Anything else resolves to "unknown" → observe.
-KNOWN_PROVIDERS = frozenset({"anthropic", "openai"})
-
 
 @dataclass(frozen=True)
 class GateDecision:

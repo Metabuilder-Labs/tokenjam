@@ -423,6 +423,33 @@ Renderers (`tj optimize`, `tj cost`, the web UI cost views) read `pricing_mode` 
 
 ---
 
+## SDK cost-attribution dimensions (multi-tenant cost breakdown)
+
+For a developer running LLM agents in production via an SDK, the dimension that actually answers "who/what is spending the money" is which CUSTOMER/TENANT, FEATURE, ENVIRONMENT, or PROMPT VERSION issued the call — dimensions a provider dashboard cannot answer because it groups by API key. TokenJam carries seven nullable, indexed columns on `spans` (migration 17) for exactly this:
+
+| Column | Wire attribute | Convention | Set by |
+|---|---|---|---|
+| `tenant_id` | `tokenjam.tenant_id` | tj-specific (no OTel convention exists for a billing tenant) | `TjAttributes.TENANT_ID` |
+| `feature` | `tokenjam.feature` | tj-specific (no OTel convention exists for an app "feature" label) | `TjAttributes.FEATURE` |
+| `environment` | `deployment.environment.name` | standard OTel resource attribute | `ResourceAttributes.DEPLOYMENT_ENVIRONMENT_NAME` |
+| `service_version` | `service.version` | standard OTel resource attribute | `ResourceAttributes.SERVICE_VERSION` |
+| `commit_sha` | `vcs.ref.head.revision` (falls back to the deprecated `vcs.repository.ref.revision`) | standard OTel resource attribute | `ResourceAttributes.VCS_REF_HEAD_REVISION` |
+| `prompt_template_id` | `tokenjam.prompt.template_id` | tj-specific (no stable `gen_ai.*` prompt-template convention exists yet) | `TjAttributes.PROMPT_TEMPLATE_ID` |
+| `prompt_template_version` | `tokenjam.prompt.template_version` | tj-specific | `TjAttributes.PROMPT_TEMPLATE_VERSION` |
+
+**Why span-level, not session-level (unlike `service_namespace`).** The Cost view groups and filters at span granularity (`get_cost_summary` queries `spans` directly), and a single session can in principle span multiple tenants/features, so these are plain columns on `spans` rather than a session-level roll-up.
+
+**Ingest paths.** All three converge on the same fields:
+- **OTLP** (`POST /api/v1/spans` and `tj backfill otlp`) — `otel/otlp_parsing.py::parse_otlp_span` reads `environment`/`service_version`/`commit_sha` from the merged resource+span attributes and `tenant_id`/`feature`/prompt-template identity from span attributes (resource attrs merge into span attrs before extraction, so a producer may set either at whichever level fits its instrumentation).
+- **In-process Python SDK** — `otel/provider.py::convert_otel_span` reads the resource-level dimensions off `otel_span.resource.attributes` and the span-level dimensions off the span's own attributes.
+- **LiteLLM's out-of-process named callback** (`sdk/client.py`, which has no OTel context of its own) — reads `tj_tenant_id` / `tj_feature` / `tj_prompt_template_id` / `tj_prompt_template_version` from the LiteLLM call's `metadata` dict, mirroring the existing `tj_agent_id` / `tj_session_id` convention.
+
+**Setting them from the SDK.** `@watch(tenant_id=..., feature=...)` attributes a whole session (stamped on the session span, and pushed into the ambient context below for the duration of the wrapped call). `record_llm_call(...)` / `record_tool_call(...)` accept the same kwargs per call, resolving explicit kwarg > inherited from the parent span > ambient context. For auto-instrumented provider-patch spans (`patch_anthropic()`, `patch_openai()`, `patch_gemini()`, `patch_bedrock()`, `patch_litellm()`, and the LangChain LLM-call patch) — which wrap a third-party client method with no tj-owned call signature to extend — `tokenjam.sdk.attribution.attribution(tenant_id=..., feature=..., prompt_template_id=..., prompt_template_version=...)` is a `contextvars`-based context manager: declare the dimensions once around a block of code (a request handler, a per-tenant task) and every span created within it — across every integration — is stamped automatically.
+
+**Cost API.** `GET /api/v1/cost` accepts `group_by=tenant|feature|environment|prompt_version` (alongside the original `agent|model|day|tool`) plus independent equality filters `tenant_id`/`feature`/`environment`/`prompt_version`, and returns an `attribution_coverage` block reporting whether each dimension carries ANY data in the window — the single source the web UI reads to render an honest empty state ("set `tokenjam.tenant_id` at the call site") instead of a misleadingly blank chart. `GET /api/v1/cost/tenants` is the dedicated top-N-tenants-by-spend concentration view: each tenant's share is computed against TOTAL window spend (including unattributed spend), never just the attributed subset, so concentration can never be silently inflated. The generalized `/api/v1/analytics` explorer pivot supports the same four dimensions via `_DIMENSION_EXPR`.
+
+---
+
 ## Budget system
 
 ### CLI (`tj budget`)

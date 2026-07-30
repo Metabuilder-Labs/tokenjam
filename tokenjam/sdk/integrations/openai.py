@@ -15,7 +15,8 @@ from typing import Any
 
 from opentelemetry import trace
 
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
+from tokenjam.sdk.attribution import stamp_span_attribution
 from tokenjam.sdk.integrations._request_capture import (
     extract_openai_completion,
     record_completion_content,
@@ -66,6 +67,10 @@ class OpenAIIntegration:
             # unless [capture] prompts is on. Set before the call so it's present
             # even on the streaming path (completion text isn't aggregated there).
             record_prompt_content(span, kwargs.get("messages"))
+            # Cost-attribution dimensions from the ambient sdk.attribution
+            # context (#SDK dashboard shape) — this patched client call has no
+            # per-call kwarg for tenant_id/feature.
+            stamp_span_attribution(span)
             is_stream = kwargs.get("stream", False)
             try:
                 response = integration._original_create(self_comp, *args, **kwargs)
@@ -110,13 +115,42 @@ class OpenAIIntegration:
         self.installed = False
 
 
+def _chunk_carries_content(chunk: Any) -> bool:
+    """True when a streamed chunk delivered generated output to the caller.
+
+    Deliberately structural and defensive: the point is only to separate "this
+    stream produced something the user was billed for" from "this stream was
+    empty", so an unrecognised chunk shape counts as no content rather than
+    raising into the caller's iteration.
+    """
+    choices = getattr(chunk, "choices", None)
+    if not choices:
+        return False
+    for choice in choices:
+        delta = getattr(choice, "delta", None)
+        if delta is None:
+            continue
+        if getattr(delta, "content", None) or getattr(delta, "tool_calls", None):
+            return True
+    return False
+
+
 class _StreamWrapper:
-    """Wraps an OpenAI stream to capture final usage chunk and end the span."""
+    """Wraps an OpenAI stream to capture final usage chunk and end the span.
+
+    Also records the streaming data-quality signature (see
+    ``TjAttributes.STREAMING``): an OpenAI-compatible API emits usage ONLY when
+    the request carried ``stream_options={"include_usage": true}`` AND the
+    caller drains the iterator to the trailing chunk. Either omission leaves
+    this span with no token counts, which is indistinguishable from a free call
+    unless the span says so itself.
+    """
 
     def __init__(self, stream, span):
         self._stream = stream
         self._span = span
         self._usage = None
+        self._content_chunks = 0
 
     def __iter__(self):
         _ok = False
@@ -124,6 +158,8 @@ class _StreamWrapper:
             for chunk in self._stream:
                 if hasattr(chunk, "usage") and chunk.usage:
                     self._usage = chunk.usage
+                if _chunk_carries_content(chunk):
+                    self._content_chunks += 1
                 yield chunk
             _ok = True
         except Exception as exc:
@@ -139,6 +175,17 @@ class _StreamWrapper:
                     GenAIAttributes.OUTPUT_TOKENS,
                     self._usage.completion_tokens,
                 )
+            # Stamped unconditionally, including on the happy path: the
+            # analyzer needs the complete streams as the peer baseline it
+            # estimates the missing ones against, so "usage reported" is as
+            # load-bearing a fact as "usage missing".
+            self._span.set_attribute(TjAttributes.STREAMING, True)
+            self._span.set_attribute(
+                TjAttributes.STREAM_USAGE_REPORTED, self._usage is not None,
+            )
+            self._span.set_attribute(
+                TjAttributes.STREAM_CONTENT_CHUNKS, self._content_chunks,
+            )
             if _ok:
                 self._span.set_status(trace.Status(trace.StatusCode.OK))
             self._span.end()

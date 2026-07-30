@@ -1,4 +1,29 @@
-"""Log-to-span converter for Claude Code OTLP log events."""
+"""Log-to-span converter for Claude Code OTLP log events.
+
+**Prompt content on this path.** The transcript backfill attaches the human's
+turn text to the assistant span it produced (`core/backfill.py`'s
+`pending_prompt`), so an analyzer reading `gen_ai.prompt.content` has textual
+signal on backfilled sessions. This path used to attach none, which meant the
+same analyzer behaved completely differently depending on how a session
+happened to be ingested — and on a machine running `tj serve`, most sessions
+arrive here.
+
+What the exporter can and cannot carry, so the limit is stated rather than
+discovered: the priced `api_request` event carries session, model, token counts
+and cost and **no text whatsoever**; the only textual attribute Claude Code
+emits is the turn's prompt on a `user_prompt` event, and only when the user
+runs it with `OTEL_LOG_USER_PROMPTS=1`. So the prompt is carried forward from
+the `user_prompt` record to the `api_request` record of the same `prompt.id`,
+mirroring backfill's shape exactly. That pairing is resolved WITHIN one export
+batch: a turn whose prompt arrived in an earlier batch is not matched, and
+nothing here pretends otherwise — what actually landed is measured and
+published as capture coverage (`core/optimize/analyzers/plan_reuse.py`) rather
+than inferred from the config toggle.
+
+The content itself is gated where all captured content is gated, at
+`strip_captured_content` in the ingest pipeline, so `[capture] prompts = false`
+drops it before it is stored.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -45,7 +70,54 @@ def _parse_attrs(raw_attrs: list[dict]) -> dict[str, Any]:
 
 
 def _ts_to_datetime(timestamp_ns: int) -> datetime:
+    """Convert a record timestamp. Callers must have established it is real.
+
+    `_observed_timestamp_ns` below is the gate: a record with no observed time
+    is rejected before it reaches any converter, so a zero can no longer arrive
+    here and be turned into `1970-01-01`. That sentinel was not a harmless
+    placeholder — it participates in MIN(), in ORDER BY and in every day union,
+    and one such row was enough to make a corpus with two months of usable
+    history report a span in the thousands of days.
+    """
     return datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc)
+
+
+def _observed_timestamp_ns(record: dict, attrs: dict[str, Any]) -> int:
+    """The record's observed time in epoch nanoseconds.
+
+    Raises `SpanRejectedError` when there is none. Both producers are live, not
+    hypothetical: Claude Code's own OTel log exporter omits `timeUnixNano` on
+    some records, and Codex sets it to 0 and puts the real timestamp in
+    `attrs["event.timestamp"]` as an ISO-8601 UTC string — which can itself be
+    absent or unparseable. Rejecting is the idiom the ingest adapters already
+    use (`ingest_adapters/langfuse.py`, `helicone.py`): a record that cannot say
+    when it happened is not ingested, rather than ingested with a made-up time.
+
+    Every parse failure in here becomes a rejection of THIS record. A malformed
+    `timeUnixNano` or a non-string `event.timestamp` used to raise out of the
+    per-record guard and fail the whole export batch with a 500.
+    """
+    try:
+        timestamp_ns = int(record.get("timeUnixNano", 0))
+    except (TypeError, ValueError) as exc:
+        raise SpanRejectedError(f"unparseable timeUnixNano: {exc}") from None
+    if timestamp_ns > 0:
+        return timestamp_ns
+
+    ts_str = attrs.get(CodexEvents.EVENT_TIMESTAMP)
+    if ts_str:
+        try:
+            dt = datetime.fromisoformat(str(ts_str).rstrip("Z") + "+00:00")
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise SpanRejectedError(
+                f"unparseable {CodexEvents.EVENT_TIMESTAMP}: {exc}"
+            ) from None
+        return int(dt.timestamp() * 1e9)
+
+    raise SpanRejectedError(
+        "record carries no observed timestamp (timeUnixNano is absent or zero "
+        f"and there is no {CodexEvents.EVENT_TIMESTAMP} to fall back to)"
+    )
 
 
 def _api_request_to_span(
@@ -200,6 +272,11 @@ def _user_prompt_to_span(
     for key in ("prompt_length", ClaudeCodeEvents.EVENT_SEQUENCE):
         if key in attrs:
             extra_attrs[key] = attrs[key]
+    # Under the standard key, so the one capture gate in the ingest pipeline
+    # governs it and analyzers find it where they find backfilled content.
+    prompt = attrs.get(ClaudeCodeEvents.PROMPT)
+    if isinstance(prompt, str) and prompt:
+        extra_attrs[GenAIAttributes.PROMPT_CONTENT] = prompt
 
     return NormalizedSpan(
         span_id=_span_id_from_prompt(prompt_id) if prompt_id else new_span_id(),
@@ -353,9 +430,14 @@ def _codex_user_prompt_to_span(
     start_time = _ts_to_datetime(timestamp_ns)
 
     extra_attrs: dict[str, Any] = {}
-    for key in (CodexEvents.PROMPT_LENGTH, CodexEvents.PROMPT):
-        if key in attrs:
-            extra_attrs[key] = attrs[key]
+    if CodexEvents.PROMPT_LENGTH in attrs:
+        extra_attrs[CodexEvents.PROMPT_LENGTH] = attrs[CodexEvents.PROMPT_LENGTH]
+    # Was carried under Codex's own key, where the capture gate never saw it
+    # (so `[capture] prompts = false` did not drop it) and no analyzer looked
+    # for it. Same standard key as every other path now.
+    prompt = attrs.get(CodexEvents.PROMPT)
+    if isinstance(prompt, str) and prompt:
+        extra_attrs[GenAIAttributes.PROMPT_CONTENT] = prompt
 
     return NormalizedSpan(
         span_id=new_span_id(),
@@ -457,6 +539,57 @@ _CONVERTERS = {
 }
 
 
+def _claude_code_prompts_by_turn(body: dict) -> dict[str, str]:
+    """The turn text Claude Code exported in THIS batch, keyed by `prompt.id`.
+
+    Only `user_prompt` records carry text, and only under
+    `OTEL_LOG_USER_PROMPTS=1`; the priced `api_request` record carries none.
+    Collected in a pre-pass so the pairing does not depend on the two records'
+    order within the batch. Keyed on `prompt.id` — the per-TURN id — never on
+    the session or conversation, which would smear one turn's text across every
+    call in the session.
+    """
+    prompts: dict[str, str] = {}
+    for resource_log in body.get("resourceLogs", []):
+        for scope_log in resource_log.get("scopeLogs", []):
+            for record in scope_log.get("logRecords", []):
+                body_val = record.get("body", {})
+                event_name = (
+                    _otlp_value(body_val) if isinstance(body_val, dict) else body_val
+                )
+                if event_name != ClaudeCodeEvents.USER_PROMPT:
+                    continue
+                attrs = _parse_attrs(record.get("attributes", []))
+                prompt_id = attrs.get(ClaudeCodeEvents.PROMPT_ID)
+                prompt = attrs.get(ClaudeCodeEvents.PROMPT)
+                if isinstance(prompt_id, str) and isinstance(prompt, str) and prompt:
+                    prompts[prompt_id] = prompt
+    return prompts
+
+
+def _attach_turn_prompt(
+    span: NormalizedSpan, attrs: dict[str, Any], prompt_by_turn: dict[str, str],
+) -> None:
+    """Carry a turn's prompt onto the priced LLM span that turn produced.
+
+    Mirrors `core/backfill.py`, where the pending prompt is attached to the
+    assistant span it preceded — so an analyzer reading
+    `gen_ai.prompt.content` sees the same shape whether a session was ingested
+    live or backfilled. Never overwrites content a converter already set, and
+    stays out of tool and marker spans.
+    """
+    if span.name != GenAIAttributes.SPAN_LLM_CALL:
+        return
+    if GenAIAttributes.PROMPT_CONTENT in span.attributes:
+        return
+    prompt_id = attrs.get(ClaudeCodeEvents.PROMPT_ID)
+    if not isinstance(prompt_id, str):
+        return
+    prompt = prompt_by_turn.get(prompt_id)
+    if prompt:
+        span.attributes[GenAIAttributes.PROMPT_CONTENT] = prompt
+
+
 def parse_log_records(
     body: dict,
     pipeline: IngestPipeline,
@@ -472,6 +605,7 @@ def parse_log_records(
     """
     ingested = 0
     rejections: list[dict[str, str]] = []
+    prompt_by_turn = _claude_code_prompts_by_turn(body)
 
     for resource_log in body.get("resourceLogs", []):
         # Extract resource-level attributes (e.g. service.name)
@@ -480,7 +614,6 @@ def parse_log_records(
 
         for scope_log in resource_log.get("scopeLogs", []):
             for record in scope_log.get("logRecords", []):
-                timestamp_ns = int(record.get("timeUnixNano", 0))
                 body_val = record.get("body", {})
                 event_name = _otlp_value(body_val) if isinstance(body_val, dict) else body_val
 
@@ -496,25 +629,19 @@ def parse_log_records(
                 if not isinstance(event_name, str):
                     continue
 
-                # Codex CLI sets timeUnixNano=0 and puts the real timestamp in
-                # attrs["event.timestamp"] as an ISO-8601 UTC string.
-                if timestamp_ns == 0:
-                    ts_str = attrs.get(CodexEvents.EVENT_TIMESTAMP)
-                    if ts_str:
-                        try:
-                            dt = datetime.fromisoformat(ts_str.rstrip("Z") + "+00:00")
-                            timestamp_ns = int(dt.timestamp() * 1e9)
-                        except ValueError:
-                            pass
-
                 converter = _CONVERTERS.get(event_name)
                 if converter is None:
                     # Unknown event — skip silently
                     continue
 
-                record_id = f"{event_name}:{timestamp_ns}"
-
+                # Inside the per-record guard, deliberately: an unparseable
+                # timestamp rejects THIS record. Read outside it, a malformed
+                # `timeUnixNano` or a non-string `event.timestamp` raised
+                # straight out of the loop and failed the whole export batch.
+                record_id = event_name
                 try:
+                    timestamp_ns = _observed_timestamp_ns(record, attrs)
+                    record_id = f"{event_name}:{timestamp_ns}"
                     span = converter(attrs, resource_attrs, timestamp_ns)
                     if span is None:
                         continue
@@ -533,6 +660,7 @@ def parse_log_records(
                     span.parent_session_id = resource_attrs.get(
                         TjAttributes.PARENT_SESSION_ID
                     )
+                    _attach_turn_prompt(span, attrs, prompt_by_turn)
                     pipeline.process(span)
                     ingested += 1
                 except SpanRejectedError as exc:

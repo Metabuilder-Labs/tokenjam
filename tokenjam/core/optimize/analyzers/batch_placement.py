@@ -32,9 +32,30 @@ from datetime import datetime
 from typing import Any
 
 from tokenjam.core.optimize.accounting import four_type_token_sum_sql
+from tokenjam.core.pricing import variant_price_ratio
 
-#: The Batch API bills a flat half of standard prices.
-BATCH_DISCOUNT = 0.50
+#: The pricing-table variant that carries the Batch API's rates.
+BATCH_VARIANT = "batch"
+
+#: Fallback used only if the pricing table carries no uniform `batch` variant —
+#: the historical hardcoded value, kept so a stripped-down override file can
+#: never make this analyzer claim a 100% saving.
+_FALLBACK_BATCH_DISCOUNT = 0.50
+
+
+def batch_discount() -> float:
+    """The fraction of a workload's cost the Batch API removes, from rate data.
+
+    Read from the `[variants.batch]` definition in the pricing table rather than
+    held as a constant here: it is a PRICE, and prices belong in the priced
+    table where a change is one edit in one place. `variant_price_ratio` returns
+    the fraction of standard the variant bills at, so the saving is its
+    complement.
+    """
+    ratio = variant_price_ratio(BATCH_VARIANT)
+    if ratio is None:
+        return _FALLBACK_BATCH_DISCOUNT
+    return max(0.0, 1.0 - ratio)
 
 #: Below this many sessions there are fewer than three inter-start gaps, which
 #: is not enough spacing to call a cadence regular at all.
@@ -96,8 +117,8 @@ class BatchPlacementFinding:
     window_cost_usd:     float = 0.0
     candidate_cost_usd:  float = 0.0
     percent_of_window_cost: float = 0.0
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:      str = BATCH_ESTIMATE_BASIS
     estimate_confidence: str = "estimated"
     friction:            str = BATCH_FRICTION_NOTE
@@ -279,6 +300,7 @@ def analyze_batch_placement(
             "tokens": int(tokens or 0),
         })
 
+    discount = batch_discount()
     candidates: list[BatchCandidate] = []
     for agent, sessions in sorted(by_agent.items()):
         # An agent_id is not a schedule: cluster by inter-arrival gap
@@ -311,7 +333,7 @@ def analyze_batch_placement(
                 gap_cv=round(cv, 4),
                 cost_usd=round(cost, 6),
                 tokens=sum(s["tokens"] for s in cluster),
-                estimated_batch_saving_usd=round(cost * BATCH_DISCOUNT, 6),
+                estimated_batch_saving_usd=round(cost * discount, 6),
             ))
 
     if not candidates:
@@ -325,8 +347,8 @@ def analyze_batch_placement(
             round(100.0 * candidate_cost / window_cost_usd, 1)
             if window_cost_usd > 0 else 0.0
         ),
-        estimated_recoverable_usd=round(candidate_cost * BATCH_DISCOUNT, 6),
-        estimated_recoverable_tokens=sum(c.tokens for c in candidates),
+        past_overspend_usd=round(candidate_cost * discount, 6),
+        past_overspend_tokens=sum(c.tokens for c in candidates),
         min_sessions_for_cadence=min_sessions_for_cadence,
         min_group_cost_usd=min_group_cost_usd,
     )

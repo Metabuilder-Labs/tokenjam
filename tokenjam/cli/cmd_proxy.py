@@ -37,7 +37,7 @@ def _config_write_path(config) -> Path:
 
 @click.group("proxy")
 def cmd_proxy() -> None:
-    """Manage the optional enforcement-plane proxy (suggest mode)."""
+    """Manage the enforcement proxy (optional)."""
 
 
 @cmd_proxy.command("enable")

@@ -48,15 +48,15 @@ _ID_HEX_LEN = 12
 #: having been REGISTERED in the user's own config, and a caller-supplied path
 #: would aim the write at any repo on disk.
 APPLY_CLUSTER_FIELDS = (
-    "signature", "family_key", "title", "proposed_fix", "rung",
+    "signature", "family_key", "title", "proposed_fix", "delivery",
     "sessions", "occurrences", "repos", "examples",
     "apply_kind", "agent_name", "current_model", "proposed_model", "source_path",
-    # Review inbox monthly-basis figures (behavioral requirement #1/#7):
-    # carried through to apply time so `apply_relearn_fix` can snapshot the
-    # human-reviewed estimate onto the applied-fix ledger record's `verify`
-    # dict for the Applied tab's `est.` figure — a bounded, single read, not
-    # a live re-measurement.
-    "estimated_monthly_usd", "estimated_monthly_tokens",
+    # Past-overspend figure (the one canonical dollar field): carried through
+    # to apply time so `apply_relearn_fix` can snapshot the human-reviewed
+    # figure onto the applied-fix ledger record's `verify` dict for the
+    # Applied tab's figure — a bounded, single read, not a live
+    # re-measurement.
+    "past_overspend_usd", "past_overspend_tokens",
 )
 
 #: Per apply kind, the stored fields the write genuinely cannot be built
@@ -70,7 +70,7 @@ MODEL_ROUTING_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 
 def missing_apply_fields(cluster: dict[str, Any]) -> tuple[str, ...]:
     """The required fields this cluster's ``apply_kind`` needs and does not
-    have. Empty for a rung-ladder fix (no ``apply_kind``) and for a complete
+    have. Empty for a delivery-mechanism fix (no ``apply_kind``) and for a complete
     model-routing proposal."""
     apply_kind = str(cluster.get("apply_kind") or "")
     if not apply_kind:
@@ -112,6 +112,37 @@ def advise_only_reason(proposal: dict[str, Any]) -> str | None:
     return ADVISE_ONLY_REASON if proposal.get("advise_only") else None
 
 
+def advise_snippet_offered(proposal: dict[str, Any]) -> bool:
+    """Is this cluster's ``proposed_fix`` a real recommendation the user can act
+    on themselves, rather than the "no fix template matched" placeholder?
+
+    The Review inbox routes every row onto a three-valued mechanism axis: tj can
+    apply it, tj hands over the exact change, or there is genuinely nothing to
+    hand over. ``write_offered`` answers the first. This answers the second, and
+    it has to be answered HERE rather than in the browser: the distinction is
+    ``build_proposals``' own ``has_real_fix``, and the only trace of it on the
+    payload is that a placeholder write is blocked with ``REASON_PLACEHOLDER``.
+    Re-deriving that in JS would mean the UI keying on a sentence this package
+    owns the wording of, which is the drift the ``short_reason`` map exists to
+    prevent.
+
+    False when the write WAS offered, and that is the load-bearing half. Unlike a
+    cost proposal, where ``suggestion`` and the apply path are separate fields
+    describing separate things (``deadweight``'s mcp_remove legitimately carries
+    both), a relearn cluster's ``proposed_fix`` is the SAME content the write
+    would write. Handing it over is only a distinct offer when tokenjam will not
+    write it, so a cluster tokenjam is about to write must not also advertise
+    "copy this" and duplicate its own fix on the row. Hence "advise" in the name.
+    """
+    from tokenjam.core.optimize.write_budget import REASON_PLACEHOLDER
+
+    if not str(proposal.get("proposed_fix") or "").strip():
+        return False
+    if proposal.get("write_offered"):
+        return False
+    return str(proposal.get("write_blocked_reason") or "").strip() != REASON_PLACEHOLDER
+
+
 def proposal_id_for(signature: str) -> str:
     """The stable ID for a cluster signature. Deterministic across processes
     and recomputes: the same signature always yields the same ID."""
@@ -131,6 +162,8 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
     again on read) means a cache written before either existed still resolves
     without a recompute.
     """
+    from tokenjam.core.optimize.write_budget import short_reason
+
     clusters = finding.get("clusters")
     if not isinstance(clusters, list):
         return dict(finding)
@@ -139,6 +172,23 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
             **c,
             "proposal_id": proposal_id_for(str(c.get("signature") or "")),
             "advise_only_reason": advise_only_reason(c),
+            # Derived on read for the same reason the two above are: a cache
+            # written before this field existed still has to resolve without a
+            # recompute. The Review inbox row renders ONLY the short label (the
+            # long sentence is a paragraph, and a real corpus gates ~50 of 55
+            # clusters), so without this stamp an older cache would silently
+            # drop the gate note from every row — the exact invisibility the
+            # short label was added to fix.
+            "write_blocked_short": (
+                c.get("write_blocked_short")
+                or short_reason(c.get("write_blocked_reason") or "")
+            ),
+            # Derived on read for the same reason as the three above, and
+            # deliberately NOT stored on the dataclass: it is a pure function of
+            # fields already on the cluster, so a stored copy could only ever
+            # disagree with them. A cache written before this existed resolves
+            # correctly on the first read, with no recompute.
+            "advise_snippet_offered": advise_snippet_offered(c),
         }
         if isinstance(c, dict) else c
         for c in clusters
@@ -158,13 +208,15 @@ def list_cost_proposals(
     resolve it from the store.
     """
     from tokenjam.core.optimize import relearn_store
-    from tokenjam.core.optimize.cost_proposals import backfill_legacy_monthly_fields
+    from tokenjam.core.optimize.cost_proposals import (
+        backfill_legacy_past_overspend_fields,
+    )
 
     block = relearn_store.read_cost_proposals(path, config=config)
     if not isinstance(block, dict):
         return []
     return [
-        backfill_legacy_monthly_fields(
+        backfill_legacy_past_overspend_fields(
             {**pr, "proposal_id": proposal_id_for(str(pr.get("signature") or ""))}
         )
         for pr in (block.get("cost_proposals") or []) if isinstance(pr, dict)

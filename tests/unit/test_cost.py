@@ -6,7 +6,14 @@ from datetime import datetime, timezone
 import pytest
 
 from tokenjam.core.cost import calculate_cost, WindowTotals
-from tokenjam.core.pricing import load_pricing_table, get_rates
+from tokenjam.core.pricing import (
+    load_pricing_table,
+    get_rates,
+    _rates_from,
+    classify_pricing_source,
+    DEFAULT_CACHE_READ_PER_MTOK,
+    DEFAULT_CACHE_WRITE_PER_MTOK,
+)
 
 
 def test_calculate_cost_known_model():
@@ -351,6 +358,186 @@ def test_pricing_file_exists_at_expected_path():
     assert "tokenjam" in PRICING_FILE.parts, (
         f"PRICING_FILE should be inside the tokenjam package, got {PRICING_FILE}"
     )
+
+
+# ─── claude-opus-5 / claude-mythos-5 (previously absent from models.toml —
+# fell through to the default fallback, which used to price BOTH cache
+# classes at $0.00) ──────────────────────────────────────────────────────────
+
+
+def test_get_rates_opus_5_matches_opus_4_8():
+    opus5 = get_rates("anthropic", "claude-opus-5")
+    opus48 = get_rates("anthropic", "claude-opus-4-8")
+    assert opus5 is not None
+    assert (opus5.input_per_mtok, opus5.output_per_mtok,
+            opus5.cache_read_per_mtok, opus5.cache_write_per_mtok) == (
+        (opus48.input_per_mtok, opus48.output_per_mtok,
+         opus48.cache_read_per_mtok, opus48.cache_write_per_mtok)
+    )
+    assert (opus5.input_per_mtok, opus5.output_per_mtok,
+            opus5.cache_read_per_mtok, opus5.cache_write_per_mtok) == (
+        5.00, 25.00, 0.50, 6.25
+    )
+
+
+def test_get_rates_mythos_5_matches_fable_5():
+    mythos5 = get_rates("anthropic", "claude-mythos-5")
+    fable5 = get_rates("anthropic", "claude-fable-5")
+    assert mythos5 is not None
+    assert (mythos5.input_per_mtok, mythos5.output_per_mtok,
+            mythos5.cache_read_per_mtok, mythos5.cache_write_per_mtok) == (
+        (fable5.input_per_mtok, fable5.output_per_mtok,
+         fable5.cache_read_per_mtok, fable5.cache_write_per_mtok)
+    )
+    assert (mythos5.input_per_mtok, mythos5.output_per_mtok,
+            mythos5.cache_read_per_mtok, mythos5.cache_write_per_mtok) == (
+        10.00, 50.00, 1.00, 12.50
+    )
+
+
+def test_get_rates_opus_5_dated_and_context_tag_variants_resolve():
+    base = get_rates("anthropic", "claude-opus-5")
+    assert base is not None
+    assert get_rates("anthropic", "claude-opus-5-20260601") == base
+    assert get_rates("anthropic", "claude-opus-5[1m]") == base
+    assert get_rates("anthropic", "claude-opus-5-20260601[1m]") == base
+
+
+def test_calculate_cost_opus_5_prices_cache_correctly():
+    # Regression guard for the exact bug: before models.toml carried a row for
+    # claude-opus-5, cache tokens for this model priced at $0.00 (default
+    # fallback left cache_read/write_per_mtok at 0.0).
+    cost = calculate_cost(
+        "anthropic", "claude-opus-5",
+        input_tokens=122_001,
+        output_tokens=8_395_056,
+        cache_read_tokens=2_140_831_874,
+        cache_write_tokens=44_711_503,
+    )
+    expected = (
+        122_001 / 1_000_000 * 5.00
+        + 8_395_056 / 1_000_000 * 25.00
+        + 2_140_831_874 / 1_000_000 * 0.50
+        + 44_711_503 / 1_000_000 * 6.25
+    )
+    assert cost == pytest.approx(round(expected, 8))
+    # The stored (buggy) figure was ~$16.85 — correctly priced this is two
+    # orders of magnitude larger, dominated by the cache-read volume.
+    assert cost > 1000
+
+
+# ─── Unpriced-model fallback must not silently zero cache tokens ───────────
+
+
+def test_calculate_cost_unpriced_model_cache_tokens_are_not_zeroed(caplog):
+    """A model absent from the pricing table entirely must not price its
+    cache tokens at $0.00 — the exact defect this fix addresses. The fallback
+    now uses a non-zero, ratio-derived guess for cache_read/write instead of
+    the ModelRates dataclass default of 0.0."""
+    with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
+        cost = calculate_cost(
+            "test_never_priced_provider", "test_never_priced_model",
+            input_tokens=0,
+            output_tokens=0,
+            cache_read_tokens=1_000_000,
+            cache_write_tokens=1_000_000,
+        )
+    assert cost > 0.0
+    expected = DEFAULT_CACHE_READ_PER_MTOK + DEFAULT_CACHE_WRITE_PER_MTOK
+    assert cost == pytest.approx(expected)
+
+
+def test_default_cache_rates_are_nonzero_and_ratio_derived():
+    # 10% of input for cache-read, 1.25x input for cache-write — the ratio
+    # every priced Anthropic row in models.toml holds.
+    assert DEFAULT_CACHE_READ_PER_MTOK > 0.0
+    assert DEFAULT_CACHE_WRITE_PER_MTOK > 0.0
+
+
+# ─── Anthropic-priced models: byte-identical cost before/after this change ─
+
+
+@pytest.mark.parametrize(
+    "model,input_tokens,output_tokens,expected",
+    [
+        ("claude-haiku-4-5", 1_000_000, 1_000_000, 6.0),      # 1.00 + 5.00
+        ("claude-sonnet-4-6", 1_000_000, 1_000_000, 18.0),    # 3.00 + 15.00
+        ("claude-sonnet-5", 1_000_000, 1_000_000, 12.0),      # 2.00 + 10.00
+        ("claude-opus-4-8", 1_000_000, 1_000_000, 30.0),      # 5.00 + 25.00
+        ("claude-fable-5", 1_000_000, 1_000_000, 60.0),       # 10.00 + 50.00
+        ("claude-opus-4", 1_000_000, 1_000_000, 90.0),        # 15.00 + 75.00
+    ],
+)
+def test_anthropic_priced_models_cost_unchanged(model, input_tokens, output_tokens, expected):
+    """Every model already carrying a real models.toml row must cost exactly
+    what it did before this fix — the fallback change only touches models
+    with NO entry in the table."""
+    assert calculate_cost("anthropic", model, input_tokens, output_tokens) == pytest.approx(expected)
+
+
+# ─── A cache class omitted from a models.toml row is distinguishable from a
+# cache class explicitly priced at 0.0 (openai gpt-5.5-pro omits cache_write
+# deliberately; that must not read the same as "verified $0.00 cache-write"). ─
+
+
+def test_rates_from_distinguishes_omitted_cache_class_from_explicit_zero():
+    omitted = _rates_from({"input_per_mtok": 1.0, "output_per_mtok": 2.0})
+    assert omitted.cache_write_per_mtok == 0.0
+    assert omitted.cache_write_specified is False
+    assert omitted.cache_read_per_mtok == 0.0
+    assert omitted.cache_read_specified is False
+
+    explicit_zero = _rates_from({
+        "input_per_mtok": 1.0, "output_per_mtok": 2.0, "cache_write_per_mtok": 0.0,
+    })
+    assert explicit_zero.cache_write_per_mtok == 0.0
+    assert explicit_zero.cache_write_specified is True
+
+
+def test_openai_rows_with_omitted_cache_write_are_marked_unspecified():
+    rates = get_rates("openai", "gpt-5.5-pro")
+    assert rates is not None
+    assert rates.cache_write_per_mtok == 0.0
+    assert rates.cache_write_specified is False
+
+
+def test_unpriced_model_fallback_marks_cache_rates_unspecified():
+    # calculate_cost builds its own ModelRates fallback internally; assert the
+    # invariant on that construction directly via the same defaults it uses.
+    from tokenjam.core.pricing import DEFAULT_INPUT_PER_MTOK, DEFAULT_OUTPUT_PER_MTOK
+    from tokenjam.core.pricing import ModelRates
+
+    fallback = ModelRates(
+        input_per_mtok=DEFAULT_INPUT_PER_MTOK,
+        output_per_mtok=DEFAULT_OUTPUT_PER_MTOK,
+        cache_read_per_mtok=DEFAULT_CACHE_READ_PER_MTOK,
+        cache_write_per_mtok=DEFAULT_CACHE_WRITE_PER_MTOK,
+        cache_read_specified=False,
+        cache_write_specified=False,
+    )
+    assert fallback.cache_read_specified is False
+    assert fallback.cache_write_specified is False
+    assert fallback.cache_read_per_mtok > 0.0
+
+
+# ─── classify_pricing_source ────────────────────────────────────────────────
+
+
+def test_classify_pricing_source_exact():
+    assert classify_pricing_source("anthropic", "claude-opus-4-8") == "exact"
+
+
+def test_classify_pricing_source_date_stripped():
+    assert classify_pricing_source("anthropic", "claude-sonnet-4-20250514") == "date_stripped"
+
+
+def test_classify_pricing_source_context_tag():
+    assert classify_pricing_source("anthropic", "claude-opus-4-8[1m]") == "context_tag"
+    assert classify_pricing_source("anthropic", "claude-opus-4-8-20260528[1m]") == "context_tag"
+
+
+def test_classify_pricing_source_default_fallback():
+    assert classify_pricing_source("nonexistent", "totally-unpriced-model") == "default_fallback"
 
 
 def test_window_totals_total_tokens_includes_cache_write():

@@ -65,7 +65,7 @@ def capture_session_method(
         asks = build_session_asks(
             session_id, projects_root=projects_dir, include_subagents=True
         )
-    except Exception as exc:  # noqa: BLE001 - best-effort, must not raise into caller
+    except Exception as exc:  # best-effort, must not raise into caller
         logger.warning(
             "method capture: failed to build story for %s: %s", session_id, exc
         )
@@ -93,7 +93,7 @@ def capture_session_method(
             "VALUES ($1, $2, $3, $4, $5)",
             [session_id, payload, captured_at, source, SNAPSHOT_SCHEMA_VERSION],
         )
-    except Exception as exc:  # noqa: BLE001 - best-effort, must not raise into caller
+    except Exception as exc:  # best-effort, must not raise into caller
         logger.warning(
             "method capture: failed to persist snapshot for %s: %s", session_id, exc
         )

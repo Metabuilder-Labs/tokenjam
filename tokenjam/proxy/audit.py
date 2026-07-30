@@ -95,7 +95,7 @@ class AuditSink:
     def __call__(self, obs: Any) -> None:
         try:
             self._persist(obs)
-        except Exception:  # noqa: BLE001 — audit must never break the proxy
+        except Exception:  # audit must never break the proxy
             logger.exception("policy-decision audit persistence failed (ignored)")
 
     def _persist(self, obs: Any) -> None:
@@ -156,7 +156,7 @@ class AuditSink:
                 self.pipeline.process(span)
             else:
                 self.db.insert_span(span)
-        except Exception:  # noqa: BLE001
+        except Exception:  # 1
             logger.exception("policy self-observation span emit failed (ignored)")
 
 

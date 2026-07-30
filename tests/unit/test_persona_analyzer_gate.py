@@ -46,13 +46,23 @@ NO_LEVER = set(PERSONA_DISABLED_ANALYZERS["claude-code"])
 # The pin: what the product decision names explicitly. Any change to the gate
 # is a product decision and must be made here deliberately.
 assert NO_LEVER == {
-    "cache", "cache-recommend", "placement", "trim", "verbosity", "script",
+    "cache", "cache-recommend", "placement", "trim", "verbosity", "script", "reuse",
+    "stream-usage",
 }
 
 # `placement` is the odd one out: it is not an ANALYZER_REGISTRY name at all
 # (the `downsize` analyzer attaches it as a sub-check), so it is never
 # "invoked" and never appears in `report.findings` under its own name.
 NO_LEVER_REGISTRY_NAMES = NO_LEVER - {"placement"}
+
+# sdk's own gate: `deadweight`/`subagent` are gated on a DATA SOURCE this
+# persona structurally never has (an on-disk Claude Code transcript, a
+# populated `sub_agent_id`), not on a missing lever — same "must never be
+# invoked" bar, different reason. Derived from the production map for the
+# same reason NO_LEVER is: a name silently dropped from the gate fails here.
+SDK_NO_LEVER = set(PERSONA_DISABLED_ANALYZERS.get("sdk", frozenset()))
+assert SDK_NO_LEVER == {"deadweight", "subagent"}
+
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 
 
@@ -121,7 +131,7 @@ def test_claude_code_window_never_invokes_the_no_lever_analyzers(db, cfg, monkey
     assert "placement" not in report.findings
 
 
-def test_sdk_window_is_unaffected(db, cfg, monkeypatch):
+def test_sdk_window_is_unaffected_by_the_claude_code_no_lever_gate(db, cfg, monkeypatch):
     _seed(db, "billing-service")
     invoked, report = _run_recording_invocations(db, cfg, monkeypatch)
 
@@ -129,6 +139,31 @@ def test_sdk_window_is_unaffected(db, cfg, monkeypatch):
     assert NO_LEVER_REGISTRY_NAMES <= set(invoked)
     assert "placement" in report.findings
     for name in NO_LEVER_REGISTRY_NAMES:
+        assert name in invoked, name
+
+
+def test_sdk_window_never_invokes_the_data_source_gated_analyzers(db, cfg, monkeypatch):
+    """`deadweight` (on-disk Claude Code transcripts) and `subagent`
+    (`sub_agent_id IS NOT NULL`) can never produce a candidate for an SDK
+    window — true-skip them rather than dispatch a query that structurally
+    always returns nothing to act on."""
+    _seed(db, "billing-service")
+    invoked, report = _run_recording_invocations(db, cfg, monkeypatch)
+
+    assert report.persona == "sdk"
+    # Never invoked -> no query ran, and nothing to render.
+    assert SDK_NO_LEVER.isdisjoint(invoked)
+    assert SDK_NO_LEVER.isdisjoint(report.findings)
+
+
+def test_claude_code_window_still_invokes_the_sdk_gated_analyzers(db, cfg, monkeypatch):
+    """The sdk gate is persona-scoped: a claude-code window (real on-disk
+    transcripts, real subagent dispatches) must keep running both."""
+    _seed(db, "claude-code-proj")
+    invoked, report = _run_recording_invocations(db, cfg, monkeypatch)
+
+    assert report.persona == "claude-code"
+    for name in SDK_NO_LEVER:
         assert name in invoked, name
 
 
@@ -168,13 +203,20 @@ def test_gate_saves_real_query_work_on_a_claude_code_window(cfg):
 
 
 def test_mixed_and_unknown_personas_disable_nothing():
-    # Conservative default: only a persona we can positively classify as an
-    # interactive coding agent loses analyzers.
-    assert disabled_analyzers_for_persona("sdk") == frozenset()
+    # Conservative default: an UNCLASSIFIED window loses no analyzer.
     assert disabled_analyzers_for_persona("mixed") == frozenset()
     assert disabled_analyzers_for_persona("unknown") == frozenset()
     # Exact, not a subset: the mirror must cover the whole gate.
     assert NO_LEVER == set(PERSONA_DISABLED_ANALYZERS["claude-code"])
+
+
+def test_sdk_persona_disables_exactly_the_data_source_gated_pair():
+    # sdk is classified, but its gate is on data-source reachability, not the
+    # claude-code no-lever set — the two gates are disjoint reasons and must
+    # stay disjoint sets (`deadweight`/`subagent` are never gated FOR
+    # claude-code, which has real data for both).
+    assert disabled_analyzers_for_persona("sdk") == SDK_NO_LEVER
+    assert SDK_NO_LEVER.isdisjoint(NO_LEVER)
 
 
 def test_explicitly_requested_disabled_analyzer_is_still_skipped(db, cfg):
@@ -200,8 +242,14 @@ def test_cost_analyzers_mirror_the_gate():
     scoped = cost_analyzers_for_persona("claude-code")
     assert NO_LEVER.isdisjoint(scoped)
     assert "deadweight" in scoped and "subagent" in scoped
-    # Any other persona keeps the full list.
-    assert cost_analyzers_for_persona("sdk") == COST_ANALYZERS
+    # sdk's own gate: the pair with no reachable data source for this
+    # persona must be absent from the Review inbox's own selection surface
+    # too, or a disabled analyzer's findings would still reach it as
+    # apply-able cards (COST_ANALYZERS is an independent second surface).
+    sdk_scoped = cost_analyzers_for_persona("sdk")
+    assert "deadweight" not in sdk_scoped and "subagent" not in sdk_scoped
+    assert set(sdk_scoped) == set(COST_ANALYZERS) - SDK_NO_LEVER
+    # Any unclassified persona keeps the full list.
     assert cost_analyzers_for_persona("unknown") == COST_ANALYZERS
 
 
@@ -212,14 +260,14 @@ def _report_with_no_lever_findings(persona: str) -> OptimizeReport:
     cache = CacheEfficacyFinding(
         flagged=[CacheEfficacyRow("anthropic", "claude-sonnet-5", 100_000, 5_000,
                                   0.05, "full", True)],
-        estimated_recoverable_usd=1.2, estimate_basis="cache basis",
+        past_overspend_usd=1.2, estimate_basis="cache basis",
     )
     trim = PromptBloatFinding(
         enabled=True,
         per_prompt=[BloatPrompt(agent_id="svc-a", sample_chars="x", prompt_chars=8000,
                                 significant_chars=3000, bloat_chars=5000,
                                 estimated_token_reduction=1250)],
-        estimated_recoverable_usd=0.8, estimate_basis="trim basis",
+        past_overspend_usd=0.8, estimate_basis="trim basis",
     )
     return OptimizeReport(
         window=w, persona=persona, findings={"cache": cache, "trim": trim},
@@ -241,7 +289,7 @@ def test_review_inbox_still_gates_placement_for_claude_code():
                       spans=100, total_tokens=1_000_000, total_cost_usd=50.0,
                       thin_data=False)
     placement = BatchPlacementFinding(
-        candidates=[], estimated_recoverable_usd=None, estimate_basis="batch basis",
+        candidates=[], past_overspend_usd=None, estimate_basis="batch basis",
         min_sessions_for_cadence=5, min_group_cost_usd=1.0,
     )
     rep = OptimizeReport(window=w, persona="claude-code", findings={"placement": placement})

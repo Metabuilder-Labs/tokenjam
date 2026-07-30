@@ -20,8 +20,8 @@ def test_welcome_banner_shows_brand_version_and_value_prop(capsys):
     out = capsys.readouterr().out
     assert "TokenJam" in out
     assert __version__ in out
-    # One-line value prop; honest framing, no promised savings (Rule 14).
-    assert "cost-saving utility for AI agents" in out
+    # Trimmed one-line tagline (#643); honest framing, no promised savings (Rule 14).
+    assert "token efficiency for AI agents" in out
     assert "saves you" not in out.lower()
 
 
@@ -59,27 +59,54 @@ def test_nudge_with_data_but_unknown_days_avoids_bogus_count(capsys):
     assert "last None days" not in out
 
 
-def test_nudge_claude_code_persona_leads_with_quota_diagnosis(capsys):
-    """CC users get the quota-diagnosis commands; tjb is an SDK workflow and
-    must not appear on the Claude Code list."""
+def test_nudge_claude_code_persona_is_exactly_two_entries(capsys):
+    """The CC list is the web dashboard plus tokenmaxx, in that order. The
+    per-command diagnosis rows (`tj context`, `tj quota-audit`) are gone: the
+    dashboard is where that diagnosis is read. tjb is an SDK workflow and must
+    not appear here either."""
     _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=True,
+        has_data=True, days=30, persona="claude-code", daemon_running=True,
     )
     out = capsys.readouterr().out
-    assert "tj context" in out
-    assert "tj quota-audit" in out
+    assert "web dashboard" in out
     assert "tj tokenmaxx" in out
+    assert out.index("web dashboard") < out.index("tj tokenmaxx")
+    assert "tj context" not in out
+    assert "tj quota-audit" not in out
     assert "tjb" not in out
     assert "tokenjam-bench" not in out
-    # Lead with the diagnosis pair.
-    assert out.index("tj context") < out.index("tj quota-audit") < out.index("tj tokenmaxx")
+    # Exactly two command rows: the indented block that follows the
+    # "Next steps" header, up to the blank line that closes it. (Anything
+    # after that blank line is a separate advisory, e.g. the PATH warning.)
+    lines = out.splitlines()
+    start = next(i for i, ln in enumerate(lines) if "Next steps" in ln) + 1
+    rows = []
+    for ln in lines[start:]:
+        if not ln.strip():
+            if rows:
+                break
+            continue
+        rows.append(ln)
+    assert len(rows) == 2, rows
+
+
+def test_nudge_claude_code_never_says_lens(capsys):
+    """The web UI entry is named "web dashboard" on this list, not "Lens"."""
+    _print_next_steps_nudge(
+        has_data=True, days=30, persona="claude-code", daemon_running=True,
+    )
+    assert "Lens" not in capsys.readouterr().out
+    _print_next_steps_nudge(
+        has_data=True, days=30, persona="claude-code", daemon_running=False,
+    )
+    assert "Lens" not in capsys.readouterr().out
 
 
 def test_nudge_daemon_running_never_suggests_tj_serve(capsys):
-    """Onboarding just installed the daemon — Lens is already up; suggesting
-    `tj serve` invites a port conflict."""
+    """Onboarding just installed the daemon — the dashboard is already up;
+    suggesting `tj serve` invites a port conflict."""
     _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=True,
+        has_data=True, days=30, persona="claude-code", daemon_running=True,
     )
     out = capsys.readouterr().out
     assert "tj serve" not in out
@@ -89,7 +116,7 @@ def test_nudge_daemon_running_never_suggests_tj_serve(capsys):
 
 def test_nudge_no_daemon_still_points_at_tj_serve(capsys):
     _print_next_steps_nudge(
-        has_data=False, persona="claude_code", daemon_running=False,
+        has_data=False, persona="claude-code", daemon_running=False,
     )
     out = capsys.readouterr().out
     assert "tj serve" in out
@@ -108,9 +135,21 @@ def test_home_when_not_configured_points_at_onboarding(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "TokenJam" in out                     # banner
     assert "Not set up yet" in out
+    # Get Started section (#643): all three onboard variants, each with a
+    # "run this if..." one-liner, plus a Learn more section.
+    assert "Get Started:" in out
     assert "tj onboard" in out
-    # No longer implies `--claude-code` is a separate/recommended setup.
-    assert "tj onboard --claude-code" not in out
+    assert "tj onboard --claude-code" in out
+    assert "tj onboard --codex" in out
+    assert "run this if you only use Claude Code" in out
+    assert "run this if you only use Codex" in out
+    assert "more than one agent client" in out
+    assert "Learn more:" in out
+    assert "tj --help" in out
+    assert "tokenjam.dev/docs" in out
+    # #643: the stale "run it once inside each project" line is gone —
+    # onboarding aggregates all projects automatically.
+    assert "inside each project" not in out
 
 
 def test_home_when_configured_shows_next_best_actions(monkeypatch, capsys, tmp_path):
@@ -185,6 +224,14 @@ def _isolated_claude_code(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._try_apply_declared_plans", lambda *a, **k: None,
     )
+    # #643: the restart panel is now conditional on `claude` actually running.
+    # These tests assert panel CONTENT/ORDER, so force it on deterministically
+    # (whether the machine running the suite has a `claude` process is
+    # irrelevant to what the panel says). The conditional behavior itself is
+    # covered by test_restart_panel_conditional_on_claude_running below.
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard._claude_code_is_running", lambda: True,
+    )
 
 
 def _run_claude_code(tmp_path, plan_choice: str):
@@ -217,17 +264,51 @@ def test_claude_code_asks_plan_before_budget(_isolated_claude_code, tmp_path):
 
 def test_claude_code_restart_banner_precedes_nudge(_isolated_claude_code, tmp_path):
     """Founder-review order (2026-07): the one REQUIRED action (restart) is the
-    visually primary element, next steps come after it, connection details
-    are a dim footer at the end."""
+    visually primary element, next steps come after it. #643: connection
+    details moved behind --verbose, so the default screen ends on next steps."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     out = res.output
     assert "Next steps" in out
     assert "Action required" in out
     assert out.index("Action required") < out.index("Next steps"), out
-    assert out.index("Next steps") < out.index("Connection details"), out
+    # #643: connection details are no longer on the default success screen.
+    assert "Connection details" not in out
     # No backfill happened here, so no "already loaded" over-claim.
     assert "already loaded" not in out
+
+
+def test_restart_panel_conditional_on_claude_running(
+    _isolated_claude_code, tmp_path, monkeypatch,
+):
+    """#643: the "Action required: restart Claude Code" panel only shows when a
+    `claude` process is actually running. A fresh terminal with none open needs
+    no restart, so the block is suppressed."""
+    # Force "not running" — the panel must be absent.
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard._claude_code_is_running", lambda: False,
+    )
+    res = _run_claude_code(tmp_path, "3")
+    assert res.exit_code == 0, res.output
+    assert "Action required" not in res.output
+    # ... but the rest of the success screen is intact.
+    assert "Claude Code observability configured" in res.output
+    assert "Next steps" in res.output
+
+
+def test_verbose_shows_connection_details(_isolated_claude_code, tmp_path):
+    """#643: --verbose restores the connection-details block on the success
+    screen for debugging/harness setups."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        res = runner.invoke(
+            cmd_onboard,
+            ["--claude-code", "--no-daemon", "--project", "testproj", "--verbose"],
+            input="3\n0\n", obj={},
+        )
+    assert res.exit_code == 0, res.output
+    assert "Connection details" in res.output
+    assert "Agent ID:" in res.output
 
 
 def test_claude_code_restart_panel_is_why_first_and_consolidated(
@@ -293,9 +374,9 @@ def test_claude_code_no_pre_restart_verify_prompt(_isolated_claude_code, tmp_pat
 def test_claude_code_asks_project_name_after_agent_questions(
     _isolated_claude_code, tmp_path,
 ):
-    """Prompt order: usage/plan questions first, THEN project name (founder
-    direction 2026-07 — the project-name question wedged between the two
-    agent questions broke their grouping)."""
+    """Prompt order: usage/plan questions first, THEN project name (2026-07
+    direction — the project-name question wedged between the two agent
+    questions broke their grouping)."""
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
         # plan(3=max_5x, no ceiling/budget prompts) → project name (default).

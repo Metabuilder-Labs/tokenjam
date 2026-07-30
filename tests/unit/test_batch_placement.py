@@ -12,7 +12,7 @@ import pytest
 
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize.analyzers.batch_placement import (
-    BATCH_DISCOUNT,
+    batch_discount,
     MAX_START_GAP_CV,
     MIN_GROUP_COST_USD,
     MIN_SESSIONS_FOR_CADENCE,
@@ -72,8 +72,8 @@ def test_cadence_regular_unattended_workload_is_a_candidate(db):
     assert candidate.gap_cv == 0.0
     assert candidate.cost_usd == pytest.approx(6.0)
     # The Batch API is a flat half of standard prices.
-    assert candidate.estimated_batch_saving_usd == pytest.approx(6.0 * BATCH_DISCOUNT)
-    assert finding.estimated_recoverable_usd == pytest.approx(3.0)
+    assert candidate.estimated_batch_saving_usd == pytest.approx(6.0 * batch_discount())
+    assert finding.past_overspend_usd == pytest.approx(3.0)
     assert finding.percent_of_window_cost == pytest.approx(50.0)
     # All four billed token types travel with the candidate.
     assert candidate.tokens == 6 * (2_000 + 500 + 100 + 50)
@@ -371,7 +371,7 @@ def test_placement_survives_the_report_dict_round_trip(db):
     assert restored.window_cost_usd == finding.window_cost_usd
     assert restored.candidate_cost_usd == finding.candidate_cost_usd
     assert restored.percent_of_window_cost == finding.percent_of_window_cost
-    assert restored.estimated_recoverable_usd == finding.estimated_recoverable_usd
+    assert restored.past_overspend_usd == finding.past_overspend_usd
     assert restored.estimate_basis == finding.estimate_basis
     assert restored.friction == finding.friction
     assert restored.min_sessions_for_cadence == finding.min_sessions_for_cadence

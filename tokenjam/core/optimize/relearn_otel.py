@@ -88,6 +88,89 @@ def non_coding_agent_ids(conn: Any | None) -> set[str]:
     }
 
 
+def _coding_repo_label(agent_id: str | None) -> str:
+    """Repo label for a CODING agent, matching the transcript lane exactly.
+
+    ``analyzers.relearn._repo_map_from_db`` strips the ``claude-code-`` prefix
+    off ``agent_id`` to recover the repo name. The archive lane has to strip it
+    the same way or the same repo would carry two different labels depending on
+    which lane surfaced the failure, and ``_scope_for`` would then read one
+    project as two.
+    """
+    repo = str(agent_id or "unknown")
+    prefix = "claude-code-"
+    return repo[len(prefix):] if repo.startswith(prefix) else repo
+
+
+def extract_archived_coding_failures(
+    conn: Any | None,
+    session_ids: set[str],
+    since: datetime | None = None,
+) -> list[FailureEpisode]:
+    """Failing spans from CODING sessions whose transcript is already gone.
+
+    The archive lane (see ``analyzers.relearn.compute_relearn_finding``). The
+    transcript lane owns every session Claude Code still has a ``.jsonl`` for;
+    this one covers the sessions it has rotated away but tokenjam still holds
+    telemetry for, which is the entire reason the archive exists. ``session_ids``
+    is that transcript-less set, computed by the caller, so the two lanes are
+    disjoint by construction and no failure is counted twice.
+
+    Deliberately the same coarse-signature trade the OTel lane already makes: a
+    span carries ``status_message`` rather than the raw tool error, so an
+    archived cluster is coarser than a transcript-sourced one. Coarse-but-real
+    beats structurally-invisible, which is what these sessions are today.
+
+    Never raises: an unreadable ``spans`` table degrades to no failures.
+    """
+    if conn is None or not session_ids:
+        return []
+
+    sql = (
+        "SELECT session_id, agent_id, tool_name, name, status_message, start_time "
+        "FROM spans WHERE status_code = $1"
+    )
+    params: list[Any] = [ERROR_STATUS]
+    if since is not None:
+        sql += " AND start_time >= $2"
+        params.append(since)
+
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except Exception:
+        return []
+
+    failures: list[FailureEpisode] = []
+    for session_id, agent_id, tool_name, name, status_message, start_time in rows:
+        if not is_interactive_coding_agent(agent_id):
+            continue  # the OTel lane's territory, not the archive's
+        if str(session_id or "") not in session_ids:
+            continue  # its transcript is still on disk; the transcript lane has it
+
+        error_text = (status_message or "").strip()[:MAX_SPAN_ERROR_CHARS]
+        if not error_text:
+            error_text = (name or "").strip()
+        if not error_text:
+            continue
+        if is_user_decline(error_text):
+            continue
+
+        failures.append(FailureEpisode(
+            session_id=str(session_id or ""),
+            repo=_coding_repo_label(agent_id),
+            ts=start_time.isoformat() if hasattr(start_time, "isoformat") else (
+                str(start_time) if start_time else None
+            ),
+            tool_name=str(tool_name or name or "unknown"),
+            label="",
+            error_text=error_text,
+            kind="act",
+            is_retry=False,
+            depth=0,
+        ))
+    return failures
+
+
 def extract_span_failures(
     conn: Any | None, since: datetime | None = None,
 ) -> list[FailureEpisode]:
@@ -178,6 +261,6 @@ def to_eval_case(cluster: RelearnCluster) -> dict:
         "proposed_fix": cluster.proposed_fix,
         "suggested_recommendation": cluster.proposed_fix,
         "advise_only": cluster.advise_only,
-        "estimated_recoverable_tokens": cluster.estimated_recoverable_tokens,
+        "past_overspend_tokens": cluster.past_overspend_tokens,
         "note": HONESTY_CAVEAT,
     }

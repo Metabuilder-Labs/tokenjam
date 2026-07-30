@@ -19,7 +19,9 @@ from tokenjam.core.config import (
     AlertChannelConfig,
     AlertsConfig,
     BudgetConfig,
+    CodingGroupConfig,
     DefaultsConfig,
+    GroupBudgetConfig,
     TjConfig,
     SensitiveAction,
 )
@@ -244,6 +246,101 @@ def test_cost_budget_daily_inherits_from_defaults_when_agent_has_only_session():
     alerts = [call[0][0] for call in db.insert_alert.call_args_list]
     daily_alerts = [a for a in alerts if a.type == AlertType.COST_BUDGET_DAILY]
     assert len(daily_alerts) == 1
+
+
+# ── Coding-tool group daily budget ──────────────────────────────────────────
+# A coding agent_id (claude-code / claude-code-<project> / codex_exec) is
+# checked against its GROUP's summed daily spend, not its own agent_id alone
+# -- core/agent_kind.py classifies the id, core/alerts.py's
+# _check_coding_group_daily_budget sums across every member.
+
+def test_coding_group_daily_budget_fires_on_summed_group_spend():
+    config = _make_config()
+    config.coding_agents = {
+        "claude-code": CodingGroupConfig(budget=GroupBudgetConfig(daily_usd=50.0)),
+    }
+    engine, db = _make_engine(config)
+    db.get_distinct_agent_ids.return_value = [
+        f"claude-code-proj-{i}" for i in range(20)
+    ]
+    db.get_daily_cost_for_agents.return_value = 60.0  # 20 agents * $3, no single one over $50
+    session = make_session(agent_id="claude-code-proj-0")
+    engine.evaluate_session_end(session)
+    alerts = [call[0][0] for call in db.insert_alert.call_args_list]
+    daily_alerts = [a for a in alerts if a.type == AlertType.COST_BUDGET_DAILY]
+    assert len(daily_alerts) == 1
+    assert daily_alerts[0].detail["group"] == "claude-code"
+    assert daily_alerts[0].detail["daily_cost"] == 60.0
+    # The per-agent daily path (get_daily_cost) must NOT be used for a coding agent.
+    db.get_daily_cost.assert_not_called()
+
+
+def test_coding_group_daily_budget_does_not_fire_under_group_cap():
+    config = _make_config()
+    config.coding_agents = {
+        "claude-code": CodingGroupConfig(budget=GroupBudgetConfig(daily_usd=100.0)),
+    }
+    engine, db = _make_engine(config)
+    db.get_distinct_agent_ids.return_value = ["claude-code-proj-a"]
+    db.get_daily_cost_for_agents.return_value = 10.0
+    session = make_session(agent_id="claude-code-proj-a")
+    engine.evaluate_session_end(session)
+    daily_alerts = [
+        c[0][0] for c in db.insert_alert.call_args_list
+        if c[0][0].type == AlertType.COST_BUDGET_DAILY
+    ]
+    assert daily_alerts == []
+
+
+def test_coding_group_daily_budget_inherits_coding_zone_default():
+    """A tool with no explicit [coding_agents.<id>] entry yet still gets
+    capped, from [defaults.coding_budget] -- never arrives uncapped."""
+    config = _make_config()
+    config.defaults.coding_budget = GroupBudgetConfig(daily_usd=25.0)
+    engine, db = _make_engine(config)
+    db.get_distinct_agent_ids.return_value = ["codex_exec"]
+    db.get_daily_cost_for_agents.return_value = 30.0
+    session = make_session(agent_id="codex_exec")
+    engine.evaluate_session_end(session)
+    daily_alerts = [
+        c[0][0] for c in db.insert_alert.call_args_list
+        if c[0][0].type == AlertType.COST_BUDGET_DAILY
+    ]
+    assert len(daily_alerts) == 1
+    assert daily_alerts[0].detail["group"] == "codex"
+
+
+def test_coding_group_daily_budget_includes_agent_ids_not_yet_in_distinct_list():
+    """A brand-new agent_id whose own row hasn't landed in
+    get_distinct_agent_ids() yet is still included in the summed group."""
+    config = _make_config()
+    config.coding_agents = {
+        "claude-code": CodingGroupConfig(budget=GroupBudgetConfig(daily_usd=5.0)),
+    }
+    engine, db = _make_engine(config)
+    db.get_distinct_agent_ids.return_value = []  # brand new agent not listed yet
+    db.get_daily_cost_for_agents.return_value = 6.0
+    session = make_session(agent_id="claude-code-brand-new")
+    engine.evaluate_session_end(session)
+    db.get_daily_cost_for_agents.assert_called_once()
+    called_ids = db.get_daily_cost_for_agents.call_args[0][0]
+    assert "claude-code-brand-new" in called_ids
+
+
+def test_sdk_agent_daily_budget_unchanged_by_coding_group_logic():
+    """An SDK workflow (not claude-code/codex) keeps the original per-agent
+    daily check and never touches the group-sum path."""
+    config = _make_config(agents={
+        "sdk-workflow-1": AgentConfig(budget=BudgetConfig(daily_usd=10.0)),
+    })
+    engine, db = _make_engine(config)
+    db.get_daily_cost.return_value = 12.0
+    session = make_session(agent_id="sdk-workflow-1")
+    engine.evaluate_session_end(session)
+    db.insert_alert.assert_called()
+    alert: Alert = db.insert_alert.call_args[0][0]
+    assert alert.type == AlertType.COST_BUDGET_DAILY
+    db.get_daily_cost_for_agents.assert_not_called()
 
 
 # ── Session duration ────���─────────────────────────────────────���────────────

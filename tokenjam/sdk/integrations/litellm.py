@@ -22,6 +22,7 @@ from opentelemetry import trace
 
 from tokenjam.core.pricing import provider_for_model
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.attribution import stamp_span_attribution
 from tokenjam.sdk.integrations._request_capture import (
     record_completion_content,
     record_full_request,
@@ -224,6 +225,10 @@ class LiteLLMIntegration:
 
             _record_prompt_content(span, args, kwargs)
             record_full_request(span, kwargs)
+            # Cost-attribution dimensions from the ambient sdk.attribution
+            # context (#SDK dashboard shape) — LiteLLM's completion() has no
+            # tj-specific kwarg for tenant_id/feature.
+            stamp_span_attribution(span)
 
             token = _tj_litellm_active.set(True)
             handed_off = False
@@ -275,6 +280,10 @@ class LiteLLMIntegration:
 
             _record_prompt_content(span, args, kwargs)
             record_full_request(span, kwargs)
+            # Cost-attribution dimensions from the ambient sdk.attribution
+            # context (#SDK dashboard shape) — LiteLLM's completion() has no
+            # tj-specific kwarg for tenant_id/feature.
+            stamp_span_attribution(span)
 
             token = _tj_litellm_active.set(True)
             handed_off = False

@@ -11,8 +11,10 @@ from pathlib import Path
 
 
 def format_tokens(n: int) -> str:
-    """Human-size a token count: ``M`` at/above a million, ``k`` at/above a
-    thousand, otherwise the raw integer."""
+    """Human-size a token count: ``B`` at/above a billion, ``M`` at/above a
+    million, ``k`` at/above a thousand, otherwise the raw integer."""
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}B"
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
     if n >= 1_000:

@@ -235,12 +235,23 @@ def summarize_via(
         # Priced rewrite usage ÷ Estimate saving (DEC-029): the saving is est_tokens_saved priced at
         # the same model's input rate, via the shared cost engine (consistent fallback with the
         # rewrite cost). Failed checks still cost money, but have no staged saving to amortize.
+        #
+        # Deliberately priced at today's rate, and correct here for a reason
+        # that does not apply anywhere else. Everything under core/optimize
+        # prices PAST traffic and must use the rate that billed it (see
+        # `tokenjam.core.optimize.span_pricing`); this prices a rewrite about
+        # to be ISSUED, so today's rate — `get_rates`/`calculate_cost`'s default
+        # — is the rate it will actually bill at. Left bare rather than passing
+        # `at=utcnow()`, which would say the same thing more obscurely.
+        #
+        # (`cache_efficacy.estimate_cache_recoverable` also prices at now, but
+        # as a stated LIMITATION over past traffic, not because now is right.)
         from tokenjam.core.cost import calculate_cost
         from tokenjam.core.pricing import get_rates
         model = config.summarize.api_model
         assert model is not None  # rewrite_usd is set only on the api path, which required a model
         rates_known = get_rates("anthropic", model) is not None   # else the $ used default rates (#4)
-        if verdict.structure_ok:
+        if verdict.structure_ok and verdict.est_tokens_saved is not None:
             saving = calculate_cost("anthropic", model, verdict.est_tokens_saved, 0)
             break_even = math.ceil(delivered.rewrite_usd / saving) if saving > 0 else None
         else:

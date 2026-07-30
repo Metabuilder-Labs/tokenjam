@@ -27,6 +27,22 @@ class BudgetConfig:
 
 
 @dataclass
+class GroupBudgetConfig:
+    """A coding-tool GROUP's daily cap — e.g. one ceiling covering every
+    claude-code-<project> variant summed together. Daily-only: a per-session
+    cap has no meaning at group scope (there is no single session to cap),
+    and the UI never offers a per-session field for these rows. Kept as its
+    own dataclass rather than reusing BudgetConfig so a `session_usd` can
+    never be silently written here and silently ignored."""
+    daily_usd: float | None = None
+
+
+@dataclass
+class CodingGroupConfig:
+    budget: GroupBudgetConfig = field(default_factory=GroupBudgetConfig)
+
+
+@dataclass
 class DriftConfig:
     enabled:            bool  = True
     baseline_sessions:  int   = 10
@@ -57,13 +73,35 @@ class AgentConfig:
 
 @dataclass
 class DefaultsConfig:
+    # SDK-workflow zone default (per-agent daily + session cap).
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    # Coding-agent zone default: the daily group cap a newly-appearing coding
+    # tool (a claude-code/codex group with no [coding_agents.<id>] entry yet)
+    # inherits, so it starts capped instead of arriving uncapped.
+    coding_budget: GroupBudgetConfig = field(default_factory=GroupBudgetConfig)
 
 
 @dataclass
 class StorageConfig:
     path:           str = "~/.tj/telemetry.duckdb"
-    retention_days: int = 90
+    # THE user-chosen analysis span — "30d" / "90d" / "all" — written by
+    # `tj onboard`. Retention is derived from it, never chosen independently,
+    # so deletion cannot remove history the product is offering to analyze. See
+    # `core/analysis_span.py` for the derivation and the one-directional clamp;
+    # read the span through that module, never off this field, so the
+    # back-compat path below is applied everywhere.
+    analysis_span:  str | None = None
+    # None means "derive from analysis_span". A config that sets this and
+    # nothing else — every config written before the coupling existed — has its
+    # value read AS the span, so nothing about that setup changes.
+    retention_days: int | None = None
+    # Runtime provenance, never read from or written to TOML: True when `path`
+    # came from an explicit `--db` rather than config discovery. The
+    # filesystem-reading analyzers scope themselves off it (see
+    # `core/optimize/scope.py`) — a config file that happens to name the same
+    # path is a normal run, so the two cases have to stay distinguishable
+    # after the override has been applied.
+    path_is_explicit: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -78,8 +116,6 @@ class OtlpConfig:
 @dataclass
 class PrometheusConfig:
     enabled: bool = True
-    port:    int  = 9464
-    path:    str  = "/metrics"
 
 
 @dataclass
@@ -285,6 +321,14 @@ class OptimizeConfig:
     # tool-call-signature cluster needs at least this many member sessions
     # before it's recommended for script-replacement.
     min_cluster_instances: int = 20
+    # The transcript/config root the filesystem-reading analyzers (deadweight,
+    # relearn, summarize) may read — the `--projects-root` flag writes here.
+    # `None` defers to the precedence chain in `core/optimize/scope.py`: the
+    # TJ_CLAUDE_PROJECTS_ROOT env var, then suppression under an explicit
+    # `--db`, then `~/.claude/projects`. Unlike every other field in this
+    # section this is a SCOPE, not a sensitivity threshold — it decides which
+    # filesystem is evidence, not how eager an analyzer is about it.
+    projects_root: str | None = None
     # deadweight (analyzers/deadweight.py MIN_SESSIONS_DEADWEIGHT): an MCP
     # server needs to be configured-present in at least this many distinct
     # sessions, with zero invocations across all of them, to be flagged dead.
@@ -336,6 +380,32 @@ class OptimizeConfig:
     # placement is worth suggesting.
     min_group_cost_usd: float = 1.0
 
+    # --- Scheduled analyzer scan (core/optimize/report_store.py) -------------
+    # No HTTP request path runs analyzers any more: the full report is computed
+    # by the `tj serve` daemon (once at boot, then on an interval, plus on a
+    # user-pressed rescan) and every route serves the STORED result. These are
+    # the always-on rails for that scan — a kill switch, a cadence, the window
+    # the scan observes, and a floor on how often a rescan request may actually
+    # re-run the analyzers.
+    #
+    # scan_enabled=False keeps the daemon from ever scanning on its own; the
+    # stored report then only ever changes when a human presses rescan. It does
+    # NOT re-enable inline computation on a request — nothing does.
+    scan_enabled: bool = True
+    # Cadence of the daemon's background scan.
+    scan_interval_hours: float = 6.0
+    # Lookback the scan observes. Stored alongside the result so every surface
+    # labels the figures with the window they were actually computed over
+    # rather than whatever picker the reader's screen is set to.
+    scan_window_days: int = 30
+    # Floor between two rescans that actually re-run the analyzers. A rescan
+    # request inside this window is answered with the stored result and
+    # `throttled: true` rather than stacking another full-corpus pass.
+    scan_min_rescan_seconds: int = 60
+    # How often a UI surface re-reads the stored result (NOT how often the scan
+    # runs). Zero disables the UI's auto-refresh entirely.
+    scan_ui_poll_seconds: int = 300
+
 
 @dataclass
 class LoopConfig:
@@ -364,10 +434,44 @@ class LoopConfig:
 
 
 @dataclass
+class IngestConfig:
+    """`[ingest]` — continuous transcript ingestion by the `tj serve` daemon.
+
+    Claude Code's OTLP exporter has no retry and no buffer, so a session whose
+    shell lacked the telemetry env vars, or that ran while the daemon was down
+    or pointed at a stale port, is dropped permanently by the live path. The
+    on-disk transcript still exists — but only for ~30 days, after which Claude
+    Code prunes it and the session is unrecoverable.
+
+    So the daemon re-runs the (idempotent) Claude Code backfill over a bounded
+    recent window: once shortly after startup, so downtime self-heals, and then
+    on an interval, so an ongoing live-path miss is closed within minutes
+    instead of waiting for a human to remember `tj backfill claude-code`.
+
+    `startup_lookback_days` is deliberately wider than `lookback_hours`: the
+    startup pass has to cover however long the daemon was down, while the
+    steady-state pass only has to cover one interval plus slack.
+    """
+    auto_catch_up:        bool = True
+    interval_minutes:     int  = 30
+    lookback_hours:       int  = 48
+    startup_lookback_days: int = 14
+
+
+@dataclass
 class TjConfig:
     version:  str
     defaults: DefaultsConfig          = field(default_factory=DefaultsConfig)
     agents:   dict[str, AgentConfig]  = field(default_factory=dict)
+    # Coding-tool GROUP caps ([coding_agents.<group_id>.budget] in TOML), keyed
+    # by group id ("claude-code" / "codex" — see core/agent_kind.py). A
+    # deliberately SEPARATE namespace from `agents`: a group id like
+    # "claude-code" would otherwise collide with a literal per-agent
+    # [agents.claude-code] entry (the bare agent_id some setups still emit).
+    # Keeping groups in their own top-level TOML table means both can be
+    # configured independently with no ambiguity about which one a given
+    # section name refers to.
+    coding_agents: dict[str, CodingGroupConfig] = field(default_factory=dict)
     storage:  StorageConfig           = field(default_factory=StorageConfig)
     export:   ExportConfig            = field(default_factory=ExportConfig)
     alerts:   AlertsConfig            = field(default_factory=AlertsConfig)
@@ -378,6 +482,7 @@ class TjConfig:
     summarize: SummarizeConfig        = field(default_factory=SummarizeConfig)
     optimize: OptimizeConfig          = field(default_factory=OptimizeConfig)
     loop:     LoopConfig              = field(default_factory=LoopConfig)
+    ingest:   IngestConfig            = field(default_factory=IngestConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     policies: list[PolicyConfig]      = field(default_factory=list)
     # Manual session_id -> human label overrides ([session_labels] in TOML).
@@ -477,25 +582,67 @@ def find_config_file(override: str | None = None) -> Path | None:
     return None
 
 
+def resolve_config_path(override: str | None = None) -> Path | None:
+    """
+    The single source of truth for "which config file is this process using".
+
+    Precedence: an explicit ``override`` wins, then the ``TJ_CONFIG``
+    environment variable, then ``find_config_file``'s ``SEARCH_PATHS`` walk.
+    ``load_config`` resolves through here, so any call site that independently
+    needs the config path — to write back to the file config was read from
+    (budget updates), to report it (``tj doctor``), or to hand it to a
+    subprocess (``tj mcp``, the MCP server) — must call this too, never bare
+    ``find_config_file()``. A bare call ignores ``TJ_CONFIG`` and silently
+    splits reads (TJ_CONFIG-aware, via ``load_config``) from writes/reports
+    (search-path only) across two different files.
+
+    Like ``find_config_file``, raises ``FileNotFoundError`` when an explicit
+    override or ``TJ_CONFIG`` points at a path that doesn't exist — this
+    matches ``load_config``'s fail-loud contract. Callers that must stay
+    resilient to a bad ``TJ_CONFIG`` (e.g. the bare ``tj`` landing screen,
+    which renders before any config is validated) should not use this
+    function directly; see ``cli/home.py``.
+    """
+    if override is None:
+        override = os.environ.get("TJ_CONFIG") or None
+    return find_config_file(override)
+
+
+def active_config_path(config: "TjConfig | None") -> Path | None:
+    """The file this already-loaded config was actually read FROM, if known.
+
+    ``resolve_config_path`` answers "which file WOULD this process discover",
+    which is a different question once a per-invocation ``--config`` override
+    is in play: the override never reaches the environment, so a rediscovery
+    silently falls through to ``TJ_CONFIG`` or the search path and names some
+    other file. Every site that writes the config back — or reports which one
+    is live — must ask about the config it is holding, not re-run discovery.
+
+    Returns ``None`` when the config did not come from a file (defaults only,
+    or a caller-constructed object); the call site then falls back to
+    ``resolve_config_path()`` for the genuine no-config-yet case.
+    """
+    return getattr(config, "config_path", None)
+
+
 def load_config(path: str | None = None) -> TjConfig:
     """
     Load config from file, merge with defaults, return TjConfig.
 
     When no explicit ``path`` is given, honor the ``TJ_CONFIG`` environment
-    variable before falling back to the search-path discovery order. This keeps
-    SDK-bootstrapped processes (``ensure_initialised`` and the SDK integrations,
-    which call ``load_config()`` with no argument) consistent with the CLI — the
-    CLI already resolves ``TJ_CONFIG`` via Click's ``envvar`` and passes the
-    path in, so without this the SDK silently wrote spans to the global DB even
+    variable before falling back to the search-path discovery order (via
+    ``resolve_config_path``). This keeps SDK-bootstrapped processes
+    (``ensure_initialised`` and the SDK integrations, which call
+    ``load_config()`` with no argument) consistent with the CLI — the CLI
+    already resolves ``TJ_CONFIG`` via Click's ``envvar`` and passes the path
+    in, so without this the SDK silently wrote spans to the global DB even
     when ``TJ_CONFIG`` pointed elsewhere (#196). An explicit ``path`` argument
     still wins over the env var.
 
     IMPORTANT: tomllib requires binary mode "rb" -- not text mode "r".
     Using "r" raises TypeError at runtime.
     """
-    if path is None:
-        path = os.environ.get("TJ_CONFIG") or None
-    config_path = find_config_file(path)
+    config_path = resolve_config_path(path)
     if config_path is None:
         return TjConfig(version="1")
 
@@ -542,7 +689,12 @@ def _parse(raw: dict) -> TjConfig:
     storage_raw = raw.get("storage", {})
     storage = StorageConfig(
         path=storage_raw.get("path", StorageConfig.path),
-        retention_days=storage_raw.get("retention_days", StorageConfig.retention_days),
+        # Absence is meaningful for both of these and must survive the load:
+        # `analysis_span` absent + `retention_days` present is the pre-coupling
+        # config whose kept history IS its span. Defaulting either one here
+        # would erase that distinction.
+        analysis_span=storage_raw.get("analysis_span"),
+        retention_days=storage_raw.get("retention_days"),
     )
 
     export_raw = raw.get("export", {})
@@ -556,9 +708,7 @@ def _parse(raw: dict) -> TjConfig:
     )
     prom_raw = export_raw.get("prometheus", {})
     prometheus = PrometheusConfig(
-        enabled=prom_raw.get("enabled", True),
-        port=prom_raw.get("port", PrometheusConfig.port),
-        path=prom_raw.get("path", PrometheusConfig.path),
+        enabled=prom_raw.get("enabled", True)
     )
     export = ExportConfig(otlp=otlp, prometheus=prometheus)
 
@@ -625,6 +775,22 @@ def _parse(raw: dict) -> TjConfig:
         transcript_path=loop_raw.get("transcript_path") or None,
     )
 
+    # [ingest] — the daemon's continuous transcript catch-up. Defaults are on:
+    # without it, completeness depends on a human running a CLI command.
+    ingest_raw = raw.get("ingest", {})
+    ingest_cfg = IngestConfig(
+        auto_catch_up=bool(ingest_raw.get("auto_catch_up", IngestConfig.auto_catch_up)),
+        interval_minutes=int(
+            ingest_raw.get("interval_minutes", IngestConfig.interval_minutes)
+        ),
+        lookback_hours=int(
+            ingest_raw.get("lookback_hours", IngestConfig.lookback_hours)
+        ),
+        startup_lookback_days=int(
+            ingest_raw.get("startup_lookback_days", IngestConfig.startup_lookback_days)
+        ),
+    )
+
     summarize = SummarizeConfig(
         api_model=raw.get("summarize", {}).get("api_model"),
         allow_outbound_run=bool(raw.get("summarize", {}).get("allow_outbound_run", False)),
@@ -666,11 +832,39 @@ def _parse(raw: dict) -> TjConfig:
             "min_sessions_for_cadence", OptimizeConfig.min_sessions_for_cadence),
         min_group_cost_usd=optimize_raw.get(
             "min_group_cost_usd", OptimizeConfig.min_group_cost_usd),
+        scan_enabled=bool(optimize_raw.get(
+            "scan_enabled", OptimizeConfig.scan_enabled)),
+        scan_interval_hours=float(optimize_raw.get(
+            "scan_interval_hours", OptimizeConfig.scan_interval_hours)),
+        scan_window_days=int(optimize_raw.get(
+            "scan_window_days", OptimizeConfig.scan_window_days)),
+        scan_min_rescan_seconds=int(optimize_raw.get(
+            "scan_min_rescan_seconds", OptimizeConfig.scan_min_rescan_seconds)),
+        scan_ui_poll_seconds=int(optimize_raw.get(
+            "scan_ui_poll_seconds", OptimizeConfig.scan_ui_poll_seconds)),
+        projects_root=optimize_raw.get("projects_root") or None,
     )
 
     defaults_raw = raw.get("defaults", {})
     defaults_budget_raw = defaults_raw.get("budget", {})
-    defaults = DefaultsConfig(budget=BudgetConfig(**defaults_budget_raw))
+    defaults_coding_budget_raw = defaults_raw.get("coding_budget", {})
+    defaults = DefaultsConfig(
+        budget=BudgetConfig(**defaults_budget_raw),
+        coding_budget=GroupBudgetConfig(**defaults_coding_budget_raw),
+    )
+
+    # [coding_agents.<group_id>.budget] — daily-only ceilings for a coding
+    # TOOL group ("claude-code" / "codex"), summed across every member
+    # agent_id. Separate top-level table from [agents.*] on purpose: see
+    # TjConfig.coding_agents docstring for the collision this avoids.
+    coding_agents: dict[str, CodingGroupConfig] = {}
+    for group_id, group_raw in raw.get("coding_agents", {}).items():
+        if not isinstance(group_raw, dict):
+            continue
+        group_budget_raw = group_raw.get("budget", {})
+        coding_agents[group_id] = CodingGroupConfig(
+            budget=GroupBudgetConfig(**group_budget_raw)
+        )
 
     # [budget.<provider>] sections — periodic monthly ceilings used by tj optimize.
     # Distinct from [defaults.budget] / [agents.X.budget] (per-agent alert thresholds).
@@ -707,6 +901,7 @@ def _parse(raw: dict) -> TjConfig:
         version=raw.get("version", "1"),
         defaults=defaults,
         agents=agents,
+        coding_agents=coding_agents,
         storage=storage,
         export=export,
         alerts=alerts,
@@ -717,6 +912,7 @@ def _parse(raw: dict) -> TjConfig:
         summarize=summarize,
         optimize=optimize,
         loop=loop_cfg,
+        ingest=ingest_cfg,
         budgets=budgets,
         policies=policies,
         session_labels=dict(raw.get("session_labels", {})),
@@ -760,6 +956,16 @@ def _serialise(config: TjConfig) -> dict:
         agents_out[agent_id] = _dc_to_dict(agent_cfg)
     d["agents"] = agents_out
 
+    # coding_agents is a dict of str -> CodingGroupConfig, handle specially
+    # (same reason as `agents`/`budgets`: the generic dict branch above would
+    # assign the raw dataclass objects instead of recursing into them).
+    d.pop("coding_agents", None)
+    coding_agents_out: dict = {}
+    for group_id, group_cfg in config.coding_agents.items():
+        coding_agents_out[group_id] = _dc_to_dict(group_cfg)
+    if coding_agents_out:
+        d["coding_agents"] = coding_agents_out
+
     # budgets is a dict of str -> ProviderBudget, handle specially
     budgets_out: dict = {}
     for provider, prov_cfg in config.budgets.items():
@@ -794,6 +1000,24 @@ def resolve_effective_budget(agent_id: str, config: TjConfig) -> BudgetConfig:
     )
 
 
+def resolve_group_budget(group_id: str, config: TjConfig) -> GroupBudgetConfig:
+    """Return the effective daily cap for a coding-tool GROUP (see
+    core/agent_kind.py for what a "group" is), merging any
+    [coding_agents.<group_id>.budget] override over
+    [defaults.coding_budget] — same per-field-fallback shape as
+    resolve_effective_budget, just for the group namespace instead of the
+    per-agent one.
+    """
+    defaults = config.defaults.coding_budget
+    group_cfg = config.coding_agents.get(group_id)
+    if group_cfg is None:
+        return GroupBudgetConfig(daily_usd=defaults.daily_usd)
+    gb = group_cfg.budget
+    return GroupBudgetConfig(
+        daily_usd=gb.daily_usd if gb.daily_usd is not None else defaults.daily_usd,
+    )
+
+
 def validate_budget_value(value: float, field_name: str) -> float | None:
     """
     Validate and normalise a budget value from user input.
@@ -804,3 +1028,16 @@ def validate_budget_value(value: float, field_name: str) -> float | None:
     if value < 0:
         raise ValueError(f"Budget {field_name} must be non-negative, got {value}")
     return value if value > 0 else None
+
+
+def validate_cycle_start_day(value: int) -> int:
+    """
+    Validate a `[budget.<provider>] cycle_start_day` value from user input.
+
+    Must be 1..28 (see `core.cycle.cycle_bounds` — clamped there too, but this
+    surfaces a clear error at the API boundary instead of silently clamping a
+    typo'd value the user never intended).
+    """
+    if value < 1 or value > 28:
+        raise ValueError(f"cycle_start_day must be between 1 and 28, got {value}")
+    return value

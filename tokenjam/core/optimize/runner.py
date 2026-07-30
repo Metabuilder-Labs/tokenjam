@@ -15,6 +15,7 @@ from tokenjam.core.config import TjConfig
 from tokenjam.core.framing import agent_persona_mix, config_declared_plan, dominant_persona
 from tokenjam.utils.time_parse import utcnow
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
+from tokenjam.core.optimize.scope import resolve_analyzer_scope
 from tokenjam.core.optimize.types import (
     AnalyzerContext,
     OptimizeReport,
@@ -42,6 +43,7 @@ ANALYZER_ORDER: list[str] = [
     "relearn",
     "verbosity",
     "deadweight",
+    "stream-usage",
 ]
 
 # Analyzers that have NO fix a user of that persona can actually apply.
@@ -113,6 +115,49 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # retired; re-enable if the signature is redesigned to a subsequence
         # or prefix match that tolerates heterogeneous coding work.
         "script",
+        # Reuse asserts something no telemetry can establish for an
+        # interactive coding agent: that two planning calls were semantically
+        # interchangeable. Measured against a real corpus, the clustering that
+        # backs the claim has no content signal (every member's prompt-prefix
+        # hash is null, so clustering falls back to bare tool-name sequence),
+        # no time window, no prior-failure exclusion, and the large majority
+        # of its dollar figure comes from a null-tool-signature catch-all
+        # bucket ("nothing followed the plan") rather than any actual
+        # repeated plan. DECISION: disabled for this persona; the concept
+        # stays worth rebuilding behind a real content signal, a recency
+        # window, and a prior-failure exclusion. This gate applies to
+        # `claude-code` only — the defects measured above are specific to
+        # this corpus; the SDK case is a separate, unmeasured question and is
+        # deliberately left ungated.
+        "reuse",
+        # Stream-usage flags streamed calls that closed before the provider
+        # emitted its usage payload, so their spend went unrecorded. Its fix
+        # is a request-side change — `stream_options={"include_usage": True}`,
+        # or draining the stream server-side — to code that constructs the
+        # provider call. An interactive coding agent's harness constructs that
+        # call, which puts the lever on the other side of the actionable
+        # ceiling; and the harness drains its own streams, so the failure mode
+        # does not arise here in the first place. This is an SDK-persona
+        # finding: it stays enabled for `sdk` / `mixed` / `unknown`.
+        "stream-usage",
+    }),
+    # An SDK/API window has no on-disk Claude Code transcript and never
+    # populates `sub_agent_id` (no Task-tool subagent-dispatch concept in
+    # generic SDK telemetry) — both analyzers below are gated on a DATA
+    # SOURCE that structurally does not exist for this persona, not on a
+    # missing lever, so every dispatch would run a real query and still
+    # return nothing to act on.
+    "sdk": frozenset({
+        # Reads project `.mcp.json` / `.claude/settings*.json` / on-disk
+        # Claude Code `.jsonl` transcripts (see deadweight.py's module
+        # docstring, "Claude Code transcripts lane only") — an SDK window has
+        # none of these, so this always renders a permanently-empty card.
+        "deadweight",
+        # Scopes to `sub_agent_id IS NOT NULL`, which is NULL for every SDK
+        # span (see subagent_rightsizing.py's `_compute_rows`) — an SDK
+        # window can never have a row here, so this always renders a
+        # permanently-empty card.
+        "subagent",
     }),
 }
 
@@ -235,6 +280,11 @@ def build_report(
         budget_provider_filter=budget_provider_filter,
         budget_usd_override=budget_usd_override,
         persona=persona,
+        # Resolved exactly once, here, for the same reason the persona is: an
+        # analyzer that re-derives its own root from `Path.home()` or the env
+        # var escapes whatever scope the caller drew, and `--db` stops meaning
+        # anything. See `core/optimize/scope.py`.
+        scope=resolve_analyzer_scope(config),
     )
 
     selected = set(findings) if findings is not None else set(ANALYZER_REGISTRY.keys())
@@ -299,111 +349,225 @@ def _parse_dt(value: Any) -> datetime | None:
     return None
 
 
+def hydrate_dataclass(cls: Any, d: Any) -> Any:
+    """Rebuild a dataclass from `report_to_dict`'s output, field by field, by
+    INTROSPECTION rather than by a hand-written argument list.
+
+    This exists because the hand-written version was not lossless, and the
+    asymmetry was invisible: `report_to_dict` is a generic recursive walk that
+    serialises every field, while each `report_from_dict` constructor named its
+    fields by hand and silently fell back to dataclass defaults for anything it
+    forgot. `resend` alone dropped 19 fields on the way back, including
+    `cost_of_waste_usd` and `coverage_note`; `relearn` dropped
+    `past_reread_usd` and its whole `below_threshold_*` block.
+
+    That was survivable only while the live path handed the renderer a real
+    `OptimizeReport` and just the HTTP shim round-tripped. Once analyzer
+    results are served from a store, EVERY consumer round-trips, so a dropped
+    dollar field comes back as its default and a surface renders a smaller
+    number, or zero, with no error anywhere. A wrong figure that looks like a
+    successful read is worse than a failed one.
+
+    Coercion is driven by the resolved type hints: nested dataclasses and lists
+    of them recurse, `datetime` fields go through `_parse_dt`, everything else
+    passes through. A key absent from `d` is left to the dataclass default, so
+    an older or foreign payload still loads.
+
+    `tests/unit/test_report_roundtrip.py` fails if any dataclass field the
+    serializer writes does not survive the trip back, so the next analyzer
+    field cannot vanish silently the way these did.
+    """
+    import dataclasses
+    import typing
+
+    import sys
+
+    if d is None or not dataclasses.is_dataclass(cls):
+        return d
+    try:
+        hints = typing.get_type_hints(cls)
+    except Exception:
+        hints = {}
+
+    # The namespace forward references resolve against. `get_type_hints` does
+    # NOT reliably resolve a reference written INSIDE a subscript
+    # (`list["UncachedAgentCandidate"]`): on Python 3.10 the inner argument
+    # comes back as the bare string `'UncachedAgentCandidate'`, while 3.11+
+    # returns the class. Without this namespace the string fails every
+    # is_dataclass check below and the value passes straight through as a raw
+    # dict — the field is present and correctly shaped, but the TYPE is gone,
+    # so the failure surfaces far away as `'dict' object has no attribute ...`.
+    # See `_resolve`.
+    ns = getattr(sys.modules.get(cls.__module__), "__dict__", {})
+
+    kwargs: dict[str, Any] = {}
+    for f in dataclasses.fields(cls):
+        if f.name not in d:
+            continue   # leave the dataclass default in place
+        kwargs[f.name] = _coerce(_field_hint(f, hints, d[f.name]), d[f.name], ns)
+    # `is_dataclass(cls)` narrows to DataclassInstance for mypy, which it then
+    # refuses to call; `cls` here is always the CLASS, never an instance.
+    ctor: Any = cls
+    return ctor(**kwargs)
+
+
+def _hydrate_target(f: Any) -> Any:
+    """The class named by a field's ``hydrate`` metadata, imported lazily.
+
+    A field whose real element type lives in a module the declaring module
+    must not import (an analyzer row inside ``types``, which is deliberately
+    analyzer-free) has no annotation the hydrator can dispatch on — it is
+    written ``list[Any]``, and `Any` coerces to "leave the dict alone". The
+    dict then travels as a correctly-shaped value with the TYPE missing, and
+    the failure surfaces far away as ``'dict' object has no attribute ...``
+    inside whichever consumer expected the row's attributes. That is the same
+    class of silent loss `hydrate_dataclass` was written to end, one layer
+    over: not a dropped field, a dropped type.
+
+    So the type is declared as data instead of as an import: the field carries
+    ``metadata={"hydrate": "package.module:ClassName"}``, and the class is
+    imported HERE, at hydration time, where importing an analyzer is
+    harmless. Unresolvable (a renamed class, a module that will not import)
+    degrades to the annotation the field already had, which is exactly the
+    old behaviour — this can restore a type, never break a load.
+    """
+    spec = (getattr(f, "metadata", None) or {}).get("hydrate")
+    if not spec:
+        return None
+    module_name, _, qualname = str(spec).partition(":")
+    if not module_name or not qualname:
+        return None
+    try:
+        import importlib
+        return getattr(importlib.import_module(module_name), qualname, None)
+    except Exception:
+        return None
+
+
+def _field_hint(f: Any, hints: dict, value: Any) -> Any:
+    """The type hint to coerce one field against, preferring its ``hydrate``
+    metadata over a loose annotation. Container-shaped values keep their
+    container (``list[Any]`` becomes ``list[Row]``, not ``Row``)."""
+    import dataclasses
+    import typing
+
+    hint = hints.get(f.name, f.type)
+    target = _hydrate_target(f)
+    if target is None or not dataclasses.is_dataclass(target):
+        return hint
+    if typing.get_origin(hint) in (list, tuple) or isinstance(value, list):
+        return list[target]      # type: ignore[valid-type]
+    return target
+
+
+def _resolve(hint: Any, ns: dict) -> Any:
+    """Turn a forward reference into the class it names, if we can.
+
+    Needed because a quoted reference inside a builtin generic subscript is not
+    resolved uniformly across supported Pythons: `list["Candidate"]` yields the
+    string on 3.10 and the class on 3.11+. Everything downstream dispatches on
+    `is_dataclass`, which a string always fails, so an unresolved reference
+    silently degrades a nested dataclass to the raw dict it was serialized
+    from. Returning the hint unchanged when it cannot be resolved keeps an
+    unknown name behaving exactly as before rather than raising.
+    """
+    if isinstance(hint, str):
+        return ns.get(hint, hint)
+    forward_arg = getattr(hint, "__forward_arg__", None)   # typing.ForwardRef
+    if forward_arg is not None:
+        return ns.get(forward_arg, hint)
+    return hint
+
+
+def _coerce(hint: Any, value: Any, ns: dict | None = None) -> Any:
+    """Coerce one serialized value back to what its type hint asks for."""
+    import dataclasses
+    import typing
+
+    if value is None:
+        return None
+
+    ns = ns or {}
+    hint = _resolve(hint, ns)
+    origin = typing.get_origin(hint)
+    args = typing.get_args(hint)
+
+    # Optional[X] / X | None -> coerce against the non-None member.
+    if origin is typing.Union or (origin is not None and str(origin) == "|"):
+        inner = [a for a in args if a is not type(None)]   # noqa: E721
+        return _coerce(inner[0], value, ns) if len(inner) == 1 else value
+    try:
+        import types as _types
+        if isinstance(hint, _types.UnionType):        # PEP 604 `X | None`
+            inner = [a for a in args if a is not type(None)]   # noqa: E721
+            return _coerce(inner[0], value, ns) if len(inner) == 1 else value
+    except Exception:
+        pass
+
+    if origin in (list, tuple) and args:
+        return [_coerce(args[0], v, ns) for v in value]
+    if origin is dict and len(args) == 2:
+        return {k: _coerce(args[1], v, ns) for k, v in value.items()}
+    if isinstance(hint, type) and issubclass(hint, datetime):
+        return _parse_dt(value)
+    if dataclasses.is_dataclass(hint) and isinstance(value, dict):
+        return hydrate_dataclass(hint, value)
+    return value
+
+
 def report_from_dict(d: dict) -> OptimizeReport:
     """
     Reconstruct an OptimizeReport from the dict produced by `report_to_dict`.
 
-    Symmetric with `report_to_dict`. Used by the CLI when fetching an
-    optimize report from a running `tj serve` via /api/v1/optimize — the
-    daemon serialises the report and the CLI deserialises here so the same
-    rendering path works for both local and HTTP-fetched reports
-    (issue #68 §12).
+    Symmetric with `report_to_dict`, and LOSSLESS — see `hydrate_dataclass`
+    for why that word is load-bearing and what used to go missing.
 
-    Wave-2 analyzer findings live under `d["findings"]` keyed by analyzer
-    name; each registered analyzer module's `from_dict` helper is invoked
-    via the registry. Unknown finding names are dropped silently — this
-    keeps the CLI forward-compatible if the daemon advertises a finding
-    the local install doesn't know how to render yet.
+    Used by the CLI when fetching an optimize report from a running `tj serve`
+    via /api/v1/optimize (issue #68 §12), and by `core.optimize.report_store`
+    for the handful of consumers that need typed findings rather than the
+    stored dict.
+
+    Wave-2 analyzer findings live under `d["findings"]` keyed by analyzer name
+    and are hydrated against the dataclass registered for that name. An unknown
+    name is dropped silently — that keeps the CLI forward-compatible when a
+    newer daemon advertises a finding this install cannot render.
     """
     from tokenjam.core.optimize.types import (
         BudgetProjection,
-        DowngradeExample,
         DowngradeFinding,
         WindowSummary,
     )
 
-    w = d.get("window") or {}
-    window = WindowSummary(
-        since=_parse_dt(w.get("since")) or _utcnow(),
-        until=_parse_dt(w.get("until")) or _utcnow(),
-        days=float(w.get("days", 0.0)),
-        sessions=int(w.get("sessions", 0)),
-        spans=int(w.get("spans", 0)),
-        total_tokens=int(w.get("total_tokens", 0)),
-        total_cost_usd=float(w.get("total_cost_usd", 0.0)),
-        thin_data=bool(w.get("thin_data", False)),
+    # Every branch below goes through `hydrate_dataclass`, which reads the
+    # dataclass's OWN fields rather than a hand-maintained argument list. That
+    # is the whole point: the previous hand-written version silently dropped
+    # any field nobody remembered to name, and a field added to an analyzer
+    # tomorrow would have been dropped the same way.
+    # `WindowSummary` declares no field defaults, so an absent or partial
+    # `window` cannot be hydrated field-by-field the way everything else can.
+    # A payload without one is legitimate (callers construct minimal report
+    # dicts), so seed the required fields first and let the stored values
+    # override whichever of them are present.
+    now = _utcnow()
+    window_seed: dict[str, Any] = {
+        "since": now, "until": now, "days": 0.0, "sessions": 0, "spans": 0,
+        "total_tokens": 0, "total_cost_usd": 0.0, "thin_data": False,
+    }
+    window_seed.update(d.get("window") or {})
+    window = hydrate_dataclass(WindowSummary, window_seed)
+    downgrade = (
+        hydrate_dataclass(DowngradeFinding, d["downgrade"]) if d.get("downgrade") else None
     )
-
-    downgrade = None
-    if d.get("downgrade"):
-        dd = dict(d["downgrade"])
-        examples = [
-            DowngradeExample(
-                trace_id=str(ex.get("trace_id", "")),
-                session_id=ex.get("session_id"),
-                model=str(ex.get("model", "")),
-                tool_calls=int(ex.get("tool_calls", 0)),
-                duration_seconds=ex.get("duration_seconds"),
-                cost_usd=float(ex.get("cost_usd", 0.0)),
-            )
-            for ex in (dd.get("examples") or [])
-        ]
-        downgrade = DowngradeFinding(
-            candidate_sessions=int(dd.get("candidate_sessions", 0)),
-            total_sessions=int(dd.get("total_sessions", 0)),
-            actual_cost_usd=float(dd.get("actual_cost_usd", 0.0)),
-            alternative_cost_usd=float(dd.get("alternative_cost_usd", 0.0)),
-            monthly_savings_usd=float(dd.get("monthly_savings_usd", 0.0)),
-            percent_of_sessions=float(dd.get("percent_of_sessions", 0.0)),
-            examples=examples,
-            suggestions=dict(dd.get("suggestions") or {}),
-            caveat=str(dd.get("caveat", "")),
-            bench_command=dd.get("bench_command"),
-            candidate_tokens=int(dd.get("candidate_tokens", 0)),
-            window_total_tokens=int(dd.get("window_total_tokens", 0)),
-            percent_of_tokens=float(dd.get("percent_of_tokens", 0.0)),
-            monthly_tokens_in_candidates=int(dd.get("monthly_tokens_in_candidates", 0)),
-            estimated_recoverable_usd=dd.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=dd.get("estimated_recoverable_tokens"),
-            estimate_basis=str(dd.get("estimate_basis", "")),
-            estimate_confidence=str(dd.get("estimate_confidence", "heuristic")),
-            # Sampling confidence (#308) — round-trip n + the CI bounds.
-            n_sessions=int(dd.get("n_sessions", 0)),
-            ci_low=dd.get("ci_low"),
-            ci_high=dd.get("ci_high"),
-        )
-
-    budgets = []
-    for b in d.get("budgets") or []:
-        bb = dict(b)
-        budgets.append(BudgetProjection(
-            provider=str(bb.get("provider", "")),
-            budget_usd=float(bb.get("budget_usd", 0.0)),
-            cycle_start_day=int(bb.get("cycle_start_day", 1)),
-            cycle_start=_parse_dt(bb.get("cycle_start")) or _utcnow(),
-            cycle_end=_parse_dt(bb.get("cycle_end")) or _utcnow(),
-            days_into_cycle=float(bb.get("days_into_cycle", 0.0)),
-            days_remaining=float(bb.get("days_remaining", 0.0)),
-            window_spend_usd=float(bb.get("window_spend_usd", 0.0)),
-            daily_run_rate_usd=float(bb.get("daily_run_rate_usd", 0.0)),
-            monthly_run_rate_usd=float(bb.get("monthly_run_rate_usd", 0.0)),
-            projected_cycle_total=float(bb.get("projected_cycle_total", 0.0)),
-            projected_overage_usd=float(bb.get("projected_overage_usd", 0.0)),
-            exhaustion_date=_parse_dt(bb.get("exhaustion_date")),
-            days_until_exhaustion=bb.get("days_until_exhaustion"),
-            over_budget=bool(bb.get("over_budget", False)),
-            applies_to_services=list(bb.get("applies_to_services") or []),
-            downgrade_run_rate_usd=bb.get("downgrade_run_rate_usd"),
-        ))
+    budgets = [hydrate_dataclass(BudgetProjection, b) for b in (d.get("budgets") or [])]
 
     findings = {}
     for name, payload in (d.get("findings") or {}).items():
-        constructor = _finding_constructor_for(name)
-        if constructor is None:
+        finding_cls = _finding_class_for(name)
+        if finding_cls is None:
             # Forward-compatible: ignore unknown findings rather than crash.
             continue
         try:
-            findings[name] = constructor(payload)
+            findings[name] = hydrate_dataclass(finding_cls, payload)
         except Exception:
             # Don't let one malformed finding break the whole report.
             continue
@@ -415,332 +579,83 @@ def report_from_dict(d: dict) -> OptimizeReport:
         notes=list(d.get("notes") or []),
         findings=findings,
         persona=str(d.get("persona", "unknown")),
+        # Round-tripped like every other report-level field: a report rebuilt
+        # from the daemon's cache must still be able to say its filesystem
+        # analyzers never scanned, or a served surface silently reads an
+        # unscanned report as a scanned-and-empty one.
+        filesystem_scan_skipped_reason=d.get("filesystem_scan_skipped_reason") or None,
     )
 
 
-# Dispatch table: finding-registration-name -> (dict) -> dataclass constructor.
-# Filled lazily so importing runner.py doesn't require every analyzer module
-# to be imported (analyzers self-register via auto-discovery; the order
-# matters during package init).
-def _build_finding_constructors() -> dict:
-    from tokenjam.core.optimize.analyzers.cache_efficacy import (
-        CacheEfficacyFinding,
-        CacheEfficacyRow,
-        LookbackMissCandidate,
-        ThrashAgentCandidate,
-        UncachedAgentCandidate,
-    )
-    from tokenjam.core.optimize.analyzers.batch_placement import (
-        BATCH_ESTIMATE_BASIS,
-        BATCH_FRICTION_NOTE,
-        BatchCandidate,
-        BatchPlacementFinding,
-        MIN_GROUP_COST_USD,
-        MIN_SESSIONS_FOR_CADENCE,
-    )
-    from tokenjam.core.optimize.analyzers.cache_recommend import (
-        MIN_PREFIX_OCCURRENCES,
-        CachePrefixCandidate,
-        CacheRecommendFinding,
-    )
-    from tokenjam.core.optimize.analyzers.prompt_bloat import (
-        BloatPrompt,
-        BloatRegion,
-        PromptBloatFinding,
-    )
-    from tokenjam.core.optimize.analyzers.workflow_restructure import (
-        WorkflowCluster,
-        WorkflowRestructureFinding,
-    )
+# Dispatch table: finding-registration-name -> the dataclass that finding is.
+#
+# It maps to a TYPE, not to a constructor function. It used to hold ~330 lines
+# of hand-written `Cls(field=d.get("field"), ...)` builders, and every one of
+# them was a field list somebody had to keep in sync with the dataclass by
+# hand. They were not in sync: `resend` dropped 19 fields on the way back,
+# `relearn` dropped its whole `below_threshold_*` block, and nothing failed —
+# the dropped fields simply came back as defaults. `hydrate_dataclass` reads
+# the dataclass's own fields instead, so this table only has to answer "which
+# class is this?" and can no longer drift.
+#
+# Filled lazily so importing runner.py doesn't require every analyzer module to
+# be imported (analyzers self-register via auto-discovery; order matters during
+# package init).
+def _build_finding_classes() -> dict:
+    from tokenjam.core.optimize.analyzers.batch_placement import BatchPlacementFinding
+    from tokenjam.core.optimize.analyzers.cache_efficacy import CacheEfficacyFinding
+    from tokenjam.core.optimize.analyzers.cache_recommend import CacheRecommendFinding
+    from tokenjam.core.optimize.analyzers.context_resend import ResendFinding
+    from tokenjam.core.optimize.analyzers.deadweight import DeadweightFinding
+    from tokenjam.core.optimize.analyzers.output_verbosity import VerbosityFinding
+    from tokenjam.core.optimize.analyzers.prompt_bloat import PromptBloatFinding
+    from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
     from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
         SubagentRightsizingFinding,
-        SubagentRow,
     )
-    from tokenjam.core.optimize.analyzers.summarize import (
-        SUMMARIZE_HONESTY_CAVEAT,
-        SummarizeCandidate,
-        SummarizeFinding,
+    from tokenjam.core.optimize.analyzers.stream_usage import StreamUsageFinding
+    from tokenjam.core.optimize.analyzers.summarize import SummarizeFinding
+    from tokenjam.core.optimize.analyzers.workflow_restructure import (
+        WorkflowRestructureFinding,
     )
-    from tokenjam.core.optimize.analyzers.relearn import (
-        RelearnCluster,
-        RelearnExample,
-        RelearnFinding,
-    )
-    from tokenjam.core.optimize.analyzers.output_verbosity import (
-        VERBOSITY_HONESTY_CAVEAT,
-        VerbosityCandidate,
-        VerbosityFinding,
-    )
-    from tokenjam.core.optimize.analyzers.deadweight import (
-        ContextTaxRow,
-        DEADWEIGHT_HONESTY_CAVEAT,
-        DeadweightFinding,
-        ServerDeadweight,
-    )
-    from tokenjam.core.optimize.analyzers.context_resend import (
-        RESEND_HONESTY_CAVEAT,
-        ResendFinding,
-        ResendSessionExample,
-    )
-    from tokenjam.core.context_diagnostic import RecurringInclusion
-    from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
-
-    def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
-        rows = [CacheEfficacyRow(**r) for r in d.get("rows") or []]
-        flagged = [CacheEfficacyRow(**r) for r in d.get("flagged") or []]
-        uncached = [UncachedAgentCandidate(**c) for c in d.get("uncached_agents") or []]
-        thrash = [ThrashAgentCandidate(**c) for c in d.get("thrash_agents") or []]
-        lookback = [LookbackMissCandidate(**c) for c in d.get("lookback_miss_agents") or []]
-        return CacheEfficacyFinding(
-            rows=rows, flagged=flagged,
-            confidence=d.get("confidence", "structural"),
-            efficacy_ceiling=d.get("efficacy_ceiling", 0.80),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "heuristic"),
-            uncached_agents=uncached, thrash_agents=thrash,
-            lookback_miss_agents=lookback,
-        )
-
-    def _cache_recommend(d: dict) -> CacheRecommendFinding:
-        candidates = [
-            CachePrefixCandidate(**c) for c in d.get("candidates") or []
-        ]
-        return CacheRecommendFinding(
-            enabled=bool(d.get("enabled", False)),
-            candidates=candidates,
-            skipped_provider_count=int(d.get("skipped_provider_count", 0)),
-            confidence=d.get("confidence", "structural"),
-            hint=d.get("hint"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimate_basis=d.get("estimate_basis", ""),
-            min_prefix_occurrences=int(d.get("min_prefix_occurrences", MIN_PREFIX_OCCURRENCES)),
-        )
-
-    def _workflow_restructure(d: dict) -> WorkflowRestructureFinding:
-        clusters = [WorkflowCluster(**c) for c in d.get("clusters") or []]
-        return WorkflowRestructureFinding(
-            clusters=clusters,
-            sessions_examined=int(d.get("sessions_examined", 0)),
-            degraded=bool(d.get("degraded", False)),
-            confidence=d.get("confidence", "structural"),
-            caveat=d.get("caveat", ""),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "heuristic"),
-        )
-
-    def _prompt_bloat(d: dict) -> PromptBloatFinding:
-        per_prompt = []
-        for p in d.get("per_prompt") or []:
-            regions = [BloatRegion(**r) for r in p.get("regions") or []]
-            pp = dict(p)
-            pp["regions"] = regions
-            per_prompt.append(BloatPrompt(**pp))
-        return PromptBloatFinding(
-            enabled=bool(d.get("enabled", False)),
-            prompts_scored=int(d.get("prompts_scored", 0)),
-            prompts_skipped=int(d.get("prompts_skipped", 0)),
-            total_bloat_chars=int(d.get("total_bloat_chars", 0)),
-            total_chars=int(d.get("total_chars", 0)),
-            per_prompt=per_prompt,
-            confidence=d.get("confidence", "structural"),
-            hint=d.get("hint"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "heuristic"),
-        )
-
-    def _reuse(d: dict) -> ReuseFinding:
-        clusters = []
-        for c in d.get("clusters") or []:
-            cc = dict(c)
-            # asdict() serialised the tuple to a list; restore the tuple so the
-            # dataclass field type holds across the round-trip.
-            cc["tool_signature"] = tuple(cc.get("tool_signature") or ())
-            clusters.append(ReuseCluster(**cc))
-        return ReuseFinding(
-            clusters=clusters,
-            capture_mode=d.get("capture_mode", "tool_sequence_only"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimate_basis=d.get("estimate_basis", ""),
-            confidence=d.get("confidence", "heuristic"),
-            hint=d.get("hint", ""),
-        )
-
-    def _subagent(d: dict) -> SubagentRightsizingFinding:
-        rows = [SubagentRow(**r) for r in d.get("rows") or []]
-        flagged = [SubagentRow(**r) for r in d.get("flagged") or []]
-        return SubagentRightsizingFinding(
-            sessions_with_subagents=int(d.get("sessions_with_subagents", 0)),
-            total_subagents=int(d.get("total_subagents", 0)),
-            subagent_cost_usd=float(d.get("subagent_cost_usd", 0.0)),
-            subagent_tokens=int(d.get("subagent_tokens", 0)),
-            window_cost_usd=float(d.get("window_cost_usd", 0.0)),
-            percent_of_cost=float(d.get("percent_of_cost", 0.0)),
-            flagged_cost_usd=float(d.get("flagged_cost_usd", 0.0)),
-            rows=rows,
-            flagged=flagged,
-            confidence=d.get("confidence", "structural"),
-            caveat=d.get("caveat", ""),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "heuristic"),
-        )
-
-    def _summarize(d: dict) -> SummarizeFinding:
-        cands = [SummarizeCandidate(**c) for c in d.get("candidates") or []]
-        return SummarizeFinding(
-            candidates=cands,
-            files=int(d.get("files", 0)),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            file_reduction_tokens=d.get("file_reduction_tokens"),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "heuristic"),
-            caveat=d.get("caveat", SUMMARIZE_HONESTY_CAVEAT),
-            reduction_pct=d.get("reduction_pct"),
-            avg_reduction_pct=d.get("avg_reduction_pct"),
-            sessions_examined=int(d.get("sessions_examined", 0) or 0),
-            calls_per_session=d.get("calls_per_session"),
-            rate_basis=d.get("rate_basis", ""),
-        )
-
-    def _relearn(d: dict) -> RelearnFinding:
-        clusters = []
-        for c in d.get("clusters") or []:
-            cc = dict(c)
-            cc["examples"] = [RelearnExample(**e) for e in cc.get("examples") or []]
-            clusters.append(RelearnCluster(**cc))
-        return RelearnFinding(
-            clusters=clusters,
-            sessions_scanned=int(d.get("sessions_scanned", 0)),
-            failures_examined=int(d.get("failures_examined", 0)),
-            distilled_clusters=int(d.get("distilled_clusters", 0)),
-            dropped_codified=int(d.get("dropped_codified", 0)),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "heuristic"),
-            caveat=d.get("caveat", ""),
-        )
-
-    def _verbosity(d: dict) -> VerbosityFinding:
-        cands = [VerbosityCandidate(**c) for c in d.get("candidates") or []]
-        return VerbosityFinding(
-            candidates=cands,
-            total_candidates=int(d.get("total_candidates", 0)),
-            sessions_examined=int(d.get("sessions_examined", 0)),
-            cohorts_examined=int(d.get("cohorts_examined", 0)),
-            remedy_snippet=d.get("remedy_snippet", ""),
-            suggested_max_tokens=d.get("suggested_max_tokens"),
-            confidence=d.get("confidence", "structural"),
-            caveat=d.get("caveat", VERBOSITY_HONESTY_CAVEAT),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "heuristic"),
-        )
-
-    def _deadweight(d: dict) -> DeadweightFinding:
-        servers = [ServerDeadweight(**s) for s in d.get("servers") or []]
-        dead_servers = [ServerDeadweight(**s) for s in d.get("dead_servers") or []]
-        tax_table = [ContextTaxRow(**r) for r in d.get("tax_table") or []]
-        return DeadweightFinding(
-            sessions_scanned=int(d.get("sessions_scanned", 0)),
-            configured_servers=int(d.get("configured_servers", 0)),
-            servers=servers,
-            dead_servers=dead_servers,
-            tax_table=tax_table,
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "estimated"),
-            caveat=d.get("caveat", DEADWEIGHT_HONESTY_CAVEAT),
-            notes=list(d.get("notes") or []),
-        )
-
-    def _resend(d: dict) -> ResendFinding:
-        examples = [ResendSessionExample(**e) for e in d.get("examples") or []]
-        recurring = [RecurringInclusion(**r) for r in d.get("recurring_examples") or []]
-        return ResendFinding(
-            sessions_examined=int(d.get("sessions_examined", 0)),
-            multi_turn_sessions=int(d.get("multi_turn_sessions", 0)),
-            turns_examined=int(d.get("turns_examined", 0)),
-            repeat_share=d.get("repeat_share"),
-            repeat_share_median=d.get("repeat_share_median"),
-            repeat_share_p90=d.get("repeat_share_p90"),
-            repeat_tokens=int(d.get("repeat_tokens", 0)),
-            prompt_tokens_total=int(d.get("prompt_tokens_total", 0)),
-            examples=examples,
-            recurring_examples=recurring,
-            fix_compaction=d.get("fix_compaction", ""),
-            fix_cache_control=d.get("fix_cache_control", ""),
-            caveat=d.get("caveat", RESEND_HONESTY_CAVEAT),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "heuristic"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            notes=list(d.get("notes") or []),
-        )
-
-    def _placement(d: dict) -> BatchPlacementFinding:
-        candidates = [BatchCandidate(**c) for c in d.get("candidates") or []]
-        return BatchPlacementFinding(
-            candidates=candidates,
-            window_cost_usd=float(d.get("window_cost_usd", 0.0)),
-            candidate_cost_usd=float(d.get("candidate_cost_usd", 0.0)),
-            percent_of_window_cost=float(d.get("percent_of_window_cost", 0.0)),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimate_basis=d.get("estimate_basis", BATCH_ESTIMATE_BASIS),
-            estimate_confidence=d.get("estimate_confidence", "estimated"),
-            friction=d.get("friction", BATCH_FRICTION_NOTE),
-            min_sessions_for_cadence=int(
-                d.get("min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE)
-            ),
-            min_group_cost_usd=float(
-                d.get("min_group_cost_usd", MIN_GROUP_COST_USD)
-            ),
-        )
+    from tokenjam.core.optimize.types import ReuseFinding
 
     return {
-        "cache": _cache_efficacy,
-        "cache-recommend": _cache_recommend,
-        "script": _workflow_restructure,
-        "reuse": _reuse,
-        "trim": _prompt_bloat,
-        "subagent": _subagent,
-        "summarize": _summarize,
-        "relearn": _relearn,
-        "deadweight": _deadweight,
-        "verbosity": _verbosity,
-        "resend": _resend,
+        "cache": CacheEfficacyFinding,
+        "cache-recommend": CacheRecommendFinding,
+        "script": WorkflowRestructureFinding,
+        "reuse": ReuseFinding,
+        "trim": PromptBloatFinding,
+        "subagent": SubagentRightsizingFinding,
+        "summarize": SummarizeFinding,
+        "relearn": RelearnFinding,
+        "deadweight": DeadweightFinding,
+        "verbosity": VerbosityFinding,
+        "resend": ResendFinding,
+        "stream-usage": StreamUsageFinding,
         # Not a registered analyzer name of its own: the downsize analyzer
-        # attaches the batch-placement check under this key. It still needs a
-        # constructor, or the finding is dropped on the daemon path (the CLI
-        # deserialises the HTTP report through report_from_dict, which ignores
-        # any finding name absent from this table).
-        "placement": _placement,
+        # attaches the batch-placement check under this key. It still needs an
+        # entry, or the finding is dropped on the daemon path (every consumer
+        # deserialises through report_from_dict, which ignores any finding name
+        # absent from this table).
+        "placement": BatchPlacementFinding,
     }
 
 
-_FINDING_CONSTRUCTORS: dict = {}
+_FINDING_CLASSES: dict = {}
 
 
-def _ensure_constructors_loaded() -> dict:
-    """Lazy-load the finding constructors on first use."""
-    global _FINDING_CONSTRUCTORS
-    if not _FINDING_CONSTRUCTORS:
-        _FINDING_CONSTRUCTORS = _build_finding_constructors()
-    return _FINDING_CONSTRUCTORS
+def _finding_class_for(name: str):
+    """The dataclass for a finding name, or None if this install doesn't know it."""
+    global _FINDING_CLASSES
+    if not _FINDING_CLASSES:
+        _FINDING_CLASSES = _build_finding_classes()
+    return _FINDING_CLASSES.get(name)
 
 
-# Wire the lazy loader into report_from_dict above.
-def _finding_constructor_for(name: str):
-    return _ensure_constructors_loaded().get(name)
+def finding_class_names() -> list[str]:
+    """Every finding name the round-trip can rebuild. Used by the round-trip
+    losslessness test to enumerate what it must cover."""
+    if not _FINDING_CLASSES:
+        _finding_class_for("")
+    return sorted(_FINDING_CLASSES)

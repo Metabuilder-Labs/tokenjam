@@ -174,6 +174,39 @@ def test_adoption_detected_when_premium_spend_drops(tmp_path):
         db.close()
 
 
+def test_adoption_measured_tokens_include_cache_write(tmp_path):
+    """`recovered_tokens` must reflect all four token types. Before the fix,
+    `_premium_usage` omitted `cache_write_tokens` from its per-window token
+    sum, understating the measured drop (Cache token types in aggregates,
+    root CLAUDE.md)."""
+    cfg = _cfg(tmp_path)
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "tj.duckdb")))
+    try:
+        now = utcnow()
+        export_ts = now - timedelta(days=10)
+        since = export_ts - timedelta(days=7)
+        until = export_ts
+        # Heavy opus usage BEFORE the export, entirely cache-write tokens, and
+        # none after — a real drop that only shows up if cache_write_tokens
+        # is actually summed.
+        for _ in range(10):
+            db.insert_span(make_llm_span(
+                model="claude-opus-4-8", provider="anthropic",
+                input_tokens=0, output_tokens=0, cache_write_tokens=100_000,
+                cost_usd=1.0, start_time=export_ts - timedelta(days=3),
+                session_id=None,
+            ))
+        _seed_export(cfg, export_ts=export_ts, since=since, until=until)
+
+        new = detect_downsize_adoption(db.conn, cfg, now=now)
+        assert len(new) == 1
+        rec = new[0]
+        assert rec["status"] == "adopted"
+        assert rec["recovered_tokens"] > 0
+    finally:
+        db.close()
+
+
 def test_ignored_when_premium_spend_holds(tmp_path):
     cfg = _cfg(tmp_path)
     db = DuckDBBackend(StorageConfig(path=str(tmp_path / "tj.duckdb")))

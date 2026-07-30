@@ -260,6 +260,11 @@ class BloatPrompt:
     bloat_chars:     int         # chars in flagged regions
     regions:         list[BloatRegion] = field(default_factory=list)
     estimated_token_reduction: int = 0
+    # Dollar counterpart of estimated_token_reduction, priced at the same
+    # window-average input rate the finding-level aggregate uses (see
+    # _window_avg_input_rate). None when no priced model was observed in the
+    # window — never a $0.00 standing in for "no rate observed".
+    estimated_cost_reduction_usd: float | None = None
     # Provenance (read-only, see module docstring): the catalog file this
     # prompt's text verbatim-contains, or None when no catalog file cleared
     # the bar — the expected outcome for most prompts, not a failure.
@@ -292,8 +297,8 @@ class PromptBloatFinding:
     # Recoverable-savings contract (#111). See types.DowngradeFinding for field
     # semantics. None when the analyzer is not ready (capture off, extra
     # missing) or no bloat was found.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
     # The effective significance bar this run applied (config-overridable,
@@ -312,8 +317,15 @@ def estimate_trim_recoverable(
 
 def _window_avg_input_rate(conn, since, until, agent_id: str | None) -> float:
     """Input-token-weighted average input rate ($/MTok) across the window's
-    model mix, used to price trimmable tokens."""
-    from tokenjam.core.pricing import get_rates
+    model mix, used to price trimmable tokens.
+
+    Weighted across (model, UTC day) rather than (model) alone, so a window
+    straddling a rate change blends the rates that actually applied instead of
+    repricing the whole window at today's. The average IS the aggregate form of
+    price-each-span-then-sum here, because the figure it feeds is
+    ``tokens x rate`` — see `tokenjam.core.optimize.span_pricing`.
+    """
+    from tokenjam.core.optimize.span_pricing import SPAN_UTC_DAY_SQL, rates_at
 
     clauses = ["start_time >= $1", "start_time < $2",
                "provider IS NOT NULL", "model IS NOT NULL"]
@@ -323,17 +335,19 @@ def _window_avg_input_rate(conn, since, until, agent_id: str | None) -> float:
         params.append(agent_id)
     where = " AND ".join(clauses)
     rows = conn.execute(
-        f"SELECT provider, model, COALESCE(SUM(input_tokens), 0) "
-        f"FROM spans WHERE {where} GROUP BY provider, model",
+        f"SELECT provider, model, COALESCE(SUM(input_tokens), 0), "
+        f"MIN(start_time) "
+        f"FROM spans WHERE {where} "
+        f"GROUP BY provider, model, {SPAN_UTC_DAY_SQL}",
         params,
     ).fetchall()
     weighted = 0.0
     total = 0
-    for provider, model, in_tok in rows:
+    for provider, model, in_tok, day_start in rows:
         in_tok = int(in_tok or 0)
         if in_tok <= 0:
             continue
-        rates = get_rates(str(provider), str(model))
+        rates = rates_at(str(provider), str(model), day_start or since)
         if rates is None:
             continue
         weighted += rates.input_per_mtok * in_tok
@@ -549,6 +563,10 @@ def run(ctx: AnalyzerContext) -> None:
     prompts_with_provenance = 0
     total_bloat = 0
     total_chars = 0
+    # Lazily computed once and reused for both the per-prompt dollar figure
+    # and the finding-level aggregate below, so the two never disagree and a
+    # window with no bloat at all never pays for the rate query.
+    avg_rate: float | None = None
 
     for agent_id, attrs in rows:
         if prompts_scored >= MAX_PROMPTS_PER_RUN:
@@ -595,6 +613,15 @@ def run(ctx: AnalyzerContext) -> None:
         if source_path is not None:
             prompts_with_provenance += 1
 
+        if est_tokens > 0 and avg_rate is None:
+            avg_rate = _window_avg_input_rate(
+                ctx.conn, ctx.since, ctx.until, ctx.agent_id
+            )
+        cost_reduction = (
+            estimate_trim_recoverable(est_tokens, avg_rate)
+            if est_tokens > 0 and avg_rate else None
+        )
+
         per_prompt.append(BloatPrompt(
             agent_id=str(agent_id),
             sample_chars=text[:120],
@@ -603,6 +630,7 @@ def run(ctx: AnalyzerContext) -> None:
             bloat_chars=bloat_chars,
             regions=regions,
             estimated_token_reduction=est_tokens,
+            estimated_cost_reduction_usd=cost_reduction,
             source_path=source_path,
             source_basis=source_basis,
         ))
@@ -613,14 +641,17 @@ def run(ctx: AnalyzerContext) -> None:
 
     # Recoverable-savings estimate (#111): low-significance tokens across all
     # scored prompts (not just the top-10 retained for display), priced at the
-    # window-average input rate. None when nothing was flagged.
+    # SAME window-average input rate the per-prompt figures above use (so the
+    # aggregate can never disagree with its own rows). None when nothing was
+    # flagged.
     low_sig_tokens = int(total_bloat / CHARS_PER_TOKEN) if total_bloat > 0 else 0
     rec_usd: float | None = None
     rec_tokens: int | None = None
     if low_sig_tokens > 0:
-        avg_rate = _window_avg_input_rate(
-            ctx.conn, ctx.since, ctx.until, ctx.agent_id
-        )
+        if avg_rate is None:
+            avg_rate = _window_avg_input_rate(
+                ctx.conn, ctx.since, ctx.until, ctx.agent_id
+            )
         rec_usd = estimate_trim_recoverable(low_sig_tokens, avg_rate)
         rec_tokens = low_sig_tokens
 
@@ -632,8 +663,8 @@ def run(ctx: AnalyzerContext) -> None:
         total_chars=total_chars,
         per_prompt=per_prompt[:10],
         prompts_with_provenance=prompts_with_provenance,
-        estimated_recoverable_usd=rec_usd,
-        estimated_recoverable_tokens=rec_tokens,
+        past_overspend_usd=rec_usd,
+        past_overspend_tokens=rec_tokens,
         significance_threshold=significance_threshold,
         estimate_basis=(
             "low-significance tokens (≈4 chars/token) predicted by LLMLingua-2 "

@@ -517,6 +517,12 @@ def test_cli_renders_quota_share_for_max_plan(db, monkeypatch):
     assert "schema.prisma" in result.output
     # #11: the cache-MISS named overhead line renders (session B pays a premium).
     assert "Cache-miss:" in result.output
+    # The subscription-billed qualifier banner was removed by product
+    # decision: tj no longer differentiates its messaging between
+    # subscription and API users, even though core/framing.py still computes
+    # the field for the API/UI consumers.
+    assert "subscription-billed" not in result.output
+    assert "list-price equivalent" not in result.output
 
 
 def test_cli_json_output(db, monkeypatch):

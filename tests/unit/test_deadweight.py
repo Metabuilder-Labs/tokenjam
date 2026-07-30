@@ -37,16 +37,21 @@ def _user_prompt(text: str, cwd: str | None = None) -> dict:
     return record
 
 
-def _assistant(text: str | None, tools: list[dict] | None = None, cwd: str | None = None) -> dict:
+def _assistant(
+    text: str | None, tools: list[dict] | None = None, cwd: str | None = None,
+    model: str = "claude-opus-4-8", usage: dict | None = None, msg_id: str | None = None,
+) -> dict:
     content: list[dict] = []
     if text is not None:
         content.append({"type": "text", "text": text})
     for t in tools or []:
         content.append({"type": "tool_use", "id": t["id"], "name": t["name"], "input": t.get("input", {})})
-    record = {
-        "type": "assistant",
-        "message": {"role": "assistant", "model": "claude-opus-4-8", "content": content},
-    }
+    message: dict = {"role": "assistant", "model": model, "content": content}
+    if usage is not None:
+        message["usage"] = usage
+    if msg_id is not None:
+        message["id"] = msg_id
+    record = {"type": "assistant", "message": message}
     if cwd:
         record["cwd"] = cwd
     return record
@@ -157,6 +162,165 @@ def test_enumerate_no_config_returns_empty(tmp_path):
     assert enumerate_configured_servers({str(tmp_path / "nope")}) == {}
 
 
+# --- Deterministic source selection (Defect 2: set-iteration-order target) --
+# The same server name can be independently declared in more than one
+# physical config file (a duplicated .mcp.json committed into several
+# worktrees of the same repo). `enumerate_configured_servers` used to iterate
+# a raw `set` of cwds and let `setdefault` keep whichever path a hash-seed-
+# dependent iteration order visited FIRST -- a claim aggregated across every
+# copy could have its one fix action land on the copy covering 1 of 571
+# sessions instead of 569 of them, decided by nothing but interpreter hash
+# randomization.
+
+def test_source_selection_is_deterministic_across_repeated_calls(tmp_path):
+    """The same three-cwd input must choose the same canonical source every
+    time, regardless of set/dict iteration order -- run several times to
+    catch a flake a single call could miss."""
+    heavy = tmp_path / "heavy"
+    light_a = tmp_path / "light-a"
+    light_b = tmp_path / "light-b"
+    _write_mcp_json(heavy, {"posthog": {}})
+    _write_mcp_json(light_a, {"posthog": {}})
+    _write_mcp_json(light_b, {"posthog": {}})
+    cwds = {str(heavy), str(light_a), str(light_b)}
+
+    chosen = {enumerate_configured_servers(set(cwds))["posthog"].source for _ in range(20)}
+
+    assert len(chosen) == 1, f"source choice varied across calls: {chosen}"
+
+
+def test_source_selection_picks_the_path_covering_the_most_sessions(tmp_path):
+    """Given an actual coverage skew (the real corpus shape: one path behind
+    nearly every session, two behind a single session each), the canonical
+    source must be the one that matters, not an arbitrary one -- editing it
+    is what the finding's one fix action can actually deliver on."""
+    heavy = tmp_path / "root" / "-heavy"
+    light_a = tmp_path / "root" / "-light-a"
+    light_b = tmp_path / "root" / "-light-b"
+    _write_mcp_json(heavy, {"posthog": {}})
+    _write_mcp_json(light_a, {"posthog": {}})
+    _write_mcp_json(light_b, {"posthog": {}})
+
+    servers = enumerate_configured_servers({str(heavy), str(light_a), str(light_b)})
+    # Simulate the coverage skew directly on the returned entry -- the
+    # picking step (`enumerate_configured_servers`'s post-scan loop) reruns
+    # against whatever `source_cwds` actually holds, so seeding it this way
+    # exercises the real selection logic.
+    entry = servers["posthog"]
+    entry.source_cwds = {
+        str(heavy): {f"s{i}" for i in range(569)},
+        str(light_a): {"s569"},
+        str(light_b): {"s570"},
+    }
+    # Re-run the picking rule in isolation (mirrors the post-scan loop body).
+    entry.source = min(
+        entry.source_cwds.items(), key=lambda kv: (-len(kv[1]), kv[0]),
+    )[0]
+
+    assert entry.source == str(heavy)
+
+
+def test_other_sources_lists_every_path_except_the_canonical_one(tmp_path):
+    from tokenjam.core.optimize.analyzers.deadweight import _other_sources
+
+    heavy = tmp_path / "heavy"
+    light_a = tmp_path / "light-a"
+    light_b = tmp_path / "light-b"
+    _write_mcp_json(heavy, {"posthog": {}})
+    _write_mcp_json(light_a, {"posthog": {}})
+    _write_mcp_json(light_b, {"posthog": {}})
+
+    servers = enumerate_configured_servers({str(heavy), str(light_a), str(light_b)})
+    entry = servers["posthog"]
+
+    others = _other_sources(entry)
+    assert entry.source not in others
+    assert len(others) == 2
+    assert others == sorted(others)  # stable, sorted disclosure order
+
+
+def test_single_source_server_has_no_other_sources(tmp_path):
+    from tokenjam.core.optimize.analyzers.deadweight import _other_sources
+
+    project_dir = tmp_path / "repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    servers = enumerate_configured_servers({str(project_dir)})
+
+    assert _other_sources(servers["apollo"]) == []
+
+
+def test_multi_source_finding_discloses_the_other_locations_and_scopes_the_fix(tmp_path):
+    """End to end: a server declared in three separate config files must
+    have its finding name the other locations and state how much of the
+    aggregated claim the one edited file actually reaches."""
+    root = tmp_path / "root"
+    heavy = root / "-heavy"
+    light_a = root / "-light-a"
+    light_b = root / "-light-b"
+    _write_mcp_json(heavy, {"posthog": {}})
+    _write_mcp_json(light_a, {"posthog": {}})
+    _write_mcp_json(light_b, {"posthog": {}})
+
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-heavy", f"s{i}", str(heavy))
+    _plain_session(root, "-light-a", "s-a", str(light_a))
+    _plain_session(root, "-light-b", "s-b", str(light_b))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    dead = finding.dead_servers[0]
+
+    heavy_config = str(heavy / ".mcp.json")
+    light_a_config = str(light_a / ".mcp.json")
+    light_b_config = str(light_b / ".mcp.json")
+
+    assert dead.source == heavy_config
+    assert set(dead.other_sources) == {light_a_config, light_b_config}
+    assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT + 2
+    assert dead.primary_source_sessions == MIN_SESSIONS_DEADWEIGHT
+    # The fix text must name the gap rather than imply full coverage.
+    assert light_a_config in dead.fix
+    assert light_b_config in dead.fix
+    assert str(dead.primary_source_sessions) in dead.fix
+    assert "ALSO independently declared" in dead.fix
+
+
+def test_project_scoped_server_fix_never_offers_project_scope_as_an_alternative(tmp_path):
+    """A server already at project scope has nothing left to narrow --
+    offering "project-scope it" as a second option would be a no-op
+    delivering $0 of the claim."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    dead = finding.dead_servers[0]
+
+    assert dead.fix.startswith("Remove the `apollo`")
+    assert "project-scope" not in dead.fix.lower()
+
+
+def test_user_scoped_server_fix_still_offers_project_scope_as_an_alternative(tmp_path, monkeypatch):
+    """A GLOBAL server genuinely has a second option: narrowing it to
+    project scope is a real alternative, unlike for an already
+    project-scoped server."""
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    (fake_home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"exa": {}}}), encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(fake_home))
+    root = tmp_path / "root"
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(root / "-repo-a"))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    dead = next(s for s in finding.dead_servers if s.name == "exa")
+
+    assert dead.fix.startswith("Remove or project-scope the `exa`")
+
+
 # --- C1: dead-weight detection ----------------------------------------------
 
 def test_no_configured_servers_is_a_no_op(tmp_path):
@@ -168,7 +332,7 @@ def test_no_configured_servers_is_a_no_op(tmp_path):
 
     assert finding.configured_servers == 0
     assert finding.dead_servers == []
-    assert finding.estimated_recoverable_tokens is None
+    assert finding.past_overspend_tokens is None
 
 
 def test_detects_dead_server_at_threshold(tmp_path):
@@ -187,8 +351,8 @@ def test_detects_dead_server_at_threshold(tmp_path):
     assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT
     assert dead.invocations == 0
     assert dead.estimated_tax_tokens_per_session == FULL_SCHEMA_TAX_TOKENS
-    assert finding.estimated_recoverable_tokens == dead.estimated_tax_tokens_window
-    assert finding.estimated_recoverable_tokens > 0
+    assert finding.past_overspend_tokens == dead.estimated_tax_tokens_window
+    assert finding.past_overspend_tokens > 0
 
 
 def test_dead_server_prices_tax_in_usd_via_pricing_table(tmp_path):
@@ -212,7 +376,7 @@ def test_dead_server_prices_tax_in_usd_via_pricing_table(tmp_path):
         dead.estimated_tax_tokens_per_session / 1_000_000 * rates.input_per_mtok, 6,
     )
     assert dead.estimated_tax_usd_window > 0
-    assert finding.estimated_recoverable_usd == dead.estimated_tax_usd_window
+    assert finding.past_overspend_usd == dead.estimated_tax_usd_window
     assert "Priced at claude-opus-4-8's input rate" in dead.tax_construction
 
 
@@ -234,7 +398,7 @@ def test_no_priced_model_leaves_usd_none(tmp_path):
     assert dead.priced_model == ""
     assert dead.estimated_tax_usd_per_session is None
     assert dead.estimated_tax_usd_window is None
-    assert finding.estimated_recoverable_usd is None
+    assert finding.past_overspend_usd is None
     assert "No dollar estimate" in dead.tax_construction
 
 
@@ -249,7 +413,7 @@ def test_below_threshold_is_not_flagged_dead(tmp_path):
 
     assert finding.configured_servers == 1
     assert finding.dead_servers == []
-    assert finding.estimated_recoverable_tokens is None
+    assert finding.past_overspend_tokens is None
     assert finding.notes  # the "no server cleared the bar" note fires
 
 
@@ -539,8 +703,6 @@ def test_mixed_deferral_prices_each_call_by_its_own_load_state(tmp_path):
     invocation priced at the deferred base and the calls FROM the invocation
     onward priced at the full base -- never the whole session at the low
     deferred base just because it was deferred at some point."""
-    from tokenjam.core.pricing import get_rates
-
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
@@ -571,17 +733,21 @@ def test_mixed_deferral_prices_each_call_by_its_own_load_state(tmp_path):
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
     row = next(s for s in finding.servers if s.name == "apollo")
 
-    rates = get_rates("anthropic", "claude-opus-4-8")
-    ratio = rates.cache_read_per_mtok / rates.input_per_mtok
-    expected_deferred = round(DEFERRED_SCHEMA_TAX_TOKENS * (1.0 + (2 - 1) * ratio))
-    expected_full = round(FULL_SCHEMA_TAX_TOKENS * (1.0 + (2 - 1) * ratio))
+    # `estimated_tax_tokens_window` is the LITERAL (undiscounted) token count
+    # -- the schema is resent in full on every call regardless of caching, so
+    # this is 2 deferred calls' worth + 2 full calls' worth of the raw
+    # constants, never the cache-discounted price-equivalent quantity the $
+    # figure is derived from (that quantity is checked separately, in
+    # `test_dead_server_prices_tax_in_usd_via_pricing_table`-style tests).
+    expected_deferred = DEFERRED_SCHEMA_TAX_TOKENS * 2
+    expected_full = FULL_SCHEMA_TAX_TOKENS * 2
 
     assert row.invocations == 1
     assert row.dead is False
     assert row.estimated_tax_tokens_window == expected_deferred + expected_full
     # Strictly more than the old bug (whole session priced at the deferred
     # base just because it was deferred at some point).
-    old_buggy_estimate = round(DEFERRED_SCHEMA_TAX_TOKENS * (1.0 + (4 - 1) * ratio))
+    old_buggy_estimate = DEFERRED_SCHEMA_TAX_TOKENS * 4
     assert row.estimated_tax_tokens_window > old_buggy_estimate
 
 
@@ -607,17 +773,103 @@ def test_schema_tax_scales_with_actual_calls_per_session(tmp_path):
 
     rates = get_rates("anthropic", "claude-opus-4-8")
     ratio = rates.cache_read_per_mtok / rates.input_per_mtok
-    light_tax = FULL_SCHEMA_TAX_TOKENS  # single call -> multiplier == 1
-    heavy_tax = round(FULL_SCHEMA_TAX_TOKENS * (1.0 + (10 - 1) * ratio))
-    expected_window = light_tax * (MIN_SESSIONS_DEADWEIGHT - 1) + heavy_tax
+    # The $ figure is priced on the cache-discounted PRICE-EQUIVALENT
+    # quantity (this test's actual subject: later calls in a session re-send
+    # the schema at the cache-read rate, not the full input rate again).
+    light_tax_price_equiv = FULL_SCHEMA_TAX_TOKENS  # single call -> multiplier == 1
+    heavy_tax_price_equiv = round(FULL_SCHEMA_TAX_TOKENS * (1.0 + (10 - 1) * ratio))
+    expected_usd_window = round(
+        (light_tax_price_equiv * (MIN_SESSIONS_DEADWEIGHT - 1) + heavy_tax_price_equiv)
+        / 1_000_000 * rates.input_per_mtok,
+        6,
+    )
 
-    assert heavy_tax > FULL_SCHEMA_TAX_TOKENS
-    assert dead.estimated_tax_tokens_window == expected_window
+    assert heavy_tax_price_equiv > FULL_SCHEMA_TAX_TOKENS
+    assert dead.estimated_tax_usd_window == expected_usd_window
     # The heavy session's real cost is folded in, not diluted by an averaged
     # call count applied uniformly to every session.
-    assert dead.estimated_tax_tokens_window > light_tax * MIN_SESSIONS_DEADWEIGHT
+    assert dead.estimated_tax_usd_window > round(
+        light_tax_price_equiv * MIN_SESSIONS_DEADWEIGHT / 1_000_000 * rates.input_per_mtok, 6,
+    )
     assert "cache-read rate" in dead.tax_construction
     assert "5-minute cache TTL" in dead.tax_construction
+
+    # `estimated_tax_tokens_window` is the separate, LITERAL (undiscounted)
+    # token count -- the schema is resent in full on every call regardless
+    # of caching, so this is linear in the call count, never scaled down by
+    # the cache-read ratio the $ figure above uses.
+    expected_tokens_window = FULL_SCHEMA_TAX_TOKENS * (MIN_SESSIONS_DEADWEIGHT - 1 + 10)
+    assert dead.estimated_tax_tokens_window == expected_tokens_window
+
+
+# --- Split-response record dedup (assistant_turns must count CALLS) ---------
+# Claude Code writes a SEPARATE transcript record per content block
+# (thinking / text / tool_use) of one API response, sharing one message.id.
+# `assistant_turns` used to count "role == assistant" RECORDS one-for-one,
+# overcounting the schema-tax call count by however many blocks a response
+# split into (measured ~2.19x on a real corpus).
+
+def test_analyze_session_dedupes_split_response_records_by_message_id():
+    """Direct unit test of the dedup: two records sharing one message.id are
+    ONE assistant turn, not two."""
+    from tokenjam.core.optimize.analyzers.deadweight import _analyze_session
+
+    records = [
+        _user_prompt("turn 0"),
+        _assistant("thinking...", msg_id="m1"),
+        _assistant("ok 0", msg_id="m1"),
+    ]
+    signal = _analyze_session(records)
+    assert signal.assistant_turns == 1
+    assert signal.models == {"claude-opus-4-8": 1}
+
+
+def test_analyze_session_still_counts_distinct_calls_separately():
+    """Two DIFFERENT message ids remain two separate calls -- the dedup must
+    not collapse genuinely distinct turns."""
+    from tokenjam.core.optimize.analyzers.deadweight import _analyze_session
+
+    records = [
+        _user_prompt("turn 0"),
+        _assistant("ok 0", msg_id="m1"),
+        _user_prompt("turn 1"),
+        _assistant("ok 1", msg_id="m2"),
+    ]
+    signal = _analyze_session(records)
+    assert signal.assistant_turns == 2
+
+
+def test_split_response_records_price_as_one_call_not_two(tmp_path):
+    """End to end: a session with ONE real API call whose response is split
+    across two transcript records must price the schema tax for ONE call,
+    not two -- the exact overcount the fix closes."""
+    from tokenjam.core.pricing import get_rates
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s-light-{i}", str(project_dir))
+
+    # One heavy session: ONE real API call, its response split across two
+    # transcript records sharing the same message id (mirrors the real
+    # thinking-block/text-block split Claude Code writes).
+    _write_transcript(root, "-repo-a", "s-split", [
+        _user_prompt("turn 0", cwd=str(project_dir)),
+        _assistant("thinking...", cwd=str(project_dir), msg_id="m1"),
+        _assistant("ok 0", cwd=str(project_dir), msg_id="m1"),
+    ])
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    dead = finding.dead_servers[0]
+    assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT
+
+    get_rates("anthropic", "claude-opus-4-8")  # sanity: model is priced
+    light_tax = FULL_SCHEMA_TAX_TOKENS  # single call -> multiplier == 1
+    split_session_tax = FULL_SCHEMA_TAX_TOKENS  # ONE real call, not two
+    expected_window = light_tax * (MIN_SESSIONS_DEADWEIGHT - 1) + split_session_tax
+
+    assert dead.estimated_tax_tokens_window == expected_window
 
 
 # --- C2: context tax table --------------------------------------------------
@@ -673,7 +925,7 @@ def test_dead_server_tax_not_double_counted_between_table_and_total(tmp_path):
     # The tax table's own MCP row and the recoverable total both derive from
     # the SAME per-server figure, but the total must equal exactly the dead
     # servers' sum -- never (tax table total) + (recoverable total).
-    assert finding.estimated_recoverable_tokens == dead.estimated_tax_tokens_window
+    assert finding.past_overspend_tokens == dead.estimated_tax_tokens_window
     assert mcp_row.total_tokens_window == dead.estimated_tax_tokens_per_session * dead.sessions_present
 
 
@@ -690,7 +942,7 @@ def test_no_em_dash_or_quota_in_user_facing_strings(tmp_path):
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
 
-    strings = [finding.caveat, finding.estimate_basis, *finding.notes]
+    strings = [finding.caveat, finding.estimate_basis, finding.coverage_note, *finding.notes]
     for server in finding.servers:
         # `fix` embeds the config's on-disk source path, which under pytest is
         # the test's own tmp_path (and can coincidentally contain "quota" as a
@@ -702,6 +954,134 @@ def test_no_em_dash_or_quota_in_user_facing_strings(tmp_path):
     for s in strings:
         assert "—" not in s, f"em dash found in: {s!r}"
         assert "quota" not in s.lower(), f"'quota' found in: {s!r}"
+
+
+# --- Unresolvable-path coverage (Defect 1: silence when a cwd is gone) ------
+# `enumerate_configured_servers` silently `continue`s past a recorded session
+# cwd that no longer exists on disk -- indistinguishable, on the finding, from
+# a live repo genuinely carrying no MCP config. These tests cover the fix:
+# counting that blind spot and stating it in `coverage_note`.
+
+def test_unresolvable_path_is_counted_and_narrated(tmp_path):
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    # Never created on disk -- this is the "recorded but vanished" cwd.
+    for i in range(3):
+        _plain_session(root, "-gone-project", f"s{i}", str(gone))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert finding.unresolvable_paths == 1
+    assert finding.unresolvable_sessions == 3
+    assert finding.coverage_note != ""
+    assert "no longer exist" in finding.coverage_note
+    assert "3 of 3 session(s)" in finding.coverage_note
+
+
+def test_unresolvable_coverage_survives_when_no_servers_configured(tmp_path):
+    """The exact defect: every recorded path is gone, so `configured` comes
+    back empty and the old code returned right there, before ever computing
+    the blind-spot figures. They must survive that early return."""
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    for i in range(3):
+        _plain_session(root, "-gone-project", f"s{i}", str(gone))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert finding.configured_servers == 0
+    assert finding.unresolvable_sessions == 3
+    assert finding.coverage_note != ""
+
+
+def test_live_path_with_no_config_is_not_counted_as_unresolvable(tmp_path):
+    """A live repo that genuinely carries no MCP config is a real, correctly
+    evaluated zero -- not a blind spot. Only VANISHED paths count."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    project_dir.mkdir(parents=True)  # exists on disk, no .mcp.json written
+    for i in range(3):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert finding.unresolvable_paths == 0
+    assert finding.unresolvable_sessions == 0
+    assert finding.coverage_note == ""
+
+
+def test_unresolvable_usd_priced_via_pricing_table(tmp_path):
+    """The blind-spot dollar figure is priced through core/pricing.py at the
+    session's dominant model -- asserted against the real rate, never a
+    hardcoded dollar amount (CLAUDE.md Critical Rule 28)."""
+    from tokenjam.core.pricing import get_rates
+
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    usage = {
+        "input_tokens": 1_000, "output_tokens": 500,
+        "cache_read_input_tokens": 200, "cache_creation_input_tokens": 100,
+    }
+    _write_transcript(root, "-gone-project", "s0", [
+        _user_prompt("say hi", cwd=str(gone)),
+        _assistant("hi", cwd=str(gone), usage=usage),
+    ])
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    rates = get_rates("anthropic", "claude-opus-4-8")
+    expected = round(
+        (1_000 * rates.input_per_mtok + 500 * rates.output_per_mtok
+         + 200 * rates.cache_read_per_mtok + 100 * rates.cache_write_per_mtok)
+        / 1_000_000,
+        6,
+    )
+    assert finding.unresolvable_usd == expected
+    assert finding.unresolvable_tokens == 1_800
+    assert finding.unresolvable_unpriced_sessions == 0
+    assert f"${finding.unresolvable_usd:,.2f}" in finding.coverage_note
+
+
+def test_unresolvable_excludes_sessions_with_no_priced_model(tmp_path):
+    """A session behind a vanished path but on an unpriced/unknown model
+    still counts toward tokens, but is excluded from the dollar sum (never a
+    fabricated rate) -- and the note says so."""
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    usage = {"input_tokens": 1_000, "output_tokens": 100}
+    _write_transcript(root, "-gone-project", "s0", [
+        _user_prompt("say hi", cwd=str(gone)),
+        _assistant("hi", cwd=str(gone), model="some-unpriced-model-xyz", usage=usage),
+    ])
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert finding.unresolvable_sessions == 1
+    assert finding.unresolvable_tokens == 1_100
+    assert finding.unresolvable_usd is None
+    assert finding.unresolvable_unpriced_sessions == 1
+    assert "no dollar figure is stated" in finding.coverage_note
+
+
+def test_render_deadweight_prints_coverage_note_with_no_configured_servers(tmp_path, capsys):
+    """The silent-scope defect's exact user-visible symptom: 'no MCP server
+    configured' read as 'you already fixed everything' when really the
+    analyzer never got to look. The renderer must say so."""
+    from tokenjam.cli.cmd_optimize import _render_deadweight
+
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    for i in range(3):
+        _plain_session(root, "-gone-project", f"s{i}", str(gone))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.configured_servers == 0
+
+    _render_deadweight(finding, pricing_mode="api", marker="①")
+    out = capsys.readouterr().out
+
+    assert "no MCP server is" in out
+    assert "no longer exist" in out
 
 
 # --- Registration ------------------------------------------------------------

@@ -57,7 +57,7 @@ from tokenjam.utils.time_parse import parse_since
 @click.pass_context
 def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
                     export_target: str | None, output_json_flag: bool) -> None:
-    """Audit your Opus quota: which past Opus sessions were Sonnet-shaped?"""
+    """Flag premium sessions that could run cheaper."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
@@ -190,7 +190,7 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
             "Sonnet-shaped work",
             style="bold",
         )
-        # The number is a single labelled ESTIMATE (founder D1/D3): the "estimate"
+        # The number is a single labelled ESTIMATE (D1/D3): the "estimate"
         # tag + a wide bootstrap CI (resampled segments) so it never reads as a
         # settled figure. Below 2 segments there's no spread to bracket.
         est = Text("\n", style="dim")
@@ -271,9 +271,8 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
         padding=(1, 2),
     ))
 
-    # Qualifier banner (plan-tier framing) + the mandatory honesty caveat.
-    if framing.qualifier_text:
-        console.print(f"  [dim]{framing.qualifier_text}[/dim]")
+    # The mandatory honesty caveat. No billing-mode qualifier banner: product
+    # decision, no differentiated messaging between subscription and API users.
     console.print(f"  [yellow]![/yellow] [italic]{audit.caveat}[/italic]")
     if audit.candidate_sessions > 0:
         console.print(
@@ -335,8 +334,6 @@ def _export_snippet(audit: OpusQuotaAudit, framing: Framing, *,
             "plan_tier": framing.plan_tier,
             "pricing_mode": framing.pricing_mode,
             "percent_quota_misallocated": audit.percent_quota_misallocated,
-            # DEPRECATED alias (see audit_to_dict) — kept one release.
-            "percent_quota_reclaimable": audit.percent_quota_misallocated,
         }, default=str))
         return
 

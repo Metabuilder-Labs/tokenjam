@@ -202,9 +202,12 @@ def test_cost_engine_cache_write_pre_priced_does_not_double_count_session(
     db: InMemoryBackend, engine: CostEngine,
 ) -> None:
     # A pre-priced span (cost_usd already set, e.g. from the parser) has its
-    # session cost handled by ingest's _build_or_update_session. process_span
-    # must still recompute the span cost but must NOT re-add to the session
-    # total, or cache-write spend would be double-counted.
+    # INCOMING figure already folded into the session by ingest's
+    # _build_or_update_session. process_span overwrites the span row with tj's
+    # own figure, so it must move the session by the DIFFERENCE: re-adding the
+    # full recomputed cost would double-count (6.25), and skipping the session
+    # entirely would strand it on the upstream number while the span row carries
+    # ours (5.00 against 1.25 of span).
     session = make_session(total_cost_usd=5.0)
     db.upsert_session(session)
 
@@ -217,9 +220,46 @@ def test_cost_engine_cache_write_pre_priced_does_not_double_count_session(
 
     engine.process_span(span)
 
-    # Span cost recomputed, session total left untouched (no double-count).
     assert _span_cost(db, span) == pytest.approx(1.25)
-    assert _session_total(db, session.session_id) == pytest.approx(5.0)
+    # 5.00 already contained the span's upstream 1.00; only the +0.25 correction
+    # is applied.
+    assert _session_total(db, session.session_id) == pytest.approx(5.25)
+
+
+def test_pre_priced_span_leaves_session_total_equal_to_its_spans(
+    db: InMemoryBackend, engine: CostEngine,
+) -> None:
+    """The invariant, end to end on the path that broke it.
+
+    `sessions.total_cost_usd` and `SUM(spans.cost_usd)` are two figures the UI
+    can show side by side, and `recompute_session_totals_from_spans` names the
+    span sum as the source of truth. A session built entirely out of pre-priced
+    spans whose upstream figure disagrees with tj's pricing used to end up
+    holding the upstream total while its span rows held tj's — a permanent,
+    silent disagreement between two screens.
+    """
+    session = make_session(total_cost_usd=None)
+    session.total_cost_usd = 0.0
+    db.upsert_session(session)
+
+    spans = []
+    for upstream in (0.10, 2.00, 0.0005):
+        span = make_llm_span(
+            provider="anthropic", model="claude-haiku-4-5",
+            input_tokens=0, output_tokens=0, cache_write_tokens=1_000_000,
+            session_id=session.session_id, cost_usd=upstream,
+        )
+        db.insert_span(span)
+        # What ingest's _build_or_update_session does with a pre-priced span.
+        stored = db.get_session(session.session_id)
+        stored.total_cost_usd = (stored.total_cost_usd or 0.0) + upstream
+        db.upsert_session(stored)
+        engine.process_span(span)
+        spans.append(span)
+
+    span_sum = sum(_span_cost(db, s) or 0.0 for s in spans)
+    assert span_sum == pytest.approx(3 * 1.25)
+    assert _session_total(db, session.session_id) == pytest.approx(span_sum)
 
 
 def test_cost_engine_no_op_when_provider_missing(db: InMemoryBackend, engine: CostEngine) -> None:
@@ -230,3 +270,38 @@ def test_cost_engine_no_op_when_provider_missing(db: InMemoryBackend, engine: Co
     engine.process_span(span)
 
     assert _span_cost(db, span) is None
+
+
+def _span_pricing_source(db: InMemoryBackend, span) -> str | None:
+    for s in db.get_trace_spans(span.trace_id):
+        if s.span_id == span.span_id:
+            return s.pricing_source
+    return None
+
+
+def test_cost_engine_stamps_pricing_source_exact(db: InMemoryBackend, engine: CostEngine) -> None:
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=1000, output_tokens=200,
+    )
+    db.insert_span(span)
+
+    engine.process_span(span)
+
+    assert span.pricing_source == "exact"
+    assert _span_pricing_source(db, span) == "exact"
+
+
+def test_cost_engine_stamps_pricing_source_default_fallback(
+    db: InMemoryBackend, engine: CostEngine,
+) -> None:
+    span = make_llm_span(
+        provider="never_seen_provider", model="never_seen_model",
+        input_tokens=1000, output_tokens=200,
+    )
+    db.insert_span(span)
+
+    engine.process_span(span)
+
+    assert span.pricing_source == "default_fallback"
+    assert _span_pricing_source(db, span) == "default_fallback"

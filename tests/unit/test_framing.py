@@ -241,12 +241,21 @@ def test_render_dollar_api():
     assert render_dollar(5.94, f) == "$5.94"
 
 
-def test_render_dollar_subscription_share_of_cycle():
+def test_render_dollar_subscription_shows_plain_dollars():
+    """Product decision: tj does not differentiate a subscription-billed user
+    from an API-billed user. This used to convert the dollar value into a
+    "12.4% of cycle" share-of-plan-fee string for subscription mode (plan
+    differentiation); that suppression is gone and dollars render verbatim,
+    same as api mode."""
     f = Framing(pricing_mode="subscription", plan_monthly_usd=100.0)
-    assert render_dollar(12.4, f) == "12.4% of cycle"
+    assert render_dollar(12.4, f) == "$12.40"
+    assert render_dollar(148.0, f) == "$148"
 
 
 def test_render_dollar_local_dash():
+    # Local inference has no marginal cost, so there is genuinely no dollar
+    # figure to show — a real absence of data, unlike the removed
+    # subscription suppression above.
     assert render_dollar(99.0, Framing(pricing_mode="local")) == "—"
 
 
@@ -254,24 +263,65 @@ def test_render_dollar_none():
     assert render_dollar(None, Framing(pricing_mode="api")) == "—"
 
 
+def test_render_dollar_subscription_and_api_render_identically():
+    """The whole point of the product decision: identical inputs must produce
+    identical output regardless of plan tier."""
+    value = 148.0
+    sub = Framing(pricing_mode="subscription", plan_monthly_usd=100.0)
+    api = Framing(pricing_mode="api")
+    assert render_dollar(value, sub) == render_dollar(value, api) == "$148"
+
+
 def test_render_savings_api_dollars():
     f = Framing(pricing_mode="api")
     assert render_savings(148.0, 999, f) == "$148"
 
 
-def test_render_savings_subscription_token_share():
+def test_render_savings_subscription_shows_plain_dollars():
+    """This used to render a token-share-of-cycle string ("12.4% of cycle
+    tokens") for subscription mode instead of the dollar figure; that
+    plan-based suppression is gone by product decision. window_total_tokens
+    is set here to prove it is no longer consulted by this function."""
     f = Framing(pricing_mode="subscription", window_total_tokens=1000)
-    assert render_savings(None, 124, f) == "12.4% of cycle tokens"
+    assert render_savings(148.0, 124, f) == "$148"
+
+
+def test_render_savings_subscription_and_api_render_identically():
+    value_usd, value_tokens = 148.0, 999
+    sub = Framing(pricing_mode="subscription", window_total_tokens=1000)
+    api = Framing(pricing_mode="api")
+    assert (
+        render_savings(value_usd, value_tokens, sub)
+        == render_savings(value_usd, value_tokens, api)
+        == "$148"
+    )
 
 
 def test_render_savings_local_token_count():
+    # Local inference genuinely has no dollar figure (no marginal cost); this
+    # placeholder path is unrelated to the plan-based suppression removed
+    # above and stays intact.
     f = Framing(pricing_mode="local")
     assert render_savings(None, 1_200_000, f) == "1.2M tokens"
+
+
+def test_render_savings_local_unpriced_dash_not_zero():
+    """A genuinely-unpriced figure (no tokens either) must render the unknown
+    placeholder, never $0.00 or 0 tokens."""
+    f = Framing(pricing_mode="local")
+    assert render_savings(None, None, f) == "—"
 
 
 def test_render_savings_none_dash():
     f = Framing(pricing_mode="api")
     assert render_savings(None, None, f) == "—"
+
+
+def test_render_savings_api_unpriced_dash_not_zero():
+    """api/subscription/unknown modes: a missing dollar figure must render
+    the placeholder, never $0.00, even when a token figure is available."""
+    f = Framing(pricing_mode="api")
+    assert render_savings(None, 999, f) == "—"
 
 
 # --------------------------------------------------------------------------- #
@@ -323,7 +373,7 @@ def test_agent_persona_mix_classifies_by_claude_code_prefix():
         ("claude-code-my-project",), ("claude-code-other",), ("sdk-agent-x",),
     ]
     result = agent_persona_mix(conn, agent_id="agent-x")
-    assert result == {"claude_code": 2, "other": 1}
+    assert result == {"claude-code": 2, "other": 1}
     sql, params = conn.execute.call_args[0]
     assert "agent_id = $" in sql
     assert params == ["agent-x"]
@@ -342,7 +392,7 @@ def test_agent_persona_mix_margin_cases_match_is_interactive_coding_agent():
         ("claude-code",), ("codex",), ("codex-cli-session",), ("sdk-agent-x",),
     ]
     result = agent_persona_mix(conn)
-    assert result == {"claude_code": 3, "other": 1}
+    assert result == {"claude-code": 3, "other": 1}
 
 
 def test_agent_persona_mix_empty_when_no_sessions():
@@ -352,22 +402,22 @@ def test_agent_persona_mix_empty_when_no_sessions():
 
     conn = MagicMock()
     conn.execute.return_value.fetchall.return_value = []
-    assert agent_persona_mix(conn) == {"claude_code": 0, "other": 0}
+    assert agent_persona_mix(conn) == {"claude-code": 0, "other": 0}
 
 
 @pytest.mark.parametrize("mix,expected", [
-    ({"claude_code": 9, "other": 1}, "claude-code"),
-    ({"claude_code": 1, "other": 9}, "sdk"),
-    ({"claude_code": 5, "other": 5}, "mixed"),
+    ({"claude-code": 9, "other": 1}, "claude-code"),
+    ({"claude-code": 1, "other": 9}, "sdk"),
+    ({"claude-code": 5, "other": 5}, "mixed"),
 ])
 def test_dominant_persona_from_agent_mix(mix, expected):
     assert dominant_persona(mix) == expected
 
 
 def test_dominant_persona_falls_back_to_declared_plan_when_mix_empty():
-    assert dominant_persona({"claude_code": 0, "other": 0}, declared_plan="max_5x") == "claude-code"
-    assert dominant_persona({"claude_code": 0, "other": 0}, declared_plan="api") == "sdk"
-    assert dominant_persona({"claude_code": 0, "other": 0}, declared_plan=None) == "unknown"
+    assert dominant_persona({"claude-code": 0, "other": 0}, declared_plan="max_5x") == "claude-code"
+    assert dominant_persona({"claude-code": 0, "other": 0}, declared_plan="api") == "sdk"
+    assert dominant_persona({"claude-code": 0, "other": 0}, declared_plan=None) == "unknown"
     assert dominant_persona({}, declared_plan="pro") == "claude-code"
 
 

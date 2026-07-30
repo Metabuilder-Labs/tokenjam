@@ -22,7 +22,7 @@ from tokenjam.utils.time_parse import parse_since
 @click.pass_context
 def cmd_export(ctx: click.Context, agent: str | None, since: str,
                fmt: str, output_path: str | None) -> None:
-    """Export spans in various formats."""
+    """Export spans (JSON / CSV / ...)."""
     db = ctx.obj["db"]
     agent_filter = agent or ctx.obj.get("agent")
     filters = TraceFilters(

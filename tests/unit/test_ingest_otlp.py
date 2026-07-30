@@ -10,7 +10,12 @@ import pytest
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest_adapters.otlp import ingest_otlp
 from tokenjam.otel.otlp_parsing import parse_otlp_span
-from tokenjam.otel.semconv import GenAIAttributes, OpenInferenceAttributes
+from tokenjam.otel.semconv import (
+    GenAIAttributes,
+    OpenInferenceAttributes,
+    ResourceAttributes,
+    TjAttributes,
+)
 
 
 FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "otlp_sample.json"
@@ -76,6 +81,9 @@ def test_parse_otlp_span_extracts_cache_read_and_write_tokens():
     """
     raw = {
         "name": "gen_ai.llm.call",
+        # An OTLP span with no startTimeUnixNano is rejected — it has no observed
+        # time. These cases are about attribute extraction, so they carry one.
+        "startTimeUnixNano": "1748736000000000000",
         "attributes": [
             {"key": GenAIAttributes.REQUEST_MODEL, "value": {"stringValue": "claude-haiku-4-5"}},
             {"key": GenAIAttributes.CACHE_READ_TOKENS, "value": {"intValue": "1000"}},
@@ -97,6 +105,7 @@ def test_parse_otlp_span_extracts_openinference_llm_span():
     """
     raw = {
         "name": "ChatOpenAI",
+        "startTimeUnixNano": "1748736000000000000",
         "attributes": [
             {"key": OpenInferenceAttributes.SPAN_KIND, "value": {"stringValue": "LLM"}},
             {"key": OpenInferenceAttributes.MODEL_NAME, "value": {"stringValue": "gpt-4o"}},
@@ -121,6 +130,7 @@ def test_parse_otlp_span_genai_wins_over_openinference():
     """When BOTH conventions are present on a span, gen_ai.* takes precedence."""
     raw = {
         "name": "ChatAnthropic",
+        "startTimeUnixNano": "1748736000000000000",
         "attributes": [
             # gen_ai.* (preferred)
             {"key": GenAIAttributes.REQUEST_MODEL, "value": {"stringValue": "claude-sonnet-4-6"}},
@@ -226,6 +236,105 @@ def test_ingest_rejects_spans_missing_required_fields(db, tmp_path):
     assert result["spans_seen"] == 1
     assert result["spans_rejected"] == 1
     assert result["spans_written"] == 0
+
+
+# -- SDK cost-attribution dimensions (#SDK dashboard shape) --
+
+def test_parse_otlp_span_extracts_resource_deployment_attrs():
+    """Standard OTel resource attributes (deployment.environment.name,
+    service.version, vcs.ref.head.revision) populate the new indexed fields —
+    any OTLP producer that already sets `OTEL_RESOURCE_ATTRIBUTES` gets these
+    for free, with no tj-specific instrumentation required."""
+    resource_attrs = {
+        ResourceAttributes.DEPLOYMENT_ENVIRONMENT_NAME: "production",
+        ResourceAttributes.SERVICE_VERSION: "2.3.1",
+        ResourceAttributes.VCS_REF_HEAD_REVISION: "abc123def",
+    }
+    raw = {
+        "name": "gen_ai.llm.call",
+        # An OTLP span with no startTimeUnixNano is rejected — it has no observed
+        # time. These cases are about attribute extraction, so they carry one.
+        "startTimeUnixNano": "1748736000000000000",
+        "attributes": [
+            {"key": GenAIAttributes.REQUEST_MODEL, "value": {"stringValue": "gpt-4o"}},
+        ],
+    }
+    span = parse_otlp_span(raw, resource_attrs)
+    assert span.environment == "production"
+    assert span.service_version == "2.3.1"
+    assert span.commit_sha == "abc123def"
+
+
+def test_parse_otlp_span_vcs_commit_sha_deprecated_fallback():
+    """The current vcs.ref.head.revision wins; the older deprecated
+    vcs.repository.ref.revision is read only when the current name is absent —
+    so a not-yet-upgraded OTLP producer's data isn't silently missed."""
+    raw = {
+        "name": "gen_ai.llm.call",
+        "startTimeUnixNano": "1748736000000000000",
+        "attributes": [],
+    }
+    span = parse_otlp_span(
+        raw, {ResourceAttributes.VCS_REPOSITORY_REF_REVISION: "deadbeef"}
+    )
+    assert span.commit_sha == "deadbeef"
+
+    span_both = parse_otlp_span(raw, {
+        ResourceAttributes.VCS_REF_HEAD_REVISION: "current-sha",
+        ResourceAttributes.VCS_REPOSITORY_REF_REVISION: "stale-sha",
+    })
+    assert span_both.commit_sha == "current-sha"
+
+
+def test_parse_otlp_span_extracts_tenant_feature_prompt_template():
+    """tj-specific span-level attributes (no OTel convention exists for these)
+    populate tenant_id/feature/prompt_template_id/prompt_template_version."""
+    raw = {
+        "name": "gen_ai.llm.call",
+        # An OTLP span with no startTimeUnixNano is rejected — it has no observed
+        # time. These cases are about attribute extraction, so they carry one.
+        "startTimeUnixNano": "1748736000000000000",
+        "attributes": [
+            {"key": TjAttributes.TENANT_ID, "value": {"stringValue": "acme-corp"}},
+            {"key": TjAttributes.FEATURE, "value": {"stringValue": "support-triage"}},
+            {"key": TjAttributes.PROMPT_TEMPLATE_ID, "value": {"stringValue": "triage-v1"}},
+            {"key": TjAttributes.PROMPT_TEMPLATE_VERSION, "value": {"stringValue": "3"}},
+        ],
+    }
+    span = parse_otlp_span(raw, {})
+    assert span.tenant_id == "acme-corp"
+    assert span.feature == "support-triage"
+    assert span.prompt_template_id == "triage-v1"
+    assert span.prompt_template_version == "3"
+
+
+def test_parse_otlp_span_attribution_dims_absent_by_default():
+    """A span/producer that never sets these carries None — no forced default,
+    no accidental '(none)' string landing in the DB."""
+    raw = {
+        "name": "gen_ai.llm.call",
+        "startTimeUnixNano": "1748736000000000000",
+        "attributes": [],
+    }
+    span = parse_otlp_span(raw, {})
+    assert span.tenant_id is None
+    assert span.feature is None
+    assert span.environment is None
+    assert span.service_version is None
+    assert span.commit_sha is None
+    assert span.prompt_template_id is None
+    assert span.prompt_template_version is None
+
+
+def test_ingest_fixture_extracts_service_version_from_resource(db):
+    """The committed fixture's first resourceSpans sets service.version at the
+    resource level; it lands on the span's indexed service_version column."""
+    ingest_otlp(db, source_file=str(FIXTURE_PATH))
+    row = db.conn.execute(
+        "SELECT service_version FROM spans WHERE model = 'claude-sonnet-4-6'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "0.1.0"
 
 
 def test_ingest_rejects_both_sources(db):

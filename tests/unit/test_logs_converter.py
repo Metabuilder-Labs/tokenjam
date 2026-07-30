@@ -346,7 +346,11 @@ def test_codex_user_prompt_produces_invoke_agent_span():
     assert span.status_code == SpanStatus.OK
     assert span.session_id == CODEX_CONV_ID
     assert span.attributes.get("prompt_length") == 25
-    assert span.attributes.get("prompt") == "echo hello"
+    # Under the standard content key, not Codex's own: that is where the ingest
+    # capture gate looks (so `[capture] prompts = false` now actually drops it)
+    # and where every analyzer reading prompt text looks.
+    assert span.attributes.get(GenAIAttributes.PROMPT_CONTENT) == "echo hello"
+    assert "prompt" not in span.attributes
 
 
 def test_codex_tool_decision_produces_internal_span():

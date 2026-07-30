@@ -57,7 +57,7 @@ def _uncached_candidate(agent_id="svc-uncached"):
         agent_id=agent_id, provider="anthropic", model="claude-sonnet-5",
         calls=25, sessions=5, assumed_prefix_tokens=4000,
         cache_control_snippet='{"cache_control": {"type": "ephemeral"}}',
-        estimated_recoverable_usd=1.5, estimated_recoverable_tokens=90000,
+        past_overspend_usd=1.5, past_overspend_tokens=90000,
         estimate_basis="p25 prefix basis",
     )
 
@@ -70,7 +70,7 @@ def _thrash_candidate(agent_id="svc-thrash", cause="ttl", ttl_worth_it=True,
         read_write_ratio=0.2, cause=cause, inter_call_gap_p50_minutes=12.0,
         ttl_worth_it=ttl_worth_it, ttl_breakeven_usd=ttl_breakeven_usd,
         cache_control_snippet="checklist or ttl snippet",
-        estimated_recoverable_usd=0.6, estimate_basis="thrash basis",
+        past_overspend_usd=0.6, estimate_basis="thrash basis",
     )
 
 
@@ -79,7 +79,7 @@ def _lookback_candidate(agent_id="svc-lookback"):
         agent_id=agent_id, provider="anthropic", model="claude-sonnet-5",
         miss_count=4, avg_prior_turn_blocks=28.0,
         cache_control_snippet="add an intermediate breakpoint",
-        estimated_recoverable_usd=0.3, estimated_recoverable_tokens=12000,
+        past_overspend_usd=0.3, past_overspend_tokens=12000,
         estimate_basis="lookback basis",
     )
 
@@ -103,7 +103,7 @@ def test_uncached_adapter_produces_advise_only_cost_card():
     assert p.target_key == {"agent_id": "svc-uncached", "provider": "anthropic",
                              "model": "claude-sonnet-5"}
     assert p.agent_id == "svc-uncached"
-    assert p.estimated_recoverable_usd == 1.5
+    assert p.past_overspend_usd == 1.5
     assert "cache_control" in p.suggestion
     assert "25 calls" in p.evidence
 
@@ -132,8 +132,8 @@ def test_thrash_adapter_ttl_not_worth_it_card_says_so_verbatim():
 
 
 def test_thrash_adapter_not_worth_it_excludes_recoverable_usd_end_to_end(db):
-    """Rollup contract (Component E's `estimated_recoverable_rollup` sums
-    ``CostProposal.estimated_recoverable_usd`` with no analyzer allowlist):
+    """Rollup contract (Component E's `past_overspend_rollup` sums
+    ``CostProposal.past_overspend_usd`` with no analyzer allowlist):
     when the TTL variant's honest break-even is negative, the real analyzer ->
     adapter pipeline must not hand the rollup a positive figure to sum."""
     # Sparse per-burst reuse: one write per session, second call never reads
@@ -161,7 +161,7 @@ def test_thrash_adapter_not_worth_it_excludes_recoverable_usd_end_to_end(db):
     finding = CacheEfficacyFinding(thrash_agents=thrash)
     props = _cache_thrash_to_proposals(finding)
     assert len(props) == 1
-    assert props[0].estimated_recoverable_usd is None
+    assert props[0].past_overspend_usd is None
     assert "caching not worth it at this cadence" in props[0].advise_text
 
 
@@ -184,7 +184,7 @@ def test_lookback_adapter_card():
     assert p.analyzer == "cache"
     assert "20" in p.evidence
     assert "4 cache miss" in p.evidence
-    assert p.estimated_recoverable_tokens == 12000
+    assert p.past_overspend_tokens == 12000
 
 
 # --- Signatures never collide with the existing per-(provider,model) card ----
@@ -217,10 +217,10 @@ def test_per_agent_recoverable_by_model_sums_across_all_three_checks():
                                     lookback_miss_agents=[lb])
     totals = _per_agent_cache_recoverable_by_model(finding)
     key = ("anthropic", "claude-sonnet-5")  # all three fixtures share this model
-    assert totals[key][0] == pytest.approx(uc.estimated_recoverable_usd
-                                            + th.estimated_recoverable_usd
-                                            + lb.estimated_recoverable_usd)
-    assert totals[key][1] == (uc.estimated_recoverable_tokens or 0) + (lb.estimated_recoverable_tokens or 0)
+    assert totals[key][0] == pytest.approx(uc.past_overspend_usd
+                                            + th.past_overspend_usd
+                                            + lb.past_overspend_usd)
+    assert totals[key][1] == (uc.past_overspend_tokens or 0) + (lb.past_overspend_tokens or 0)
 
 
 def test_per_agent_recoverable_by_model_ignores_non_overlapping_models():
@@ -252,20 +252,20 @@ def test_generic_per_model_card_is_reduced_by_overlapping_per_agent_claim(db):
     # What the generic card WOULD claim with no per-agent overlap subtracted.
     unclaimed_variant = replace(finding, uncached_agents=[], thrash_agents=[],
                                  lookback_miss_agents=[])
-    original = _cache_to_proposals(unclaimed_variant)[0].estimated_recoverable_usd
+    original = _cache_to_proposals(unclaimed_variant)[0].past_overspend_usd
 
     proposals = cost_proposals_from_report(report)
     generic = next(p for p in proposals if p.signature == "cost:cache:anthropic:claude-sonnet-5")
     agent_card = next(p for p in proposals if p.signature == "cost:cache-uncached:agent-solo")
 
-    assert generic.estimated_recoverable_usd < original
-    assert generic.estimated_recoverable_usd == pytest.approx(
-        max(0.0, original - agent_card.estimated_recoverable_usd), abs=1e-4,
+    assert generic.past_overspend_usd < original
+    assert generic.past_overspend_usd == pytest.approx(
+        max(0.0, original - agent_card.past_overspend_usd), abs=1e-4,
     )
     # The two cards combined never exceed what the single generic card would
     # have claimed alone — no inflation from counting the same spend twice.
     assert (
-        generic.estimated_recoverable_usd + agent_card.estimated_recoverable_usd
+        generic.past_overspend_usd + agent_card.past_overspend_usd
         <= original + 1e-6
     )
     assert "double-count" in generic.estimate_basis
@@ -311,7 +311,7 @@ def test_claude_code_persona_gets_no_lever_text_and_no_snippet(adapter_name):
     assert p.suggestion == ""
     # The diagnostic stays true and useful regardless of persona.
     assert p.evidence
-    assert p.estimated_recoverable_usd is not None or p.estimated_recoverable_tokens is not None
+    assert p.past_overspend_usd is not None or p.past_overspend_tokens is not None
 
 
 @pytest.mark.parametrize("adapter_name", [
@@ -361,7 +361,7 @@ def _prefix_candidate(**overrides):
         model="claude-sonnet-5",
         cache_control_snippet='# claude-sonnet-5: prefix seen in 5 calls\n'
                                '{"cache_control": {"type": "ephemeral"}}',
-        estimated_recoverable_usd=0.4, estimated_recoverable_tokens=4000,
+        past_overspend_usd=0.4, past_overspend_tokens=4000,
     )
     fields.update(overrides)
     return CachePrefixCandidate(**fields)
@@ -371,8 +371,8 @@ def _recommend_finding(candidates=None, **overrides):
     candidates = candidates if candidates is not None else [_prefix_candidate()]
     fields = dict(
         enabled=True, candidates=candidates,
-        estimated_recoverable_usd=sum(c.estimated_recoverable_usd or 0 for c in candidates) or None,
-        estimated_recoverable_tokens=sum(c.estimated_recoverable_tokens or 0 for c in candidates) or None,
+        past_overspend_usd=sum(c.past_overspend_usd or 0 for c in candidates) or None,
+        past_overspend_tokens=sum(c.past_overspend_tokens or 0 for c in candidates) or None,
         estimate_basis="recommend basis",
     )
     fields.update(overrides)
@@ -388,8 +388,8 @@ def test_cache_recommend_proposal_shape_carries_the_snippet_as_suggestion():
     assert p.signature == "cost:cache-recommend:abc123def456"
     assert p.suggestion == _prefix_candidate().cache_control_snippet
     assert "cache_control" in p.advise_text
-    assert p.estimated_recoverable_usd == 0.4
-    assert p.estimated_recoverable_tokens == 4000
+    assert p.past_overspend_usd == 0.4
+    assert p.past_overspend_tokens == 4000
 
 
 def test_cache_recommend_proposal_empty_for_disabled_or_no_candidates():
@@ -409,17 +409,17 @@ def test_cache_recommend_is_reduced_by_overlapping_per_agent_cache_claim():
     """A prefix candidate on the same model an A1 uncached-agent card already
     claimed must not ALSO claim the full figure under a third signature."""
     candidate = _prefix_candidate(model="claude-sonnet-5",
-                                   estimated_recoverable_usd=1.0,
-                                   estimated_recoverable_tokens=10_000)
+                                   past_overspend_usd=1.0,
+                                   past_overspend_tokens=10_000)
     recommend_finding = _recommend_finding(candidates=[candidate])
     cache_finding = CacheEfficacyFinding(
         uncached_agents=[_uncached_candidate(agent_id="svc-uncached")],
     )
-    unreduced = _cache_recommend_to_proposals(recommend_finding)[0].estimated_recoverable_usd
+    unreduced = _cache_recommend_to_proposals(recommend_finding)[0].past_overspend_usd
     reduced = _cache_recommend_to_proposals(recommend_finding, cache_finding)[0]
-    assert reduced.estimated_recoverable_usd < unreduced
-    assert reduced.estimated_recoverable_usd == pytest.approx(
-        max(0.0, unreduced - _uncached_candidate().estimated_recoverable_usd), abs=1e-4,
+    assert reduced.past_overspend_usd < unreduced
+    assert reduced.past_overspend_usd == pytest.approx(
+        max(0.0, unreduced - _uncached_candidate().past_overspend_usd), abs=1e-4,
     )
     assert "double-count" in reduced.estimate_basis
 

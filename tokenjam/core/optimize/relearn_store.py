@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from tokenjam.core.analysis_span import retention_days_for
+from tokenjam.core.optimize.build_stamp import tj_build
 from tokenjam.core.optimize.analyzers.relearn import RelearnFinding, compute_relearn_finding
 
 if TYPE_CHECKING:
@@ -39,6 +41,22 @@ def default_cache_path(config: TjConfig | None = None) -> Path:
 
         return _storage_base_dir(config) / "relearn_cache.json"
     return Path.home() / ".tj" / "relearn_cache.json"
+
+
+def _distill_cache_dir_for(config: TjConfig | None) -> Path | None:
+    """The distill cache this run may write to, or None to leave the default.
+
+    Imported lazily and never allowed to raise: a cache-path resolution
+    failure must not sink a recompute that would otherwise succeed.
+    """
+    if config is None:
+        return None
+    try:
+        from tokenjam.core.optimize.analyzers.relearn import _distill_cache_dir
+
+        return _distill_cache_dir(config)
+    except Exception:
+        return None
 
 
 def read_cache(
@@ -82,10 +100,39 @@ def write_cache(
     payload: dict[str, Any] = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "finding": stamp_proposal_ids(asdict(finding)),
+        # The build that produced these clusters — see `report_store.write_report`
+        # on why a timestamp alone lets a previous build's figures read as merely
+        # recent across an upgrade.
+        "tj_version": tj_build(),
     }
     if "cost_proposals" in existing:
         payload["cost_proposals"] = existing["cost_proposals"]
         payload["cost_computed_at"] = existing.get("cost_computed_at")
+        # `cost_window_days`/`cost_excluded` are written alongside
+        # `cost_proposals` by `write_cost_proposals` and read back through
+        # `read_cost_proposals`/`_headline_window_days` (see
+        # `api/routes/relearn.py`) to label the Review inbox headline with the
+        # window its figures were actually observed over. This relearn-detector
+        # write shares the same cache file (see this module's docstring) and
+        # used to preserve only the two keys above, silently forgetting a
+        # non-default cost window on every relearn recompute. Harmless while
+        # every route falls back to the same default, but round-tripping both
+        # keys here means a variable window survives regardless of which
+        # producer wrote the cache last.
+        #
+        # THE WHITELIST IS THE TRAP. Every `cost_*` key a cost write produces has
+        # to be named here or this write silently drops it, and the symptom is
+        # never an error — it is a field that reads as "never stamped". Caught
+        # live: `cost_tj_version` was added to `write_cost_proposals` and omitted
+        # here, so a freshly-booted daemon served a cost payload claiming an
+        # unknown producing build, because the pass writes the cost proposals and
+        # then the relearn cache over the top of them.
+        for key in (
+            "cost_window_days", "cost_since", "cost_until", "cost_excluded",
+            "cost_tj_version",
+        ):
+            if key in existing:
+                payload[key] = existing[key]
     _atomic_write(p, payload)
     return payload
 
@@ -110,22 +157,23 @@ def read_cost_proposals(
     computed AND no recompute has ever failed either (a genuinely fresh
     install). Shape: ``{"cost_computed_at": iso, "cost_proposals": [dict,
     ...], "cost_proposals_error": str | None, "cost_proposals_error_at": iso |
-    None, "cost_window_days": int, "cost_active_days": int,
-    "cost_n_sessions": int, "cost_excluded": dict}``. ``cost_proposals_error``
+    None, "cost_window_days": int, "cost_excluded": dict}``.
+    ``cost_proposals_error``
     is the last recompute failure's message (behavioral requirement #5) —
     present alongside a GOOD ``cost_proposals`` list when a later recompute
     failed after an earlier one had already succeeded, so a transient failure
-    never hides the last good result. The three ``cost_*`` count fields
-    (#273) are the window's active-day pace at the moment of the LAST
-    successful recompute — the inputs ``cost_proposals.
-    estimated_recoverable_rollup`` needs to compute its shared 30-day
-    projection ratio centrally; ``0`` for a cache written before they existed
-    (a caller passes them straight to ``compute_projection_ratio``, whose
-    guardrails treat ``0`` as "not enough data", never as a fabricated
-    ratio). ``cost_excluded`` (#326) is the rollup's cross-reference for
-    waste deliberately NOT summed into it (currently ``summarize`` —  see
-    ``cost_proposals._excluded_summarize_block``); ``{}`` for a cache written
-    before it existed."""
+    never hides the last good result. ``cost_window_days`` is the window the
+    stored figures were OBSERVED over, so the headline names the window its
+    own data came from rather than whatever picker the reader's screen is set
+    to. The pace inputs this block used to also carry (``cost_active_days`` /
+    ``cost_n_sessions``) are gone with the projection they fed: nothing in the
+    cost pipeline paces a figure any more, and a cached pace input is an
+    invitation to re-derive one. ``cost_excluded`` is the rollup's cross-reference for
+    waste a caller deliberately did NOT sum in — generic infrastructure with
+    no current occupant (``summarize`` used to be the one entry here until
+    it got a real peer card instead; see ``cost_proposals.
+    COST_ANALYZERS``); ``{}`` for a cache written before it existed, and
+    ``{}`` going forward until a future analyzer needs it again."""
     raw = read_cache(path, config=config)
     if raw is None:
         return None
@@ -139,9 +187,21 @@ def read_cost_proposals(
         "cost_proposals_error": raw.get("cost_proposals_error"),
         "cost_proposals_error_at": raw.get("cost_proposals_error_at"),
         "cost_window_days": raw.get("cost_window_days") or 0,
-        "cost_active_days": raw.get("cost_active_days") or 0,
-        "cost_n_sessions": raw.get("cost_n_sessions") or 0,
+        # The bounds the recompute ran over. `None` on a cache written before
+        # they were recorded — absent, never guessed from the day count, since
+        # deriving them would invent the very provenance this exists to supply.
+        "cost_since": raw.get("cost_since"),
+        "cost_until": raw.get("cost_until"),
         "cost_excluded": raw.get("cost_excluded") or {},
+        # The build that computed these proposals. `None` on a cache written
+        # before the stamp existed — absent, never the running build, which
+        # would assert agreement about figures we cannot vouch for.
+        #
+        # This is the SECOND whitelist a `cost_*` key has to be named in (the
+        # first is the round-trip list in `write_cache`). Both drop an unnamed
+        # key silently, and the symptom is a field that reads as "never
+        # stamped" rather than an error.
+        "cost_tj_version": raw.get("cost_tj_version"),
     }
 
 
@@ -183,28 +243,38 @@ def clear_cost_proposals_error(
 
 def write_cost_proposals(
     proposals: list[Any], path: Path | None = None, *, config: TjConfig | None = None,
-    window_days: int | None = None, active_days: int | None = None,
-    n_sessions: int | None = None, excluded: dict[str, Any] | None = None,
+    window_days: int | None = None, excluded: dict[str, Any] | None = None,
+    since: str | None = None, until: str | None = None,
 ) -> dict[str, Any]:
     """Write the cost proposals into the SAME cache file the relearn finding
     lives in, under a separate ``cost_proposals`` key, preserving the relearn
     ``finding`` block. ``proposals`` is a list of ``CostProposal`` (or plain
     dicts). Atomic; best-effort on I/O error.
 
-    ``window_days``/``active_days``/``n_sessions`` (#273) are the window this
-    recompute ran over, stored alongside the proposals so
-    ``estimated_recoverable_rollup`` can compute its shared 30-day projection
-    ratio the next time this cache is read — never recomputed ad hoc at read
-    time, since the window that produced these proposals may not be the
-    window a later reader assumes. ``None`` (the default) leaves any
-    previously-stored value untouched, so a caller that doesn't track these
-    yet (a legacy call site) doesn't silently zero out a real prior value.
+    ``window_days`` is the window this recompute ran over, stored alongside
+    the proposals so a later reader labels the figures with the window they
+    were actually observed over rather than one it assumes. ``None`` (the
+    default) leaves any previously-stored value untouched, so a caller that
+    doesn't track it yet (a legacy call site) doesn't silently zero out a real
+    prior value. It is a LABEL, never a divisor: nothing rescales a stored
+    figure by it.
 
-    ``excluded`` (#326) is the rollup's cross-reference block (currently
-    ``{"summarize": {...}}`` when the analyzer found something, else ``{}``)
-    — always written when this call succeeds (unlike the three window
-    fields above, this one has no "leave untouched" case: a fresh recompute
-    always knows the current excluded state, even if it's "nothing")."""
+    ``since``/``until`` are the RESOLVED BOUNDS that recompute actually ran
+    over, stored beside the length. A length alone is not provenance: the
+    stored analyzer report records ``scan_since``/``scan_until``, and while
+    this store recorded only a day count the two surfaces' windows could not
+    be compared from the artifacts at all — so a per-analyzer disagreement
+    between them was undiagnosable without instrumenting a live daemon, and
+    two successive explanations for one were asserted on that missing evidence
+    and were wrong. Same "leave untouched when ``None``" rule as
+    ``window_days``, for the same legacy-call-site reason.
+
+    ``excluded`` is the rollup's cross-reference block for waste a caller
+    deliberately did not fold in as a peer card — generic infrastructure with
+    no current occupant (see ``read_cost_proposals``) — always written when
+    this call succeeds (unlike ``window_days`` above, this one has no "leave
+    untouched" case: a fresh recompute always knows the current excluded
+    state, even if it's "nothing")."""
     from dataclasses import is_dataclass
 
     p = path or default_cache_path(config)
@@ -221,12 +291,13 @@ def write_cost_proposals(
     payload = dict(existing)
     payload["cost_proposals"] = serialised
     payload["cost_computed_at"] = datetime.now(timezone.utc).isoformat()
+    payload["cost_tj_version"] = tj_build()
     if window_days is not None:
         payload["cost_window_days"] = window_days
-    if active_days is not None:
-        payload["cost_active_days"] = active_days
-    if n_sessions is not None:
-        payload["cost_n_sessions"] = n_sessions
+    if since is not None:
+        payload["cost_since"] = since
+    if until is not None:
+        payload["cost_until"] = until
     payload["cost_excluded"] = excluded or {}
     _atomic_write(p, payload)
     return payload
@@ -253,8 +324,22 @@ def recompute_now(
         # `[loop].transcript_path` lets a Claude Agent SDK app point the loop at
         # its OWN transcript root instead of ~/.claude/projects. None keeps the
         # historical env/default resolution.
-        projects_root = None
-        if config is not None:
+        #
+        # The analyzer scope is consulted FIRST: this daemon job is a second
+        # entry point into the same scan, so a scope honored only by
+        # `analyzers/relearn.run` would leak the machine's global transcript
+        # tree back in through the cache the served routes read. See
+        # `core/optimize/scope.py`.
+        from tokenjam.core.optimize.scope import (
+            resolve_analyzer_scope,
+            resolve_write_scope,
+        )
+
+        scope = resolve_analyzer_scope(config)
+        if not scope.enabled:
+            return None
+        projects_root = scope.projects_root if scope.source == "flag" else None
+        if projects_root is None and config is not None:
             try:
                 from tokenjam.core.transcript import loop_transcript_root
 
@@ -273,11 +358,23 @@ def recompute_now(
                 transcript_cache_dir = default_cache_dir(config)
             except Exception:
                 transcript_cache_dir = None
-        # Full-corpus persona classification (relearn scans unbounded history
-        # like the finding itself, not a window) — same functions
-        # `runner.build_report` uses for `AnalyzerContext.persona`/
-        # `OptimizeReport.persona`, so the daemon's relearn cache gates its
-        # rung-1/rung-2 write by the same rule the rest of the product does.
+        # WINDOW-SCOPED persona, matching `runner.build_report`. This used to
+        # classify over the full corpus, on the argument that relearn's own
+        # evidence is unbounded — a defensible reading in isolation, and a bug
+        # across surfaces. Persona gates WHICH ANALYZERS RUN
+        # (`PERSONA_DISABLED_ANALYZERS`) and whether relearn may offer a
+        # workspace write, so a corpus whose recent window is claude-code
+        # dominant but whose full history is mixed (or the reverse) resolved a
+        # DIFFERENT gate here than on the report the Dashboard reads. That is
+        # two surfaces disagreeing about which findings exist, not about a
+        # figure's size. One derivation, over the window every other figure is
+        # published on (`core/optimize/report_window.py`).
+        #
+        # In the daemon's normal path this branch is not even reached: the scan
+        # cycle writes this cache from the report pass's own relearn finding,
+        # which already carries the report's persona. It stands for a STANDALONE
+        # recompute, and it has to agree with the cycle rather than diverge the
+        # moment someone calls it directly.
         persona = "unknown"
         if conn is not None:
             try:
@@ -287,14 +384,40 @@ def recompute_now(
                     dominant_persona,
                 )
 
+                from datetime import timedelta
+
+                from tokenjam.core.optimize.report_window import report_window_days
+                from tokenjam.utils.time_parse import utcnow
+
+                until = utcnow()
+                since = until - timedelta(days=report_window_days(config, conn))
                 persona = dominant_persona(
-                    agent_persona_mix(conn), declared_plan=config_declared_plan(config),
+                    agent_persona_mix(conn, since, until),
+                    declared_plan=config_declared_plan(config),
                 )
             except Exception:
                 persona = "unknown"
         finding = compute_relearn_finding(
             conn, projects_root=projects_root, transcript_cache_dir=transcript_cache_dir,
             persona=persona,
+            # The apply target has to agree with the scope the findings came
+            # from — a card whose evidence is scoped and whose write target is
+            # not describes two different machines. Routed through
+            # `resolve_write_scope` rather than reading `scope.claude_home`
+            # directly, because the API's write guard authorizes against the
+            # OTHER half of that same type; deriving the two independently is
+            # what let the suggestion and the guard disagree.
+            claude_home=resolve_write_scope(scope=scope).suggest_root,
+            # Scoped like every other relearn artifact — the distill cache is a
+            # SECOND cache beside this module's own, and it wrote real files
+            # under the real ~/.tj even from an isolated config until it was
+            # threaded through the same `_storage_base_dir`.
+            distill_cache_dir=_distill_cache_dir_for(config),
+            # The archive lane's horizon: what tokenjam kept, not what Claude
+            # Code left on disk. See `compute_relearn_finding`.
+            retention_days=retention_days_for(
+                getattr(config, "storage", None)
+            ) if getattr(config, "storage", None) is not None else None,
         )
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to

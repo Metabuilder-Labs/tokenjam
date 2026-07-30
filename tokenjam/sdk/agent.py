@@ -32,6 +32,8 @@ def watch(
     agent_name: str | None = None,
     agent_version: str | None = None,
     conversation_id: str | None = None,
+    tenant_id: str | None = None,
+    feature: str | None = None,
 ):
     """
     Decorator that wraps an agent entry function with session tracking.
@@ -42,6 +44,15 @@ def watch(
     Individual LLM call spans are NOT created automatically — they require
     patch_anthropic(), patch_openai(), or equivalent provider patches.
 
+    `tenant_id` / `feature` attribute the whole session to a customer/tenant
+    and an application feature (cost-attribution dimensions, #SDK dashboard
+    shape) — set once here rather than on every LLM call, since a session
+    typically belongs to one tenant. Both are ALSO pushed into the ambient
+    `sdk.attribution` context for the duration of the wrapped call, so
+    auto-instrumented provider-patch spans created inside it inherit them
+    without any further plumbing; explicit per-call overrides (e.g. a
+    different prompt_template_id per call) still take precedence.
+
     Never crashes the agent — if something goes wrong internally, it logs
     a warning and runs the function unwrapped.
     """
@@ -51,11 +62,16 @@ def watch(
             from tokenjam.sdk.bootstrap import ensure_initialised
             ensure_initialised()
             try:
+                # AgentSession itself establishes the ambient attribution
+                # context (see AgentSession.__enter__) -- no separate
+                # `attribution(...)` block needed here.
                 with AgentSession(
                     agent_id=agent_id,
                     agent_name=agent_name,
                     agent_version=agent_version,
                     conversation_id=conversation_id,
+                    tenant_id=tenant_id,
+                    feature=feature,
                 ):
                     return func(*args, **kwargs)
             except Exception:
@@ -73,8 +89,18 @@ class AgentSession:
     used directly for more control.
 
     Usage:
-        with AgentSession(agent_id="my-agent") as session:
+        with AgentSession(agent_id="my-agent", tenant_id="acme-corp") as session:
             result = run_my_agent()
+
+    `tenant_id`/`feature` are stamped on THIS session's own span AND pushed
+    into the ambient `sdk.attribution` context for the duration of the
+    `with` block (see `tokenjam.sdk.attribution.attribution`) -- direct
+    `AgentSession` use is a first-class entry point, not just something
+    `@watch()` wraps, so a provider-patch span created inside the block
+    (`patch_anthropic()`, `patch_openai()`, ...) must inherit the same
+    attribution the session itself carries. Without this, the session span
+    would show the tenant/feature but the billable LLM call spans it wraps
+    would not.
     """
 
     def __init__(
@@ -83,15 +109,22 @@ class AgentSession:
         agent_name: str | None = None,
         agent_version: str | None = None,
         conversation_id: str | None = None,
+        tenant_id: str | None = None,
+        feature: str | None = None,
     ):
         self.agent_id = agent_id
         self.agent_name = agent_name
         self.agent_version = agent_version
         self.conversation_id = conversation_id or new_uuid()
+        self.tenant_id = tenant_id
+        self.feature = feature
         self._span: trace.Span | None = None
         self._ctx: AbstractContextManager[trace.Span] | None = None
+        self._attribution_cm: AbstractContextManager[None] | None = None
 
     def __enter__(self) -> AgentSession:
+        from tokenjam.sdk.attribution import attribution, stamp_span_attribution
+
         self._span = _tracer.start_span(GenAIAttributes.SPAN_INVOKE_AGENT)
         self._span.set_attribute(GenAIAttributes.AGENT_ID, self.agent_id)
         if self.agent_name:
@@ -101,11 +134,16 @@ class AgentSession:
         self._span.set_attribute(
             GenAIAttributes.CONVERSATION_ID, self.conversation_id,
         )
+        stamp_span_attribution(self._span, tenant_id=self.tenant_id, feature=self.feature)
         self._ctx = trace.use_span(self._span, end_on_exit=False)
         self._ctx.__enter__()
+        self._attribution_cm = attribution(tenant_id=self.tenant_id, feature=self.feature)
+        self._attribution_cm.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._attribution_cm is not None:
+            self._attribution_cm.__exit__(exc_type, exc_val, exc_tb)
         if self._span is None:
             return False
         if exc_type is not None:
@@ -129,6 +167,10 @@ def record_llm_call(
     duration_ms: float | None = None,
     prompt: str | None = None,
     completion: str | None = None,
+    tenant_id: str | None = None,
+    feature: str | None = None,
+    prompt_template_id: str | None = None,
+    prompt_template_version: str | None = None,
 ) -> None:
     """
     Manual instrumentation: record a single LLM call as an OTel span.
@@ -136,9 +178,19 @@ def record_llm_call(
 
     Creates a child span under the current active span (typically set by
     @watch() / AgentSession).
+
+    `tenant_id` / `feature` / `prompt_template_id` / `prompt_template_version`
+    are the SDK cost-attribution dimensions (#SDK dashboard shape). Resolution
+    order per dimension: explicit kwarg here wins; else inherited from the
+    parent span (e.g. tenant_id/feature set once on @watch()'s session span);
+    else the ambient `sdk.attribution.attribution()` context, if active.
     """
+    from tokenjam.sdk.attribution import stamp_span_attribution
+
     span = _tracer.start_span(GenAIAttributes.SPAN_LLM_CALL)
     parent_span = trace.get_current_span()
+    inherited_tenant_id: str | None = None
+    inherited_feature: str | None = None
     if parent_span and parent_span.is_recording():
         agent_id = parent_span.attributes.get(GenAIAttributes.AGENT_ID)
         if agent_id:
@@ -146,6 +198,8 @@ def record_llm_call(
         conv_id = parent_span.attributes.get(GenAIAttributes.CONVERSATION_ID)
         if conv_id:
             span.set_attribute(GenAIAttributes.CONVERSATION_ID, conv_id)
+        inherited_tenant_id = parent_span.attributes.get(TjAttributes.TENANT_ID)
+        inherited_feature = parent_span.attributes.get(TjAttributes.FEATURE)
     span.set_attribute(GenAIAttributes.REQUEST_MODEL, model)
     span.set_attribute(GenAIAttributes.PROVIDER_NAME, provider)
     span.set_attribute(GenAIAttributes.INPUT_TOKENS, input_tokens)
@@ -156,6 +210,13 @@ def record_llm_call(
         span.set_attribute(GenAIAttributes.PROMPT_CONTENT, prompt)
     if completion is not None:
         span.set_attribute(GenAIAttributes.COMPLETION_CONTENT, completion)
+    stamp_span_attribution(
+        span,
+        tenant_id=tenant_id if tenant_id is not None else inherited_tenant_id,
+        feature=feature if feature is not None else inherited_feature,
+        prompt_template_id=prompt_template_id,
+        prompt_template_version=prompt_template_version,
+    )
     span.set_status(trace.Status(trace.StatusCode.OK))
     if duration_ms is not None:
         # Set explicit end time based on duration
@@ -173,14 +234,26 @@ def record_tool_call(
     tool_output: dict | None = None,
     duration_ms: float | None = None,
     error: str | None = None,
+    tenant_id: str | None = None,
+    feature: str | None = None,
 ) -> None:
     """
     Manual instrumentation: record a single tool call as an OTel span.
 
     Creates a child span under the current active span.
+
+    `tenant_id` / `feature` follow the same explicit-kwarg > inherited-from-
+    parent-span > ambient-`sdk.attribution`-context resolution as
+    `record_llm_call` — tool spans carry no cost of their own (Rule: cost is
+    attributed to the LLM completion span), but tagging them keeps a tenant's
+    full call graph attributable for non-cost breakdowns (e.g. tool usage).
     """
+    from tokenjam.sdk.attribution import stamp_span_attribution
+
     span = _tracer.start_span(GenAIAttributes.SPAN_TOOL_CALL)
     parent_span = trace.get_current_span()
+    inherited_tenant_id: str | None = None
+    inherited_feature: str | None = None
     if parent_span and parent_span.is_recording():
         agent_id = parent_span.attributes.get(GenAIAttributes.AGENT_ID)
         if agent_id:
@@ -188,6 +261,13 @@ def record_tool_call(
         conv_id = parent_span.attributes.get(GenAIAttributes.CONVERSATION_ID)
         if conv_id:
             span.set_attribute(GenAIAttributes.CONVERSATION_ID, conv_id)
+        inherited_tenant_id = parent_span.attributes.get(TjAttributes.TENANT_ID)
+        inherited_feature = parent_span.attributes.get(TjAttributes.FEATURE)
+    stamp_span_attribution(
+        span,
+        tenant_id=tenant_id if tenant_id is not None else inherited_tenant_id,
+        feature=feature if feature is not None else inherited_feature,
+    )
     span.set_attribute(GenAIAttributes.TOOL_NAME, tool_name)
     if tool_input is not None:
         import json

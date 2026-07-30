@@ -40,12 +40,23 @@ class ProxyRunner:
                 sink = AuditSink(db, pipeline=pipeline)
             observer = ProxyObserver(sink=sink)
         self.observer = observer
+        # Streaming data-quality sink: one span per observed stream, recording
+        # whether its usage payload ever arrived. Needs somewhere to write, so
+        # it stays None when the proxy runs without a DB (tests, dry runs) —
+        # the tap then observes nothing and the relay is unchanged.
+        self.stream_sink = None
+        if db is not None:
+            from tokenjam.proxy.stream_usage import StreamUsageSink
+            self.stream_sink = StreamUsageSink(db, pipeline=pipeline)
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
         """Schedule the proxy server on the running event loop (non-blocking)."""
-        app = build_proxy_app(self.config, observer=self.observer, db=self.db)
+        app = build_proxy_app(
+            self.config, observer=self.observer, db=self.db,
+            stream_sink=self.stream_sink,
+        )
         uconfig = uvicorn.Config(
             app,
             host=self.config.proxy.host,
@@ -76,5 +87,5 @@ class ProxyRunner:
         if self._task is not None:
             try:
                 await self._task
-            except Exception:  # noqa: BLE001
+            except Exception:  # 1
                 logger.exception("tj proxy server task ended with error")

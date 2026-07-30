@@ -9,15 +9,34 @@
 [claude]                 # Claude Code
 project_files = ["CLAUDE.md", "CLAUDE.local.md"]   # .local = historical local override
 project_globs = [
+    # Rules are matched RECURSIVELY: real rule trees nest (`rules/ecc/common/*.md`)
+    # and a single-level `rules/*.md` silently prices none of them. The
+    # single-level pattern is kept alongside so a path that only ever matched it
+    # keeps matching (`Path.match` handles it without `**` semantics).
     ".claude/rules/*.md",
+    ".claude/rules/**/*.md",
     ".claude/skills/*/SKILL.md",
     ".claude/commands/*.md",
     ".claude/agents/*.md",
 ]
 global_paths = [
     "~/.claude/CLAUDE.md", "/etc/claude-code/CLAUDE.md",
+    # `~/.claude/rules/**` was missing here while the project-side equivalent was
+    # listed, so a user's global rule tree — always-resident text, re-sent at the
+    # head of every session — was scanned on no scope at all.
+    "~/.claude/rules/**/*.md",
     "~/.claude/agents/*.md", "~/.claude/skills/*/SKILL.md", "~/.claude/commands/*.md",
 ]
+# DELIBERATELY ABSENT: ~/.claude/plugins/**. It looks like the obvious next entry — many
+# SKILL.md files structurally identical to ~/.claude/skills/*/SKILL.md, sitting right
+# beside it — and adding it would price files that are never loaded. Two gates decide
+# whether a plugin's surface reaches the model and NEITHER leaves a trace on disk:
+# `enabledPlugins` in ~/.claude/settings.json (a disabled plugin contributes nothing) and
+# install SCOPE (a project-scoped plugin loads only for its own project). Only a small
+# minority of what is on disk is ever resident; existing on disk is not evidence of being
+# loaded. Plugin files are also third-party under a versioned cache path, so a rewrite is
+# reverted by the next plugin update — a fix that appears to succeed, then regresses. If
+# plugins are ever priced it belongs in an analyzer that reads both gates, not here.
 
 [gemini]                 # Gemini CLI
 project_files = ["GEMINI.md"]

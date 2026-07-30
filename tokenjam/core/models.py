@@ -63,6 +63,11 @@ class NormalizedSpan:
     name:           str
     kind:           SpanKind
     status_code:    SpanStatus
+    # Always a REAL observed instant. Ingest may neither substitute a default
+    # (a zero epoch drags every MIN() and day union back by decades; `now`
+    # silently dates historical work to whenever tj received it) nor leave it
+    # unset — a record with no observed time is rejected at the boundary
+    # instead. See `api/routes/logs.py` and `core/backfill.py`.
     start_time:     datetime
     parent_span_id: str | None     = None
     session_id:     str | None     = None
@@ -72,6 +77,19 @@ class NormalizedSpan:
     # main-thread spans and non-Claude-Code telemetry. Lets a session's cost be
     # broken down per subagent.
     sub_agent_id:   str | None     = None
+    # The subagent's STABLE identity: the agent TYPE that was dispatched (the
+    # `subagent_type` argument of the spawning Task/Agent call, e.g.
+    # `general-purpose` / `Explore` / a user-defined `.claude/agents/<name>.md`
+    # slug). Distinct from `sub_agent_id` above, which Claude Code mints per
+    # DISPATCH: it is unique to one dispatch and so appears in exactly one
+    # session, which means it can neither form a per-subagent cohort across
+    # sessions nor name anything on disk. This field is the identity that
+    # recurs. Read at backfill time off Claude Code's
+    # `agent-<id>.meta.json` sidecar (`agentType`); None for main-thread spans,
+    # non-Claude-Code telemetry, and dispatches whose "type" is a caller-chosen
+    # per-dispatch instance label rather than a reusable definition name (see
+    # `backfill._subagent_type_for`).
+    sub_agent_type: str | None     = None
     end_time:       datetime | None = None
     duration_ms:    float | None   = None
     status_message: str | None     = None
@@ -108,7 +126,7 @@ class NormalizedSpan:
     # persisted on the session it creates so the dashboard can group by it.
     service_namespace: str | None  = None
     # OTel service.instance.id — the per-terminal/process label (e.g.
-    # "founder-os"). Persisted on the session for use as its display name.
+    # "dev-box"). Persisted on the session for use as its display name.
     service_instance_id: str | None = None
     # Cross-session run grouping (tokenjam.run_id resource attribute). One id
     # per fan-out harness run, shared by all its workers. Transient on the
@@ -117,6 +135,37 @@ class NormalizedSpan:
     # Optional spawning-session id (tokenjam.parent_session_id) for nested
     # spawns. Transient on the span; persisted on the session for the run tree.
     parent_session_id: str | None   = None
+
+    # -- SDK cost-attribution dimensions (multi-tenant cost breakdown) --
+    # Indexed directly on `spans` (not session-only, unlike service_namespace):
+    # the Cost view groups/filters at span granularity, so these need to be
+    # queryable per-span. All nullable — absent on any producer that doesn't
+    # set them, including every existing Claude Code / OTLP span (no backfill
+    # required, no behavior change for spans that never carry them).
+    #
+    # tenant_id / feature: tj-specific (no OTel convention exists for a
+    # billing-tenant or an application "feature" label). environment /
+    # service_version / commit_sha: standard OTel resource-attribute names
+    # (deployment.environment.name / service.version / vcs.ref.head.revision)
+    # — see otel/semconv.py::ResourceAttributes for the exact wire names and
+    # the deprecated-fallback note for commit_sha.
+    tenant_id:       str | None = None
+    feature:         str | None = None
+    environment:     str | None = None
+    service_version: str | None = None
+    commit_sha:      str | None = None
+    # Prompt/template identity pair (tj-specific — no gen_ai.* convention
+    # exists). template_id names the prompt; template_version is its revision.
+    prompt_template_id:      str | None = None
+    prompt_template_version: str | None = None
+    # Provenance for cost_usd: HOW the rate resolved, from
+    # pricing.classify_pricing_source — "exact" | "date_stripped" |
+    # "context_tag" | "override" | "default_fallback", or None when cost_usd
+    # itself was never computed (no provider/model, zero tokens). Set by
+    # CostEngine.process_span at ingest; makes a fallback-priced span
+    # recoverable after the fact instead of looking like a correctly-priced
+    # one once only the dollar figure remains.
+    pricing_source:          str | None = None
 
 
 @dataclass
@@ -146,7 +195,7 @@ class SessionRecord:
     # rolls up under (e.g. repo `Aquanodeio/harness` -> namespace "aquanode").
     # Drives dashboard grouping. None when the telemetry carried no namespace.
     service_namespace: str | None = None
-    # OTel service.instance.id — the per-terminal label (e.g. "founder-os").
+    # OTel service.instance.id — the per-terminal label (e.g. "dev-box").
     # Used as the session's display name when set; None otherwise.
     service_instance_id: str | None = None
     # Cross-session run grouping. `run_id` ties this session to all the other
@@ -332,6 +381,29 @@ class TraceRecord:
     # compute path) rather than re-aggregated in JS.
     input_tokens:  int        = 0
     output_tokens: int        = 0
+    # Statistical cost-outlier flag for the trace-cost-ranking work: True when
+    # this trace's cost_usd sits above the window's Tukey fence
+    # (Q3 + 1.5 * IQR over priced traces in the SAME filtered window). Computed
+    # server-side in DuckDBBackend.get_traces so the rule has one implementation;
+    # see TraceCostStats for the numbers backing the flag.
+    is_outlier:    bool       = False
+
+
+@dataclass
+class TraceCostStats:
+    """Window-level cost distribution behind the `is_outlier` flag on TraceRecord.
+
+    Carried alongside a /traces response so the UI can render the outlier rule
+    in plain language with the actual numbers, never just a bare badge. `None`
+    fields mean "not enough priced traces to compute a reliable range" (see
+    MIN_OUTLIER_SAMPLE) — in that case no trace in the response is flagged.
+    """
+    method:       str          = "iqr_1.5x"
+    sample_size:  int          = 0
+    min_sample:   int          = 0
+    q1_usd:       float | None = None
+    q3_usd:       float | None = None
+    threshold_usd: float | None = None
 
 
 @dataclass
@@ -417,6 +489,13 @@ class TraceFilters:
     status:     str | None   = None
     limit:      int          = 50
     offset:     int          = 0
+    # "recent" (default, reverse-chronological) or "cost" (highest cost_usd
+    # first) — additive: existing callers that never set this keep the
+    # historical ordering.
+    sort:       str          = "recent"
+    # Cost-floor filter: only traces whose summed cost_usd is >= this value.
+    # Applied via HAVING on the same per-trace aggregate, no extra scan.
+    min_cost_usd: float | None = None
 
 
 @dataclass
@@ -424,7 +503,15 @@ class CostFilters:
     agent_id:  str | None   = None
     since:     datetime | None = None
     until:     datetime | None = None
-    group_by:  str          = "day"   # agent | model | day | tool
+    # agent | model | day | tool | tenant | feature | environment | prompt_version
+    group_by:  str          = "day"
+    # Equality filters for the new cost-attribution dimensions (#SDK dashboard
+    # shape). Independent of group_by — e.g. group_by="model" + tenant_id="acme"
+    # scopes a per-model breakdown to one tenant's spend.
+    tenant_id:      str | None = None
+    feature:        str | None = None
+    environment:    str | None = None
+    prompt_version: str | None = None
 
 
 @dataclass

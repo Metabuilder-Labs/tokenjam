@@ -287,7 +287,7 @@ def test_no_tool_spans_in_window(db):
 
 
 def test_cache_write_tokens_included_in_recoverable_total(db):
-    """Regression: cache_write_tokens must be included in estimated_recoverable_tokens.
+    """Regression: cache_write_tokens must be included in past_overspend_tokens.
 
     This verifies the fix for the bug where cache_write_tokens was omitted
     from the per-cluster token sum, causing cache-write-heavy workloads to
@@ -328,7 +328,7 @@ def test_cache_write_tokens_included_in_recoverable_total(db):
 
     # Total recoverable tokens = (1000 + 200 + 500 + 300) * 20 = 2000 * 20 = 40000
     # Before the fix, this would be (1000 + 200 + 500) * 20 = 1700 * 20 = 34000
-    assert finding.estimated_recoverable_tokens == 40000
+    assert finding.past_overspend_tokens == 40000
     # avg_tokens should be input+output only (per-instance UI framing),
     # not affected by the bug fix
     assert c.avg_tokens == 1200

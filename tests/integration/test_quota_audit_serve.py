@@ -95,8 +95,7 @@ async def test_quota_audit_endpoint_computes_audit_server_side(tmp_path):
     assert payload["opus_sessions"] == 3
     assert payload["candidate_sessions"] == 3
     assert payload["percent_quota_misallocated"] > 0
-    # DEPRECATED alias still rides through the serve payload (0.5.4 compat).
-    assert payload["percent_quota_reclaimable"] == payload["percent_quota_misallocated"]
+    assert "percent_quota_reclaimable" not in payload
     # The mandatory honesty caveat rides through the payload.
     assert "spot-check" in payload["caveat"].lower()
     # Framing block present + subscription (max_5x budget).

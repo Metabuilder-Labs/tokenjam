@@ -14,7 +14,7 @@ Safety doctrine, enforced structurally:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from starlette.applications import Starlette
@@ -26,6 +26,14 @@ from starlette.routing import Route
 from tokenjam.proxy.engine import POLICY, PolicyEngine, PolicyRequest
 from tokenjam.proxy.gate import classify
 from tokenjam.proxy.observer import ProxyObserver
+from tokenjam.proxy.stream_usage import (
+    SseUsageScanner,
+    StreamUsageObservation,
+    requested_model,
+    stream_requested,
+    tap_stream,
+    usage_opt_in,
+)
 
 logger = logging.getLogger("tokenjam.proxy")
 
@@ -48,20 +56,22 @@ def _provider_for(path: str) -> str:
     return _ROUTE_PROVIDER.get(path, "unknown")
 
 
-def _policy_request(request: Request, body: bytes) -> PolicyRequest:
-    """Build the pure (HTTP-free) policy-evaluation context from a request.
-
-    The body is parsed best-effort for kind-specific evaluators to read (e.g. a
-    future budget_cap reading the model); a malformed body is simply None.
-    """
+def _parse_body(body: bytes) -> dict | None:
+    """Best-effort JSON view of the request body; a malformed body is None."""
     import json
-    parsed: dict | None = None
     try:
         loaded = json.loads(body or b"{}")
-        if isinstance(loaded, dict):
-            parsed = loaded
-    except Exception:  # noqa: BLE001 — body parsing never breaks the request
-        parsed = None
+    except Exception:  # body parsing never breaks the request
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _policy_request(request: Request, parsed: dict | None) -> PolicyRequest:
+    """Build the pure (HTTP-free) policy-evaluation context from a request.
+
+    The parsed body is for kind-specific evaluators to read (e.g. a future
+    budget_cap reading the model).
+    """
     return PolicyRequest(
         provider=_provider_for(request.url.path),
         path=request.url.path,
@@ -96,7 +106,9 @@ def _response_headers(upstream: httpx.Response) -> list[tuple[bytes, bytes]]:
 def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
                     client: httpx.AsyncClient | None = None,
                     engine: PolicyEngine | None = None,
-                    db: Any = None) -> Starlette:
+                    db: Any = None,
+                    stream_sink: Callable[[StreamUsageObservation], None] | None = None,
+                    ) -> Starlette:
     """Build the Starlette proxy app.
 
     ``observer``, ``client``, ``engine`` and ``db`` are injectable for testing —
@@ -115,7 +127,8 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
             state["client"] = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
         return state["client"]
 
-    async def _forward(request: Request, base_url: str, body: bytes) -> StreamingResponse:
+    async def _forward(request: Request, base_url: str, body: bytes,
+                       parsed_body: dict | None = None) -> StreamingResponse:
         client_ = await _get_client()
         url = base_url + request.url.path
         if request.url.query:
@@ -124,8 +137,22 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
             request.method, url, headers=_forward_headers(request), content=body,
         )
         upstream = await client_.send(upstream_req, stream=True)
+        # Streaming data-quality tap. Only armed for a request
+        # that actually asked to stream — a non-streamed response reports its
+        # usage in the body and cannot exhibit the gap, so there is nothing to
+        # watch and no reason to pay for the scan. The bytes relayed are
+        # unchanged either way; the tap only observes.
+        provider = _provider_for(request.url.path)
+        stream_body: Any = upstream.aiter_raw()
+        if stream_requested(parsed_body):
+            scanner = SseUsageScanner(
+                provider,
+                model=requested_model(parsed_body),
+                opt_in=usage_opt_in(provider, parsed_body),
+            )
+            stream_body = tap_stream(stream_body, scanner, stream_sink)
         return StreamingResponse(
-            upstream.aiter_raw(),
+            stream_body,
             status_code=upstream.status_code,
             headers={k.decode("latin-1"): v.decode("latin-1")
                      for k, v in _response_headers(upstream)},
@@ -143,11 +170,13 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
             decision = classify(
                 config, provider, killswitch=bool(config.proxy.killswitch),
             )
-        except Exception:  # noqa: BLE001 — never let our logic break traffic
+        except Exception:  # never let our logic break traffic
             logger.exception("proxy gate classification failed; forwarding unmodified")
 
-        # Read the body once — needed both for forwarding and for policy context.
+        # Read the body once — needed for forwarding, for policy context, and
+        # for the streaming tap (which reads `stream` / `stream_options`).
         body = await request.body()
+        parsed_body = _parse_body(body)
 
         # POLICY-path branch (#220): ONLY api/usage-billed traffic reaches the
         # engine — the api-only guard inside the engine is belt-and-suspenders
@@ -156,8 +185,8 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
         envelope = None
         if decision is not None and decision.path == POLICY:
             try:
-                envelope = engine.evaluate(decision, _policy_request(request, body))
-            except Exception:  # noqa: BLE001 — engine never breaks traffic
+                envelope = engine.evaluate(decision, _policy_request(request, parsed_body))
+            except Exception:  # engine never breaks traffic
                 logger.exception("policy engine failed; forwarding unmodified")
 
         # No upstream known (unrecognised path) → nothing to forward to.
@@ -171,7 +200,7 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
 
         # Forward UNMODIFIED. Suggest mode enforces nothing on EITHER path — the
         # envelope only records what a policy WOULD do; the request is untouched.
-        response = await _forward(request, base_url, body)
+        response = await _forward(request, base_url, body, parsed_body)
         _safe_record(observer, request, decision, forwarded=True, envelope=envelope)
         return response
 
@@ -239,5 +268,5 @@ def _safe_record(observer: ProxyObserver, request: Request, decision: Any,
             method=request.method, path=request.url.path,
             decision=decision, forwarded=forwarded, envelope=envelope,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # 1
         logger.exception("proxy observation recording failed (ignored)")

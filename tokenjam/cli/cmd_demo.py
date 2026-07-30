@@ -70,7 +70,7 @@ def _discover_scenarios() -> dict[str, ModuleType]:
 def cmd_demo(
     ctx: click.Context, scenario: str | None, output_json_flag: bool, live: bool
 ) -> None:
-    """Run a reproducible AI agent incident scenario.
+    """Run a sample agent-incident scenario.
 
     \b
     tj demo                     List available scenarios

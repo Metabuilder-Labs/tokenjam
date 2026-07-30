@@ -66,8 +66,8 @@ plans see the over-baseline token figure instead.
 
 ## Estimate basis / confidence
 
-`estimated_recoverable_tokens` is the over-baseline output summed across flagged
-sessions; `estimated_recoverable_usd` prices it at **output** rates.
+`past_overspend_tokens` is the over-baseline output summed across flagged
+sessions; `past_overspend_usd` prices it at **output** rates.
 `estimate_confidence` is `"heuristic"` and `estimate_basis` reads:
 
 > output tokens above the per-task-shape median, priced at output rates — a

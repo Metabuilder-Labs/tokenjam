@@ -109,7 +109,12 @@ def test_never_claims_safe_or_equivalent(render):
     assert "quality equivalent" not in body.lower()
 
 
-# --- plan-tier-aware figure selection --------------------------------------
+# --- figure selection (dollars, regardless of plan tier) -------------------
+#
+# All three modes used to carry a different field (api: dollars, subscription:
+# tokens-freed, unknown: a reconfigure note with no figure). Removed by
+# product decision: dollars are always legitimate, so tj no longer
+# differentiates its export output between subscription and API users.
 
 @pytest.mark.parametrize("render", [render_ccr_config, render_litellm_config])
 def test_api_user_carries_usd_savings(render):
@@ -123,24 +128,24 @@ def test_api_user_carries_usd_savings(render):
 
 
 @pytest.mark.parametrize("render", [render_ccr_config, render_litellm_config])
-def test_subscription_user_carries_tokens_freed(render):
+def test_subscription_user_carries_usd_savings_too(render):
     body = render(
         downgrade=_sample_finding(), pricing_mode="subscription", plan_tier="max_20x",
         since="30d", until="2026-06-22",
     )
-    assert "estimated_tokens_freed" in body
-    assert "1400000" in body
-    assert "estimated_savings_usd_month" not in body
+    assert "estimated_savings_usd_month" in body
+    assert "42.5" in body
+    assert "estimated_tokens_freed" not in body
 
 
 @pytest.mark.parametrize("render", [render_ccr_config, render_litellm_config])
-def test_unknown_plan_carries_reconfigure_note(render):
+def test_unknown_plan_carries_usd_savings_too(render):
     body = render(
         downgrade=_sample_finding(), pricing_mode="unknown", plan_tier="unknown",
         since="30d", until="2026-06-22",
     )
-    assert "tj onboard --reconfigure" in body
-    assert "estimated_savings_usd_month" not in body
+    assert "estimated_savings_usd_month" in body
+    assert "42.5" in body
     assert "estimated_tokens_freed" not in body
 
 

@@ -10,6 +10,14 @@ from __future__ import annotations
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_SKILL,
+    MAX_NUDGES_PER_SESSION,
+)
+
 from tokenjam.core.optimize import write_budget as wb
 from tokenjam.core.optimize.projection import (
     MAX_PROJECTION_RATIO,
@@ -77,27 +85,48 @@ def test_disclosure_names_every_input_it_used():
     assert "30 days" in basis.disclosure
 
 
-# --- Standing cost by rung -----------------------------------------------------
+# --- Standing cost by delivery mechanism ---------------------------------------
 
-def test_rung_one_charges_the_whole_block():
+def test_a_claude_md_rule_charges_the_whole_block():
     text = "x" * 400
-    assert wb.standing_tokens_per_session(1, text) == 100
+    assert wb.standing_tokens_per_session(DELIVERY_CLAUDE_MD_RULE, text) == 100
 
 
-def test_rung_two_charges_only_the_always_loaded_frontmatter():
+def test_a_skill_charges_only_the_always_loaded_frontmatter():
     """A skill's body loads on invoke; only its description is always sent."""
     long_skill = "x" * 8_000
-    assert wb.standing_tokens_per_session(2, long_skill) == wb.tokens_from_chars(
-        wb.SKILL_ALWAYS_LOADED_CHARS,
-    )
+    assert wb.standing_tokens_per_session(
+        DELIVERY_SKILL, long_skill,
+    ) == wb.tokens_from_chars(wb.SKILL_ALWAYS_LOADED_CHARS)
     # A skill shorter than the cap costs only what it is.
-    assert wb.standing_tokens_per_session(2, "x" * 40) == 10
+    assert wb.standing_tokens_per_session(DELIVERY_SKILL, "x" * 40) == 10
 
 
-def test_rung_three_and_up_have_no_standing_cost():
-    """A hook is executed, never sent as prompt text: a real zero."""
-    for rung in (3, 4, 5):
-        assert wb.standing_tokens_per_session(rung, "x" * 4_000) == 0
+def test_only_the_executing_hook_has_no_standing_cost():
+    """An EXECUTING hook is run by the harness, never sent as prompt text: a
+    real zero, and the only one earned here.
+
+    This assertion is the inverse of the one it replaces. That one said "a hook
+    is executed, never sent as prompt text" of EVERY hook, which made the suite
+    require the defect: an injecting hook exists precisely to put text in front
+    of the model, and pricing it at zero understated the cost of most of the
+    hook families that actually ship. Same guard, correct state."""
+    assert wb.standing_tokens_per_session(DELIVERY_EXECUTING_HOOK, "x" * 4_000) == 0
+
+
+def test_an_injecting_hook_is_charged_for_the_text_it_injects():
+    """Never zero, and charged per nudge: a hook that fires twice injects
+    twice. Stated as a floor rather than an exact figure — the injected block
+    then rides in the conversation for every later turn."""
+    injected = "x" * 400
+    assert wb.standing_tokens_per_session(DELIVERY_INJECTING_HOOK, injected) == (
+        100 * MAX_NUDGES_PER_SESSION
+    )
+    # And strictly more than the same words carried as a CLAUDE.md rule, which
+    # is the whole reason it cannot inherit the executing hook's zero.
+    assert wb.standing_tokens_per_session(
+        DELIVERY_INJECTING_HOOK, injected,
+    ) > wb.standing_tokens_per_session(DELIVERY_CLAUDE_MD_RULE, injected)
 
 
 # --- The quality floor ---------------------------------------------------------
@@ -116,9 +145,9 @@ def test_placeholder_is_caught_inside_a_rendered_artifact_block():
     "no known fix template matched" pattern is the only thing that catches it
     — anchoring it for symmetry with the other two switches the quality floor
     off for every cluster that has no fix template."""
-    from tokenjam.core.optimize.relearn_apply import artifact_for_rung
+    from tokenjam.core.optimize.relearn_apply import artifact_for_delivery
 
-    rendered = artifact_for_rung(
+    rendered = artifact_for_delivery(
         {
             "title": "Some recurring failure",
             "proposed_fix": "Review examples — no known fix template matched.",
@@ -144,9 +173,12 @@ def test_an_honesty_caveat_is_not_mistaken_for_a_placeholder():
 
 # --- Netting and suppression ---------------------------------------------------
 
-def _candidate(key, family="fam", rung=1, text=_REAL_FIX, tokens=1_000_000, usd=None):
+def _candidate(
+    key, family="fam", delivery=DELIVERY_CLAUDE_MD_RULE, text=_REAL_FIX,
+    tokens=1_000_000, usd=None,
+):
     return wb.WriteCandidate(
-        key=key, family=family, rung=rung, artifact_text=text,
+        key=key, family=family, delivery=delivery, artifact_text=text,
         gross_tokens=tokens, gross_usd=usd,
     )
 
@@ -397,38 +429,64 @@ def test_relearn_never_offers_a_placeholder_fix_as_a_permanent_rule():
     assert p.write_offered is False
     assert p.suggested_target == ""
     assert p.advise_only is True
-    assert p.estimated_recoverable_tokens == 0
+    assert not hasattr(p, "estimated_recoverable_tokens")
+    assert not hasattr(p, "gross_recoverable_tokens")
     assert p.write_blocked_reason == wb.REASON_PLACEHOLDER
-    # The pre-net observation is still inspectable; only the CLAIM is zero.
-    assert p.gross_recoverable_tokens > 0
+    # The observation is still inspectable and unaffected — only the
+    # (now-retired) forward claim was ever zero.
+    assert p.past_overspend_tokens > 0
 
 
-def test_relearn_nets_a_rung_one_rule_but_not_a_rung_three_hook():
-    """cwd_confusion is a rung-3 hook (no standing prompt cost, net == gross);
-    edit_before_read is a rung-1 CLAUDE.md note (netted down)."""
+def test_relearn_nets_by_mechanism_not_by_whether_it_is_a_hook():
+    """Three families, three mechanisms, three different standing costs.
+
+    `sleep_chain` is an EXECUTING hook: it blocks a command and injects
+    nothing, so its zero is earned. `cwd_confusion` is an INJECTING hook: it
+    hands the model ``additionalContext``, so it is prompt text and is charged.
+    `read_too_large` is a CLAUDE.md rule and is netted down as it always was.
+
+    **This inverts the assertion it replaces.** That one paired `cwd_confusion`
+    with "no standing prompt cost, net == gross" — enforcing the exact defect,
+    since the two hooks have opposite cost behaviour and only one of them is
+    free. The guard is kept and now defends the correct state.
+
+    (An earlier version of this test used `edit_before_read`, which stopped
+    being a valid vehicle when that family became advisory-only: an advisory
+    family is never offered and so cannot demonstrate netting at all, yet the
+    assertions still passed. A fixture that is a real domain object can quietly
+    stop testing what it claims to.)"""
     from tokenjam.core.optimize.analyzers.relearn import build_proposals
 
     proposals, _ = build_proposals(
         [
+            _raw("sleep_chain", "sleep_chain", "sleep chain", _episodes("s", 40)),
             _raw("cwd_confusion", "cwd_confusion", "cwd confusion", _episodes("c", 40)),
-            _raw("edit_before_read", "edit_before_read", "edit before read",
+            _raw("read_too_large", "read_too_large", "read too large",
                  _episodes("e", 40)),
         ],
         repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
         projection=_basis(sessions=80, active_days=10, window_days=30.0),
     )
     by_family = {p.family_key: p for p in proposals}
-    hook = by_family["cwd_confusion"]
-    note = by_family["edit_before_read"]
+    guard = by_family["sleep_chain"]
+    nudge = by_family["cwd_confusion"]
+    note = by_family["read_too_large"]
 
-    assert hook.rung == 3
-    assert hook.standing_cost_tokens == 0
-    assert hook.estimated_recoverable_tokens == hook.gross_recoverable_tokens
+    assert guard.delivery == DELIVERY_EXECUTING_HOOK
+    assert guard.standing_cost_tokens == 0
+    assert guard.payback_ratio is None or guard.payback_ratio >= 1.0
+    assert not hasattr(guard, "estimated_recoverable_tokens")
 
-    assert note.rung == 1
+    # The bug this whole change exists to close: same "it is a hook", opposite
+    # answer, because the mechanism is what was asked.
+    assert nudge.delivery == DELIVERY_INJECTING_HOOK
+    assert nudge.standing_cost_tokens > 0
+    assert nudge.standing_cost_basis
+
+    assert note.delivery == DELIVERY_CLAUDE_MD_RULE
     assert note.standing_cost_tokens > 0
-    assert note.estimated_recoverable_tokens < note.gross_recoverable_tokens
     assert note.standing_cost_basis
+    assert not hasattr(note, "estimated_recoverable_tokens")
 
 
 def test_relearn_bounds_how_many_permanent_rules_a_run_offers():
@@ -446,17 +504,25 @@ def test_relearn_bounds_how_many_permanent_rules_a_run_offers():
     offered = [p for p in proposals if p.write_offered]
     assert len(proposals) == 12
     assert len(offered) <= wb.RELEARN_MAX_OFFERED_WRITES
-    # Ranked: nothing suppressed outranks anything offered.
+    # Ranked: nothing suppressed outranks anything offered, on the pre-net
+    # observation the budget itself ranks by (no forward field is rendered
+    # any more to check this against).
     suppressed = [p for p in proposals if not p.write_offered and not p.net_negative]
     if offered and suppressed:
-        assert min(p.estimated_recoverable_tokens for p in offered) >= max(
-            p.estimated_recoverable_tokens for p in suppressed
+        assert min(p.past_overspend_tokens for p in offered) >= max(
+            p.past_overspend_tokens for p in suppressed
         )
 
 
-def test_relearn_totals_are_the_netted_ones():
-    """The finding's headline sums the NET per-cluster figures, so no rollup
-    can reach a gross number by adding the parts back up."""
+def test_relearn_carries_no_monthly_forward_field():
+    """The 30-day-basis forward claim (`estimated_monthly_*` /
+    `gross_monthly_*`) is retired entirely — a relearn cluster's headline is
+    `past_overspend_*`, the same past-tense figure every other analyzer's
+    card shows. `gross_recoverable_tokens` is also gone: it held the SAME
+    value as `past_overspend_tokens`, so the one observation now doubles as
+    the netting input `write_budget.WriteCandidate.gross_tokens` needs to
+    decide whether a permanent write is worth OFFERING
+    (`standing_cost_*`, `payback_ratio` survive on that decision)."""
     from tokenjam.core.optimize.analyzers.relearn import build_proposals
 
     proposals, _ = build_proposals(
@@ -466,14 +532,19 @@ def test_relearn_totals_are_the_netted_ones():
         projection=_basis(sessions=80, active_days=10),
     )
     p = proposals[0]
-    assert p.estimated_monthly_tokens <= p.gross_monthly_tokens
-    if p.gross_monthly_usd is not None:
-        assert p.estimated_monthly_usd <= p.gross_monthly_usd
+    for retired in (
+        "estimated_monthly_tokens", "estimated_monthly_usd",
+        "gross_monthly_tokens", "gross_monthly_usd",
+        "estimated_recoverable_tokens", "estimated_recoverable_usd",
+        "gross_recoverable_tokens",
+    ):
+        assert not hasattr(p, retired)
+    assert p.past_overspend_tokens > 0
 
 
 # --- Lane integration: cost proposals -------------------------------------------
 
-def _cost_report(sessions=100, active_days=10, days=30.0, summarize=None):
+def _cost_report(sessions=100, active_days=10, days=30.0, summarize=None, persona="claude-code"):
     from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
     from tokenjam.utils.time_parse import utcnow
 
@@ -484,7 +555,7 @@ def _cost_report(sessions=100, active_days=10, days=30.0, summarize=None):
         thin_data=False,
     )
     findings = {"summarize": summarize} if summarize is not None else {}
-    return OptimizeReport(window=window, persona="claude-code", findings=findings)
+    return OptimizeReport(window=window, persona=persona, findings=findings)
 
 
 def _reuse_finding(tokens, usd):
@@ -500,15 +571,19 @@ def _reuse_finding(tokens, usd):
         example_session_ids=["s1"], skeleton_session_id="s1",
     )
     return ReuseFinding(
-        clusters=[cluster], estimated_recoverable_usd=usd,
-        estimated_recoverable_tokens=tokens, estimate_basis="reuse basis",
+        clusters=[cluster], past_overspend_usd=usd,
+        past_overspend_tokens=tokens, estimate_basis="reuse basis",
     )
 
 
 def test_a_cost_write_reports_net_of_its_own_standing_cost():
     from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
 
-    report = _cost_report()
+    # "mixed" persona: reuse still offers its workspace write (claude-code
+    # gates reuse out entirely — see test_persona_analyzer_gate.py), so
+    # this is the write-netting mechanics, exercised on a persona the gate
+    # leaves untouched.
+    report = _cost_report(persona="mixed")
     report.findings["reuse"] = _reuse_finding(2_000_000, 60.0)
     p = next(p for p in cost_proposals_from_report(report) if p.analyzer == "reuse")
 
@@ -516,8 +591,8 @@ def test_a_cost_write_reports_net_of_its_own_standing_cost():
     assert p.apply_capable is True
     assert p.gross_recoverable_tokens == 2_000_000
     assert p.standing_cost_tokens_per_session > 0
-    assert p.estimated_recoverable_tokens < p.gross_recoverable_tokens
-    assert p.estimated_recoverable_usd < p.gross_recoverable_usd
+    assert p.past_overspend_tokens < p.gross_recoverable_tokens
+    assert p.past_overspend_usd < p.gross_recoverable_usd
     assert p.standing_cost_basis
 
 
@@ -527,7 +602,7 @@ def test_write_budget_suppresses_net_negative_cost_write():
     one, and claims nothing."""
     from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
 
-    report = _cost_report(sessions=100)
+    report = _cost_report(sessions=100, persona="mixed")
     report.findings["reuse"] = _reuse_finding(900, 0.03)
     p = next(p for p in cost_proposals_from_report(report) if p.analyzer == "reuse")
 
@@ -535,8 +610,8 @@ def test_write_budget_suppresses_net_negative_cost_write():
     assert p.write_offered is False
     assert p.apply_capable is False and p.advise_only is True
     assert p.proposed_fix == "" and p.suggestion       # the fix is still copyable
-    assert p.estimated_recoverable_tokens == 0
-    assert p.estimated_recoverable_usd == 0.0
+    assert p.past_overspend_tokens == 0
+    assert p.past_overspend_usd == 0.0
     assert p.gross_recoverable_tokens == 900           # inspectable, not hidden
 
 
@@ -551,14 +626,14 @@ def test_cost_writes_stop_when_the_agent_files_are_pathologically_large():
         SummarizeCandidate(path="CLAUDE.md", kind="prompt", scope="project",
                            est_tokens_saved=5_000, total_chars=400_000),
     ])
-    report = _cost_report(summarize=summarize)
+    report = _cost_report(summarize=summarize, persona="mixed")
     report.findings["reuse"] = _reuse_finding(2_000_000, 60.0)
     p = next(p for p in cost_proposals_from_report(report) if p.analyzer == "reuse")
 
     assert p.write_offered is False
     assert p.write_blocked_reason == wb.REASON_CEILING_REACHED
     # Deferred, not denied: the saving is real, so the net claim stands.
-    assert p.estimated_recoverable_tokens > 0
+    assert p.past_overspend_tokens > 0
 
 
 def test_a_non_write_cost_card_is_left_completely_untouched():
@@ -572,11 +647,113 @@ def test_a_non_write_cost_card_is_left_completely_untouched():
         candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
         alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
         examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
-        estimated_recoverable_usd=3.0, estimated_recoverable_tokens=90_000,
+        past_overspend_usd=3.0, past_overspend_tokens=90_000,
         percent_of_tokens=35.0, estimate_basis="downsize basis",
     )
     p = next(p for p in cost_proposals_from_report(report) if p.analyzer == "downsize")
-    assert p.estimated_recoverable_usd == 3.0
-    assert p.estimated_recoverable_tokens == 90_000
+    assert p.past_overspend_usd == 3.0
+    assert p.past_overspend_tokens == 90_000
     assert p.standing_cost_tokens == 0
     assert p.gross_recoverable_tokens is None       # never entered the pass
+
+
+# --- The value floor (MIN_NET_WRITE_USD) --------------------------------------
+# Netting alone only asks "does this break even". These pin the stronger
+# question the floor asks: "is this worth one of five permanent blocks in a
+# file the user re-sends forever".
+
+def test_a_rule_returning_less_than_the_floor_is_not_offered():
+    # Arrange: comfortably net-POSITIVE in tokens, but worth only $2.
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=2.0)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+
+    assert decision.net_negative is False          # it DID clear its own cost
+    assert decision.offered is False               # ...and still isn't worth a block
+    assert decision.reason == wb.REASON_BELOW_VALUE_FLOOR
+
+
+def test_the_floor_defers_the_write_but_never_suppresses_the_claim():
+    """The floor is a decision about OUR remedy, not about the user's money.
+
+    Repo CLAUDE.md rule 32: a gate on action-availability may never make an
+    incurred cost read as zero. So a below-floor family keeps its net claim and
+    its copyable snippet, exactly like a budget-deferred one — the only thing
+    it loses is the permanent write.
+    """
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=2.0)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+
+    assert decision.claim_suppressed is False
+    assert decision.claimed_tokens > 0
+    assert decision.claimed_usd is not None and decision.claimed_usd > 0
+
+
+def test_a_rule_at_or_above_the_floor_is_offered():
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=wb.MIN_NET_WRITE_USD * 3)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+    assert decision.offered is True
+    assert decision.reason == ""
+
+
+def test_an_unpriced_family_is_never_held_to_a_dollar_floor():
+    """No dollar figure means no comparison, and inventing a rate to make one
+    would kill real fixes for the sin of being unquantified — the same reason
+    `BASIS_NOT_PRICEABLE` exists."""
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=None)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+    assert decision.offered is True
+    assert decision.reason == ""
+
+
+def test_a_below_floor_family_does_not_consume_a_write_slot():
+    """The floor exists to protect the scarce slots, so it has to be applied
+    BEFORE the budget — otherwise a $2 family could crowd out a $50 one."""
+    candidates = [
+        _candidate("small", family="f1", tokens=1_000_000, usd=1.0),
+        _candidate("big", family="f2", tokens=1_000_000, usd=50.0),
+    ]
+    decisions = wb.allocate_writes(
+        candidates,
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=1),
+        _basis(sessions=100),
+    )
+    assert decisions["small"].offered is False
+    assert decisions["small"].reason == wb.REASON_BELOW_VALUE_FLOOR
+    assert decisions["big"].offered is True        # the slot went to the big one
+
+
+def test_the_floor_has_a_short_label_so_it_never_renders_generic():
+    assert wb.short_reason(wb.REASON_BELOW_VALUE_FLOOR) != "no permanent fix offered"
+    assert "5" in wb.short_reason(wb.REASON_BELOW_VALUE_FLOOR)
+
+
+def test_the_floor_applies_to_the_combined_family_value_not_one_members_share():
+    """Regression guard: several clusters sharing one write family collapse
+    onto ONE block (`_decide_family`), so the floor must compare against the
+    family's COMBINED net, not just the representative member's own share.
+    Two members at $3 each are individually below MIN_NET_WRITE_USD, but
+    their combined $6 clears it -- the shared rule must still be offered."""
+    candidates = [
+        _candidate("a", family="combofam", tokens=1_000_000, usd=3.0),
+        _candidate("b", family="combofam", tokens=1_000_000, usd=3.0),
+    ]
+    decisions = wb.allocate_writes(
+        candidates,
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )
+    rep_decision = next(d for d in decisions.values() if d.reason != wb.REASON_FAMILY_MERGED)
+    assert rep_decision.offered is True
+    assert rep_decision.net_usd is not None and rep_decision.net_usd > wb.MIN_NET_WRITE_USD

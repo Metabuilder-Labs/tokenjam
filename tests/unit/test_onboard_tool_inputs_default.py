@@ -38,7 +38,7 @@ from tokenjam.core.config import load_config
 
 @pytest.fixture(autouse=True)
 def _no_existing_config(monkeypatch):
-    monkeypatch.setattr("tokenjam.cli.cmd_onboard.find_config_file", lambda: None)
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard.resolve_config_path", lambda *_a: None)
 
 
 def _run_plain(tmp_path):
@@ -60,8 +60,8 @@ def test_plain_onboard_still_writes_tool_inputs_true(tmp_path):
 def test_plain_onboard_prints_tool_input_disclosure(tmp_path):
     res, _ = _run_plain(tmp_path)
     assert res.exit_code == 0, res.output
-    assert "Tool-input capture" in res.output
-    assert "locally" in res.output
+    assert "captured and stored only on this machine" in res.output
+    assert "nothing is ever uploaded" in res.output
     assert "capture.tool_inputs = false" in res.output  # the opt-out instruction
 
 
@@ -109,7 +109,7 @@ def test_claude_code_fresh_onboard_captures_tool_inputs_by_default(_isolated_hom
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.tool_inputs is True
-    assert "Tool-input capture" in res.output
+    assert "captured and stored only on this machine" in res.output
 
 
 def test_codex_fresh_onboard_captures_tool_inputs_by_default(_isolated_home, tmp_path):
@@ -117,7 +117,7 @@ def test_codex_fresh_onboard_captures_tool_inputs_by_default(_isolated_home, tmp
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.tool_inputs is True
-    assert "Tool-input capture" in res.output
+    assert "captured and stored only on this machine" in res.output
 
 
 # --- Migration: re-onboarding over a pre-existing stale config ---------
@@ -143,7 +143,7 @@ def test_claude_code_reconfigure_upgrades_stale_tool_inputs_false(_isolated_home
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.tool_inputs is True
-    assert "Tool-input capture" in res.output
+    assert "captured and stored only on this machine" in res.output
 
 
 def test_codex_reconfigure_upgrades_stale_tool_inputs_false(_isolated_home, tmp_path):
@@ -152,7 +152,7 @@ def test_codex_reconfigure_upgrades_stale_tool_inputs_false(_isolated_home, tmp_
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.tool_inputs is True
-    assert "Tool-input capture" in res.output
+    assert "captured and stored only on this machine" in res.output
 
 
 def test_claude_code_plain_rerun_leaves_explicit_false_alone(_isolated_home, tmp_path):
@@ -165,4 +165,7 @@ def test_claude_code_plain_rerun_leaves_explicit_false_alone(_isolated_home, tmp
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.tool_inputs is False
-    assert "Tool-input capture" not in res.output
+    # tool_inputs stays off, but the seeded prompts=true still discloses prompts
+    assert "Your prompts are captured" in res.output
+    assert "Your tool inputs are captured" not in res.output
+    assert "Your prompts and tool inputs are captured" not in res.output

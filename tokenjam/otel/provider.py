@@ -106,6 +106,25 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
     run_id = resource_attrs.get(TjAttributes.RUN_ID)
     parent_session_id = resource_attrs.get(TjAttributes.PARENT_SESSION_ID)
 
+    # -- SDK cost-attribution dimensions --
+    # environment/service_version/commit_sha are resource-level (deployment-wide,
+    # normally set once via OTEL_RESOURCE_ATTRIBUTES — see build_tracer_provider
+    # below for why service.version needs a caller-wins merge). tenant_id/
+    # feature/prompt template identity are per-call, so they're read off the
+    # SPAN's own attributes (attrs.pop, same as agent_id/session_id above) —
+    # set directly by record_llm_call()/provider-patch integrations, or ambiently
+    # via sdk.attribution.attribution().
+    environment = _attr_str(resource_attrs.get(ResourceAttributes.DEPLOYMENT_ENVIRONMENT_NAME))
+    service_version = _attr_str(resource_attrs.get(ResourceAttributes.SERVICE_VERSION))
+    commit_sha = _attr_str(
+        resource_attrs.get(ResourceAttributes.VCS_REF_HEAD_REVISION)
+        or resource_attrs.get(ResourceAttributes.VCS_REPOSITORY_REF_REVISION)
+    )
+    tenant_id = _attr_str(attrs.pop(TjAttributes.TENANT_ID, None))
+    feature = _attr_str(attrs.pop(TjAttributes.FEATURE, None))
+    prompt_template_id = _attr_str(attrs.pop(TjAttributes.PROMPT_TEMPLATE_ID, None))
+    prompt_template_version = _attr_str(attrs.pop(TjAttributes.PROMPT_TEMPLATE_VERSION, None))
+
     # Convert int tokens to int (OTel may store as strings). These attributes are
     # scalar numeric/string at runtime; cast narrows away the Sequence members of
     # the AttributeValue union that int()/float() cannot accept.
@@ -186,6 +205,13 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
         service_instance_id=service_instance_id,
         run_id=run_id,
         parent_session_id=parent_session_id,
+        tenant_id=tenant_id,
+        feature=feature,
+        environment=environment,
+        service_version=service_version,
+        commit_sha=commit_sha,
+        prompt_template_id=prompt_template_id,
+        prompt_template_version=prompt_template_version,
     )
 
 
@@ -229,18 +255,46 @@ def _ns_to_datetime(ns: int) -> datetime:
     return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc)
 
 
+def _build_tj_resource() -> Resource:
+    """Build the Resource stamped on tj's own TracerProvider.
+
+    Pulled out of `build_tracer_provider` (which additionally has the global
+    `trace.set_tracer_provider()` side effect) so this pure piece — the part
+    with a real bug-fix bar — is independently unit-testable.
+
+    `Resource.create()` merges the explicit dict OVER whatever it
+    auto-detects from `OTEL_RESOURCE_ATTRIBUTES` / `OTEL_SERVICE_NAME` env
+    vars — so passing "service.version" unconditionally would silently
+    clobber a caller's own app version declared via `OTEL_RESOURCE_ATTRIBUTES`
+    (e.g. "service.version=2.3.1,deployment.environment.name=production"),
+    which is exactly the SDK cost-attribution "service version" dimension.
+    Stamp tokenjam's own package version only as a fallback default, so an
+    explicitly-declared caller value always wins.
+    """
+    import tokenjam
+
+    resource = Resource.create({"service.name": "tokenjam"})
+    if ResourceAttributes.SERVICE_VERSION not in resource.attributes:
+        # Bare Resource(), NOT Resource.create(): .create() unconditionally
+        # defaults a missing service.name to "unknown_service" on ANY resource
+        # it builds — including this one-key partial resource — and merge()
+        # lets the merged-in resource's attributes win on conflict. Using
+        # .create() here would silently clobber the "tokenjam" service.name
+        # already resolved above with "unknown_service" (caught by
+        # test_provider_attribution.py::test_defaults_to_tokenjam_package_version).
+        resource = resource.merge(
+            Resource({ResourceAttributes.SERVICE_VERSION: tokenjam.__version__})
+        )
+    return resource
+
+
 def build_tracer_provider(config: TjConfig, ingest_pipeline: IngestPipeline) -> TracerProvider:
     """
     Build and configure the global TracerProvider.
     Attaches TjSpanExporter (always) and OTLP exporters (if configured).
     Sets as the global tracer provider.
     """
-    import tokenjam
-
-    resource = Resource.create({
-        "service.name": "tokenjam",
-        "service.version": tokenjam.__version__,
-    })
+    resource = _build_tj_resource()
     provider = TracerProvider(resource=resource)
 
     # Always attach the local exporter

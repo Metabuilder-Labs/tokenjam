@@ -187,14 +187,23 @@ def test_render_resend_recurring_examples_reuse_context_labels(db, capsys):
 
 def test_render_resend_no_dollar_figure_when_no_priced_example(db, capsys):
     """A fully-cached session recovers no USD (already captured by
-    cache_efficacy's own figure) but still recovers tokens -- api mode must
-    say why the dollar figure is absent rather than silently print nothing."""
+    cache_efficacy's own figure) -- api mode must say why the dollar figure is
+    absent rather than silently print nothing.
+
+    Inverted (Critical Rule 23): this used to assert that a token figure
+    survived on its own when the dollar figure did not. That asymmetry is
+    exactly what Rule 28 corollary (a) forbids, and the suite was enforcing it.
+    The recoverable PAIR now degrades together; what the card must not do is go
+    quiet, so the compaction lever's own separate estimate takes over the line
+    and says which lever it prices.
+    """
     from tokenjam.cli.cmd_optimize import _render_resend
 
     _seed_heavy_resend(db, cache_ratio=1.0)
     _, finding = _run(db)
-    assert finding.estimated_recoverable_usd is None
-    assert finding.estimated_recoverable_tokens
+    assert finding.past_overspend_usd is None
+    assert finding.past_overspend_tokens is None
+    assert finding.compaction_avoidable_tokens
 
     _render_resend(finding, pricing_mode="api", marker="①")
     out = capsys.readouterr().out
@@ -203,6 +212,9 @@ def test_render_resend_no_dollar_figure_when_no_priced_example(db, capsys):
     # Never suppressed silently: the reason names the actual mechanism (the
     # cache_control lever specifically), not a bare "no data" shrug.
     assert "cache_control" in out
+    # And the surviving token estimate is labelled with the lever it prices,
+    # never presented as the missing recoverable figure.
+    assert "Compaction lever" in out
 
 
 # --------------------------------------------------------------------------- #
@@ -227,7 +239,17 @@ def test_render_resend_cache_control_snippet_is_unmangled(db, capsys):
 # Persona branching: compaction (agent-harness) vs cache_control (SDK)
 # --------------------------------------------------------------------------- #
 
-def test_render_resend_claude_code_persona_leads_with_compaction(db, capsys):
+def test_render_resend_claude_code_persona_leads_with_the_durable_fix(db, capsys):
+    # INVERTED (Critical Rule 23). This test was named
+    # `..._leads_with_compaction` and asserted exactly that — while the Review
+    # inbox card for the SAME finding led with the durable offload rule and
+    # demoted compaction to secondary relief. Two surfaces, one finding, two
+    # different fixes, and the CLI showing the weaker one.
+    #
+    # `COMPACTION_FIX`'s own text disclaims it: "never fixes the pattern going
+    # forward — treat it as immediate relief for an already-full session, not
+    # the durable fix". The suite was pinning the CLI to lead with something
+    # the constant itself says is not the fix.
     from tokenjam.cli.cmd_optimize import _render_resend
 
     _seed_heavy_resend(db)
@@ -237,7 +259,11 @@ def test_render_resend_claude_code_persona_leads_with_compaction(db, capsys):
     out = _flat(capsys.readouterr().out)
 
     assert "Fix:" in out
-    assert finding.fix_compaction in out
+    # The durable lever leads.
+    assert "Offload context-heavy sub-tasks" in out
+    # Compaction survives, in the SAME secondary position the card gives it.
+    assert "Immediate relief in an already-full session" in out
+    assert out.index("Offload context-heavy") < out.index("Immediate relief")
     # Secondary aside for the cache_control lever, not the lead.
     assert "If you also run SDK agents" in out
 
@@ -253,6 +279,26 @@ def test_render_resend_sdk_persona_leads_with_cache_control_snippet(db, capsys):
 
     assert "cache_control adoption" in out
     assert '"cache_control"' in out
+
+
+def test_render_resend_sdk_persona_without_snippet_never_shows_compact(db, capsys):
+    """`/compact` is a Claude Code interactive command an SDK caller cannot
+    run. When no priced cache_control example exists, the SDK fix must fall
+    back to a persona-neutral instruction rather than the claude-code
+    branch's compaction text."""
+    from tokenjam.core.optimize.analyzers.context_resend import RESEND_SDK_TRIM_FIX
+    from tokenjam.cli.cmd_optimize import _render_resend
+
+    _seed_heavy_resend(db)
+    _, finding = _run(db)
+    assert finding.repeat_share is not None
+    finding.fix_cache_control = ""  # no priced example in this window
+
+    _render_resend(finding, pricing_mode="api", marker="①", persona="sdk")
+    out = _flat(capsys.readouterr().out)
+
+    assert "/compact" not in out
+    assert RESEND_SDK_TRIM_FIX in out
 
 
 def test_render_resend_mixed_persona_shows_both_labeled(db, capsys):

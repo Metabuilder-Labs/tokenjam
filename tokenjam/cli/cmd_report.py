@@ -46,7 +46,7 @@ def _report_dir() -> Path:
 @click.pass_context
 def cmd_report(ctx: click.Context, trim_agent: str | None,
                reuse_agent: str | None, since: str, no_open: bool) -> None:
-    """Generate detailed HTML reports for analyzer findings."""
+    """Generate HTML reports of findings."""
     if trim_agent is not None and reuse_agent is not None:
         raise click.UsageError("Pass only one of --trim / --reuse.")
     if trim_agent is not None:
@@ -124,11 +124,6 @@ def _render_reuse_report(
     """
     from tokenjam import __version__
     from tokenjam.core.export.reuse_report import write_reuse_report
-    from tokenjam.core.framing import (
-        dominant_plan,
-        plan_tier_mix,
-        pricing_mode_for,
-    )
     from tokenjam.core.optimize import build_report, report_from_dict
     from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -157,10 +152,19 @@ def _render_reuse_report(
             raise click.ClickException(
                 f"Failed to fetch reuse clusters from tj serve: {exc}"
             ) from exc
+        # The daemon serves a STORED report. A cold store is not an empty
+        # finding — rendering "no reuse clusters" off a scan that never ran
+        # would be an absence claim the data doesn't support.
+        if resp.get("report_available") is False:
+            raise click.ClickException(
+                "tj serve has not computed an analyzer report yet "
+                f"(status: {resp.get('status') or 'never_run'}). It scans in "
+                "the background on startup and on a schedule; re-run this "
+                "shortly, or press Rescan in the web UI."
+            )
         report = report_from_dict(resp)
         finding = report.findings.get("reuse")
         planning_texts = resp.get("planning_texts") or {}
-        pricing_mode = resp.get("pricing_mode", "unknown")
     else:
         try:
             since_dt = parse_since(since)
@@ -173,9 +177,11 @@ def _render_reuse_report(
             agent_id=agent_id, findings=["reuse"],
         )
         finding = report.findings.get("reuse")
-        pricing_mode = pricing_mode_for(
-            dominant_plan(plan_tier_mix(conn, since_dt, until_dt, agent_id))
-        )
+
+    # Always "api": the Reuse report no longer differentiates its
+    # recoverable figures by billing mode (product decision — dollars are
+    # always legitimate regardless of subscription vs API billing).
+    pricing_mode = "api"
 
     if finding is None or not finding.clusters:
         console.print(
@@ -251,7 +257,11 @@ def _render_html(finding, agent_scope: str | None, since: str) -> str:
             f"<b>{p.significant_chars}</b> significant · "
             f"<b class='bloat'>{p.bloat_chars}</b> in flagged regions · "
             f"~<b>{p.estimated_token_reduction}</b> tokens potentially trimmable"
-            f"</p>"
+            + (
+                f" (~<b>${p.estimated_cost_reduction_usd:,.4f}</b>)"
+                if p.estimated_cost_reduction_usd is not None else ""
+            )
+            + f"</p>"
             f"<h3>Bloat regions ({len(p.regions)})</h3>"
             f"{''.join(region_blocks) if region_blocks else '<p>None flagged.</p>'}"
             f"</section>"

@@ -34,7 +34,7 @@ def _uncached_candidate(agent_id="svc-uncached"):
         agent_id=agent_id, provider="anthropic", model="claude-sonnet-5",
         calls=25, sessions=5, assumed_prefix_tokens=4000,
         cache_control_snippet='{"cache_control": {"type": "ephemeral"}}',
-        estimated_recoverable_usd=1.5, estimated_recoverable_tokens=90000,
+        past_overspend_usd=1.5, past_overspend_tokens=90000,
         estimate_basis="p25 prefix basis",
     )
 
@@ -46,7 +46,7 @@ def _thrash_candidate(agent_id="svc-thrash"):
         read_write_ratio=0.2, cause="ttl", inter_call_gap_p50_minutes=12.0,
         ttl_worth_it=True, ttl_breakeven_usd=0.4,
         cache_control_snippet='{"cache_control": {"type": "ephemeral", "ttl": "1h"}}',
-        estimated_recoverable_usd=0.6, estimate_basis="thrash basis",
+        past_overspend_usd=0.6, estimate_basis="thrash basis",
     )
 
 
@@ -55,7 +55,7 @@ def _lookback_candidate(agent_id="svc-lookback"):
         agent_id=agent_id, provider="anthropic", model="claude-sonnet-5",
         miss_count=4, avg_prior_turn_blocks=28.0,
         cache_control_snippet='{"cache_control": {"type": "ephemeral", "note": "intermediate breakpoint"}}',
-        estimated_recoverable_usd=0.3, estimated_recoverable_tokens=12000,
+        past_overspend_usd=0.3, past_overspend_tokens=12000,
         estimate_basis="lookback basis",
     )
 
@@ -176,7 +176,7 @@ def test_render_cache_root_causes_ttl_not_worth_it_shows_no_dollar_figure(capsys
         read_write_ratio=0.2, cause="ttl", inter_call_gap_p50_minutes=20.0,
         ttl_worth_it=False, ttl_breakeven_usd=None,
         cache_control_snippet='{"cache_control": {"type": "ephemeral"}}',
-        estimated_recoverable_usd=None, estimate_basis="thrash basis",
+        past_overspend_usd=None, estimate_basis="thrash basis",
     )
     finding = CacheEfficacyFinding(thrash_agents=[c])
     _render_cache_root_causes(finding, pricing_mode="api")

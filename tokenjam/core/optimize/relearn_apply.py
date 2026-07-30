@@ -1,13 +1,17 @@
 """The self-improve loop's Apply stage (SPEC.md §4 step 5, §6, §7).
 
-Routes an approved relearn-cluster proposal to a write at the right
-intervention-ladder rung (SPEC §6):
+Routes an approved relearn-cluster proposal to a write by its DELIVERY
+MECHANISM (``core/rulewrite/delivery``) — the one thing that says both what
+gets written and where:
 
-  rung 1 (note)        -> append a marked section to a CLAUDE.md
-  rung 2 (skill)       -> write a new ``.claude/skills/<slug>/SKILL.md``
-  rung 3-5 (hook/wrapper/config) -> write the enforcement artifact (a hook
-      script + a staged settings.json patch) DISABLED; a human must call
-      ``enable_enforcement`` explicitly before it ever runs
+  claude_md_rule  -> append a marked section to a CLAUDE.md
+  skill           -> write a new ``.claude/skills/<slug>/SKILL.md``
+  executing_hook  -> a hook script that runs code and injects nothing
+  injecting_hook  -> a hook script that hands the model ``additionalContext``
+
+Both hook mechanisms are written DISABLED, alongside a staged settings.json
+patch; a human must call ``enable_enforcement`` explicitly before either ever
+runs.
 
 Reversibility (SPEC §10 — "reversible"): every write here is preceded by a
 pre-image snapshot (reusing ``core.atomic_write``'s atomic-write primitive),
@@ -38,19 +42,38 @@ from typing import Any
 
 from tokenjam.core.atomic_write import AtomicWriteRefused, atomic_write
 from tokenjam.core.config import TjConfig
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_SKILL,
+    ENFORCEMENT_DELIVERIES,
+)
+from tokenjam.core.rulewrite.legacy import delivery_from_legacy_record
 
 try:
     import fcntl
 except ImportError:   # pragma: no cover - non-POSIX platform (e.g. Windows)
     fcntl = None   # type: ignore[assignment]
 
-# --- Rungs (SPEC §6) -----------------------------------------------------------
+# --- Delivery mechanisms -------------------------------------------------------
+#
+# The vocabulary is declared once, in ``core/rulewrite/kinds``, and imported
+# here rather than restated. A second local spelling of the same idea is how
+# this module and its callers came to disagree about what an artifact was.
 
-RUNG_NOTE = 1
-RUNG_SKILL = 2
-ENFORCEMENT_RUNGS = {3, 4, 5}   # hook / wrapper / config — always human-gated to enable
-
-RUNG_KIND = {1: "note", 2: "skill", 3: "hook", 4: "wrapper", 5: "config"}
+#: The mechanisms ``_build_write_plan`` knows how to render. Anything else —
+#: an unrecognised name, or a legacy record whose artifact could not be
+#: established — is REFUSED rather than defaulted, because the default would
+#: write a markdown block to whatever path the record happened to carry. This
+#: is the path that writes real files to real locations on a user's machine;
+#: guessing here is the one failure the whole lifecycle exists to prevent.
+_DELIVERY_RENDERERS = frozenset({
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_SKILL,
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+})
 
 
 class RelearnApplyRefused(Exception):
@@ -148,28 +171,39 @@ def applied_fixes_path(config: TjConfig) -> Path:
 
 # --- Default target-path suggestion (for the card's scope/target override) ----
 
-def default_target_path(rung: int, scope: str, repo_cwd: str, slug: str) -> str:
+def default_target_path(
+    delivery: str, scope: str, repo_cwd: str, slug: str,
+    *, claude_home: Path | None = None,
+) -> str:
     """Best-effort suggested write location — always user-editable before Approve
     (SPEC's "scope override" requirement: repo-identity is noisy, never trust it
     blindly). Returns ``""`` when there isn't enough information (no known cwd
     for a project-scoped cluster) — the UI must then require an explicit path.
+
+    ``claude_home`` scopes the user-global branch to the analyzer scope's home
+    (see ``core/optimize/scope.py``). Without it a review view served from a
+    throwaway ``--db`` defaulted its "where to write it" target to a real path
+    on the operator's machine, so a single Approve click in what looks like a
+    sandbox would write a real file outside the database being served. The
+    target has to agree with the scope the findings came from, or the two
+    halves of the card describe different machines.
     """
     if scope == "user-global":
-        home = Path.home() / ".claude"
-        if rung == RUNG_NOTE:
-            return str(home / "CLAUDE.md")
-        if rung == RUNG_SKILL:
+        home = (claude_home if claude_home is not None else Path.home() / ".claude")
+        if delivery == DELIVERY_SKILL:
             return str(home / "skills" / slug / "SKILL.md")
-        return str(home / "hooks" / f"{slug}.py")
+        if delivery in ENFORCEMENT_DELIVERIES:
+            return str(home / "hooks" / f"{slug}.py")
+        return str(home / "CLAUDE.md")
 
     if not repo_cwd:
         return ""
     base = Path(repo_cwd)
-    if rung == RUNG_NOTE:
-        return _nearest_claude_md(base)
-    if rung == RUNG_SKILL:
+    if delivery == DELIVERY_SKILL:
         return str(base / ".claude" / "skills" / slug / "SKILL.md")
-    return str(base / ".claude" / "hooks" / f"{slug}.py")
+    if delivery in ENFORCEMENT_DELIVERIES:
+        return str(base / ".claude" / "hooks" / f"{slug}.py")
+    return _nearest_claude_md(base)
 
 
 def _nearest_claude_md(base: Path) -> str:
@@ -226,15 +260,14 @@ def _git_commit(repo_root: Path, rel_paths: list[str], message: str) -> str | No
     return (sha.stdout or "").strip() or None
 
 
-def _commit_message(
-    action: str, title: str, signature: str, rung: int, kind: str | None = None,
-) -> str:
+def _commit_message(action: str, title: str, signature: str, kind: str) -> str:
     # Neutral, tool-attributed, no internal ticket IDs — this lands in ANY
     # target repo (including public ones), not just tokenjam's own. `kind` is
-    # passed for the apply kinds that sit outside the rung ladder (the model
-    # edits), so the message names what was actually written.
+    # the delivery mechanism, or one of the apply kinds that sit outside the
+    # delivery seam entirely (the model edits) — either way it names what was
+    # actually written, rather than a number the reader has to translate first.
     return (
-        f"tokenjam: {action} fix (rung {rung} · {kind or RUNG_KIND.get(rung, '?')})\n\n"
+        f"tokenjam: {action} fix ({kind or 'unknown'})\n\n"
         f"{title}\n\n"
         f"Applied by TokenJam's loop (signature: {signature}).\n"
         f"Revert from the Review inbox, or via the applied_fixes ledger."
@@ -312,8 +345,15 @@ class AppliedFix:
     signature:       str
     family_key:      str | None
     title:           str
-    rung:            int
-    kind:            str                    # note | skill | hook | wrapper | config
+    #: The delivery mechanism that wrote this (``core/rulewrite/kinds``), or one
+    #: of the apply kinds that sit outside the delivery seam (a model edit, an
+    #: MCP removal). One field, naming the artifact in words.
+    #:
+    #: Records written by an older build additionally carry a numeric ``rung``.
+    #: Nothing reads it: it is resolved to a mechanism on read by
+    #: ``core/rulewrite/legacy``, which refuses rather than guesses where the
+    #: number was ambiguous. It is never written again.
+    kind:            str
     scope:           str                    # project | user-global
     target_path:     str
     repo_root:       str | None
@@ -404,6 +444,21 @@ def list_applied(config: TjConfig) -> list[dict]:
     return _load_ledger(config)
 
 
+def applied_signatures(config: TjConfig) -> set[str]:
+    """The relearn signatures whose fix is currently in place.
+
+    The relearn-lane sibling of ``cost_apply.applied_signatures``, and stated
+    once for the same reason: the filter was written out inline at every call
+    site, so a surface that forgot the reverted-record exclusion would keep
+    hiding a fix the user had explicitly undone.
+    """
+    return {
+        str(rec.get("signature") or "")
+        for rec in list_applied(config)
+        if rec.get("state") != "reverted" and rec.get("signature")
+    }
+
+
 def get_applied(config: TjConfig, fix_id: str) -> dict | None:
     for rec in _load_ledger(config):
         if rec.get("id") == fix_id:
@@ -473,7 +528,7 @@ def active_session_warning(conn: Any | None, target_path: str) -> str | None:
         return None   # best-effort — never let a DB hiccup block or falsely warn
 
 
-# --- Rung 1: CLAUDE.md note ------------------------------------------------
+# --- claude_md_rule: the CLAUDE.md note --------------------------------------
 
 NOTE_SECTION_HEADER = "## TokenJam fixes (auto-added)"
 _NOTE_INTRO = (
@@ -491,7 +546,7 @@ def _note_block(cluster: dict, signature: str) -> str:
         f"### {cluster.get('title', signature)}\n\n"
         f"{cluster.get('proposed_fix', '')}\n\n"
         f"_Evidence: {cluster.get('sessions', 0)} session(s) across "
-        f"{len(repos)} repo(s). Rung {cluster.get('rung')}. "
+        f"{len(repos)} repo(s). "
         f"Revert from the Review inbox._\n"
         f"<!-- /tokenjam:relearn:{signature} -->"
     )
@@ -525,7 +580,7 @@ def render_note_content(existing: str, cluster: dict, signature: str) -> str:
     return out
 
 
-# --- Rung 2: skill ----------------------------------------------------------
+# --- skill -------------------------------------------------------------------
 
 def render_skill_content(cluster: dict, signature: str, slug: str) -> str:
     repos = cluster.get("repos") or []
@@ -546,15 +601,17 @@ def render_skill_content(cluster: dict, signature: str, slug: str) -> str:
         f"## Why this exists\n\n"
         f"Detected by TokenJam's loop: this pattern recurred in "
         f"{cluster.get('sessions', 0)} distinct session(s) across {len(repos)} "
-        f"repo(s) (rung 2 · skill).\n\n"
+        f"repo(s).\n\n"
         f"## Evidence\n\n{ev_lines}\n\n"
         f"<!-- tokenjam:relearn:{signature} -->\n"
     )
 
 
-def artifact_for_rung(cluster: dict, signature: str, rung: int, slug: str = "") -> str:
-    """The EXACT text this cluster's apply would write, for a rung, without
-    writing anything.
+def artifact_for_delivery(
+    cluster: dict, signature: str, delivery: str, slug: str = "",
+) -> str:
+    """The EXACT text this cluster's apply would write for a delivery
+    mechanism, without writing anything.
 
     The write budget (``core/optimize/write_budget.py``) has to price an
     artifact before offering it, and pricing the ``proposed_fix`` alone would
@@ -563,20 +620,23 @@ def artifact_for_rung(cluster: dict, signature: str, rung: int, slug: str = "") 
     same functions the apply path renders keeps the price and the artifact from
     drifting apart.
 
-    Rungs 3 to 5 return ``""``: a hook, a wrapper or a config edit is executed,
-    never sent to the model as prompt text, so it has no standing cost to
-    price. That is a real zero, not a missing implementation.
+    Both hook mechanisms return ``""``: the SCRIPT is executed, never sent to
+    the model as prompt text, so its source has no standing cost to price. That
+    is a real zero for the script and it is not the whole answer for an
+    injecting hook, whose INJECTED text does cost — that half is priced by the
+    delivery kind's own pricer (``core/rulewrite/delivery``) off the fix text,
+    not from anything rendered here.
     """
-    if rung <= 1:
-        return _note_block(cluster, signature)
-    if rung == 2:
+    if delivery == DELIVERY_SKILL:
         return render_skill_content(
             cluster, signature, slug or slugify(str(cluster.get("title") or signature)),
         )
-    return ""
+    if delivery in ENFORCEMENT_DELIVERIES:
+        return ""
+    return _note_block(cluster, signature)
 
 
-# --- Rungs 3-5: enforcement artifact (disabled by default) ---------------------
+# --- The hook mechanisms: enforcement artifact (disabled by default) -----------
 #
 # SPEC §6/§10 mandate: precision over coverage. A false positive on normal
 # usage is worse than a no-op, so a REAL matcher ships only for families where
@@ -654,23 +714,23 @@ _SLEEP_CHAIN_MATCHER = (
     '        return True, ("blocked sleep-chain (TokenJam, signature '
     '{signature}) — use the Monitor tool instead of a busy-wait sleep.")\n'
 )
-#: Families an enforcement rung can actually be written for: a hand-authored
+#: Families a hook can actually be written for: a hand-authored
 #: GUARD matcher (`_GUARD_FAMILIES`) or a hand-authored REACTIVE spec
 #: (`_REACTIVE_SPECS`). Anything else has no matcher, so a hook written for it
 #: could only ever be inert; `render_hook_content` refuses instead of writing
 #: one (see its docstring).
 def matchered_families() -> set[str]:
-    """The families a rung 3-5 hook can be rendered for. Resolved lazily so a
-    future matcher addition is picked up without a second registry to keep in
-    sync."""
+    """The families a hook can be rendered for, either mechanism. Resolved
+    lazily so a future matcher addition is picked up without a second registry
+    to keep in sync."""
     return set(_GUARD_FAMILIES) | set(_REACTIVE_SPECS)
 
 
-def _render_guard_hook(title: str, rung: int | None, signature: str) -> str:
+def _render_guard_hook(title: str, signature: str) -> str:
     """A PreToolUse GUARD script -- can block, only for `_GUARD_FAMILIES`."""
     matcher = _SLEEP_CHAIN_MATCHER.format(signature=signature)
     return f'''#!/usr/bin/env python3
-"""TokenJam hook -- {title} (rung {rung}, signature {signature}).
+"""TokenJam hook -- {title} (executing hook, signature {signature}).
 
 Auto-generated by TokenJam's loop after a human approved this
 fix in the Review inbox. DISABLED by default -- wiring this into
@@ -716,7 +776,7 @@ if __name__ == "__main__":
 
 
 def _render_reactive_hook(
-    spec: dict[str, Any], title: str, rung: int | None, signature: str,
+    spec: dict[str, Any], title: str, signature: str,
 ) -> str:
     """A PostToolUseFailure REACTIVE script -- never blocks, only fires after
     a tool call already failed with this family's exact validated error
@@ -726,7 +786,7 @@ def _render_reactive_hook(
     note_repr = repr(spec["note"])
     include_listing = bool(spec["include_cwd_listing"])
     return f'''#!/usr/bin/env python3
-"""TokenJam hook -- {title} (rung {rung}, signature {signature}).
+"""TokenJam hook -- {title} (injecting hook, signature {signature}).
 
 Auto-generated by TokenJam's loop after a human approved this
 fix in the Review inbox. DISABLED by default -- wiring this into
@@ -800,6 +860,44 @@ def _context(payload: dict) -> str:
     return f"[TokenJam, signature {signature}] {{_NOTE}}{{extra}}"
 
 
+#: Injected context is NOT free and is not even bounded by session count: the
+#: block lands in the conversation and is re-sent on every subsequent turn. So
+#: a nudge that fires on every matching failure compounds without limit inside
+#: one session. `PostToolUseFailure` fires per matching call -- only
+#: `SessionStart` is structurally once-per-session -- and the `once` field is
+#: honored ONLY in skill frontmatter, never in a settings file, so the cap has
+#: to be enforced here.
+_MAX_NUDGES_PER_SESSION = 2
+
+
+def _nudge_budget_spent(session_id: str) -> bool:
+    """True once this session has already had its allowance of nudges.
+
+    Keyed on the `session_id` Claude Code passes on stdin, in a marker file
+    under the OS temp dir. Fail-OPEN on any error: if the marker cannot be
+    read or written we let the nudge through, because a missing nudge is a
+    smaller harm than a hook that starts erroring.
+    """
+    try:
+        if not session_id:
+            return False
+        import tempfile
+        marker = os.path.join(
+            tempfile.gettempdir(), f"tokenjam-nudge-{{re.sub(r'[^A-Za-z0-9_.-]', '_', session_id)}}"
+        )
+        seen = 0
+        if os.path.exists(marker):
+            with open(marker, encoding="utf-8") as fh:
+                seen = int((fh.read() or "0").strip() or 0)
+        if seen >= _MAX_NUDGES_PER_SESSION:
+            return True
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(str(seen + 1))
+        return False
+    except Exception:
+        return False
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read()
@@ -807,8 +905,13 @@ def main() -> int:
         context = _context(payload)
         if not context:
             return 0   # no match -- pass through, nothing printed
+        if _nudge_budget_spent(str(payload.get("session_id") or "")):
+            return 0   # already nudged this session -- say it once, not every time
         out = {{
             "hookSpecificOutput": {{
+                # MUST be nested here. At the top level `additionalContext` is
+                # silently ignored -- the hook runs, exits 0, and injects
+                # nothing, which is indistinguishable from working.
                 "hookEventName": "PostToolUseFailure",
                 "additionalContext": context,
             }}
@@ -827,18 +930,18 @@ if __name__ == "__main__":
 
 
 def render_hook_content(cluster: dict, signature: str) -> str:
-    """The enforcement artifact for a rung 3-5 apply.
+    """The enforcement artifact for either hook mechanism.
 
     A family with no hand-authored matcher (neither a GUARD matcher nor a
     REACTIVE spec) has nothing to fire on, so the only hook that could be
     written for it is one that never does anything. Writing that would put a
     record in the ledger, a file on disk and an "applied" badge on the card
     for a fix that cannot possibly work; the honest move is to refuse and
-    offer rung 1 instead, which writes a real note carrying the same guidance.
+    offer a CLAUDE.md rule instead, which writes a real note carrying the same
+    guidance.
     """
     family_key = cluster.get("family_key") or ""
     title = cluster.get("title", signature)
-    rung = cluster.get("rung")
     # `matchered_families()` answers "does a matcher exist at all", which is
     # exactly the refusal question. Reading the two underlying tables here
     # instead would make this the second registry that accessor exists to
@@ -846,19 +949,19 @@ def render_hook_content(cluster: dict, signature: str) -> str:
     # is already known to have one.
     if family_key not in matchered_families():
         raise RelearnApplyRefused(
-            f"no matcher exists for family '{family_key or 'unknown'}', so a rung "
-            f"{rung} hook for it would be written but never fire. Refusing to write "
-            f"a fix that looks applied and does nothing. Apply this at rung 1 "
+            f"no matcher exists for family '{family_key or 'unknown'}', so a hook "
+            f"for it would be written but never fire. Refusing to write a fix that "
+            f"looks applied and does nothing. Apply this as a CLAUDE.md rule "
             f"instead: it writes the same guidance as a reversible note."
         )
     if family_key in _GUARD_FAMILIES:
-        return _render_guard_hook(title, rung, signature)
-    return _render_reactive_hook(_REACTIVE_SPECS[family_key], title, rung, signature)
+        return _render_guard_hook(title, signature)
+    return _render_reactive_hook(_REACTIVE_SPECS[family_key], title, signature)
 
 
 def _enforcement_wiring(family_key: str) -> tuple[str, str]:
     """(event, tool-matcher) for the `settings.json` wiring `apply_relearn_fix`
-    stages -- the ONLY event/tools this rung-3 hook is ever invoked for. Only
+    stages -- the ONLY event/tools this hook is ever invoked for. Only
     reached for a family that HAS a matcher; `render_hook_content` refuses an
     un-matchered family before any wiring is staged, so the trailing default
     below is unreachable belt-and-braces, not a supported path."""
@@ -883,7 +986,7 @@ def render_settings_patch(hook_path: Path, event: str = "PreToolUse", matcher: s
 
 
 def _write_target(target: Path, content: str) -> None:
-    """Write a rung's rendered content — atomically (preserving mode) when the
+    """Write a delivery's rendered content — atomically (preserving mode) when the
     target already exists, else a plain create (``atomic_write`` needs an
     existing file to stat for its mode).
 
@@ -913,7 +1016,7 @@ def _write_target(target: Path, content: str) -> None:
 # ``pothole`` is the pre-rename spelling of the same feature. Files written by
 # those versions are still live on users' machines, and keying only on the
 # CURRENT marker made every one of them read as a stranger's file: re-apply
-# refused with "wasn't written by TokenJam", and a rung-1 note re-apply appended
+# refused with "wasn't written by TokenJam", and a note re-apply appended
 # a duplicate block instead of replacing the old one. Root CLAUDE.md
 # anti-pattern #21 is exactly this failure (the zshrc OTEL marker drifted at an
 # earlier rename with no migration) — match a STABLE set that includes every
@@ -931,16 +1034,16 @@ def _carries_tokenjam_marker(pre_image: str | None) -> bool:
     return any(prefix in pre_image for prefix in TOKENJAM_MARKER_PREFIXES)
 
 
-# --- Rung 1: note target allowlist (must-fix #2) -------------------------------
+# --- claude_md_rule: note target allowlist (must-fix #2) -----------------------
 
 def _is_allowed_note_target(target: Path, pre_image: str | None) -> bool:
-    """A rung-1 note may only land on: (a) a ``*.md`` file (covers
+    """A CLAUDE.md rule may only land on: (a) a ``*.md`` file (covers
     ``CLAUDE.md``, the intended target — any Markdown doc is a reasonable
     note home), or (b) a file that ALREADY carries a TokenJam marker in any
-    generation (a prior legitimate apply — the same rung 2/3 re-apply
+    generation (a prior legitimate apply — the same skill/hook re-apply
     allowance). Anything else (a ``.py``, ``.zshrc``, etc.) is refused
-    outright, closing the "rung=1 + arbitrary target_path corrupts any file"
-    gap."""
+    outright, closing the "a rule plus an arbitrary target_path corrupts any
+    file" gap."""
     if target.suffix.lower() == ".md":
         return True
     return _carries_tokenjam_marker(pre_image)
@@ -952,7 +1055,8 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     """Render what WOULD be written for ``cluster`` at ``target_path`` — pure,
     no disk writes. Raises ``RelearnApplyRefused`` if a non-TokenJam file
     already sits at a create-only target (skill / hook), the target is a
-    symlink, or (rung 1) the target isn't an allowlisted note file."""
+    symlink, or (a CLAUDE.md rule) the target isn't an allowlisted note
+    file."""
     import difflib
 
     from tokenjam.core.optimize.analyzers.deadweight import (
@@ -963,14 +1067,22 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
 
     signature = cluster["signature"]
     apply_kind = str(cluster.get("apply_kind") or "")
-    rung = int(cluster["rung"])
+    # A cluster cached by a build that named a ladder NUMBER is mapped on read.
+    # An ambiguous legacy record resolves to a name no renderer answers to, so
+    # it is refused below rather than rendered as a guess — this function
+    # decides what bytes land at a real path on a user's machine.
+    delivery = delivery_from_legacy_record(cluster)
     # The MCP-remove kind sits outside model_apply's own registry (it edits a
     # config file, not a model id), so it's checked as a sibling here rather
     # than folded into APPLY_KINDS itself — that constant stays scoped to
     # "the model-routing kinds" its own module docstring promises.
     known_apply_kinds = (*APPLY_KINDS, APPLY_KIND_MCP_REMOVE)
-    if not apply_kind and rung not in RUNG_KIND:
-        raise RelearnApplyRefused(f"unknown rung {rung}.")
+    if not apply_kind and delivery not in _DELIVERY_RENDERERS:
+        raise RelearnApplyRefused(
+            f"cannot tell what artifact to write for {signature!r}: "
+            f"{delivery or 'no delivery mechanism'} is not one this build "
+            f"renders. Re-run the analysis to refresh this proposal."
+        )
     if apply_kind and apply_kind not in known_apply_kinds:
         raise RelearnApplyRefused(f"unknown apply kind {apply_kind!r}.")
     if not target_path:
@@ -994,16 +1106,16 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     elif apply_kind:
         # The two model-routing kinds (an agent file's `model:` key, a
         # registered repo's model-id string). Both are edits of an existing
-        # value, so they skip the rung ladder entirely and only rewrite bytes
+        # value, so they skip the delivery seam entirely and only rewrite bytes
         # that were already there; everything downstream (backup, git commit,
         # ledger, revert) is the shared machinery.
         new_content = build_model_plan(cluster, target, pre_image)
-    elif rung == RUNG_NOTE:
+    elif delivery == DELIVERY_CLAUDE_MD_RULE:
         if not _is_allowed_note_target(target, pre_image):
             raise RelearnApplyRefused(
                 f"{target} is not an allowlisted note target (must be a CLAUDE.md/*.md "
                 f"file, or already carry a tokenjam:relearn marker) — refusing to write "
-                f"a rung-1 note there."
+                f"a CLAUDE.md rule there."
             )
         new_content = render_note_content(pre_image or "", cluster, signature)
     else:
@@ -1013,7 +1125,8 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
                 f"overwrite it. Choose a different target path."
             )
         new_content = (
-            render_skill_content(cluster, signature, slug) if rung == RUNG_SKILL
+            render_skill_content(cluster, signature, slug)
+            if delivery == DELIVERY_SKILL
             else render_hook_content(cluster, signature)
         )
 
@@ -1022,9 +1135,10 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
         fromfile="before", tofile="after", n=2,
     ))
     return {
-        "signature": signature, "rung": rung, "slug": slug, "target_path": str(target),
+        "signature": signature, "delivery": delivery, "slug": slug,
+        "target_path": str(target),
         "pre_image": pre_image, "new_content": new_content, "diff": diff,
-        "kind": apply_kind or RUNG_KIND[rung],
+        "kind": apply_kind or delivery,
     }
 
 
@@ -1038,11 +1152,11 @@ def apply_relearn_fix(
     conn: Any | None = None,
     force: bool = False,
 ) -> dict:
-    """Write an approved proposal at its rung. Default dry-run (mirrors
-    ``apply_staged``'s contract) — pass ``go=True`` to actually write.
+    """Write an approved proposal by its delivery mechanism. Default dry-run
+    (mirrors ``apply_staged``'s contract) — pass ``go=True`` to actually write.
 
-    Raises ``RelearnApplyRefused`` (callers map to 409) when: the rung/target
-    is invalid, a non-TokenJam file already sits at a create-only target, or
+    Raises ``RelearnApplyRefused`` (callers map to 409) when: the
+    delivery/target is invalid, a non-TokenJam file already sits at a create-only target, or
     (when ``force`` is not set) a live session was just seen in the target's
     repo (SPEC §7 — never apply mid-session).
     """
@@ -1055,14 +1169,14 @@ def apply_relearn_fix(
         raise RelearnApplyRefused(warning)
 
     target = Path(plan["target_path"]).expanduser()
-    rung = plan["rung"]
+    delivery = plan["delivery"]
     fix_id = uuid.uuid4().hex[:16]
 
     _save_backup(config, fix_id, str(target), plan["pre_image"])
     _write_target(target, plan["new_content"])
 
     enforcement: dict[str, Any] | None = None
-    if rung in ENFORCEMENT_RUNGS and not cluster.get("apply_kind"):
+    if delivery in ENFORCEMENT_DELIVERIES and not cluster.get("apply_kind"):
         target.chmod(0o755)
         settings_path = target.parent.parent / "settings.json"
         patch_path = target.parent / f"{plan['slug']}.settings-patch.json"
@@ -1087,7 +1201,7 @@ def apply_relearn_fix(
             repo_root, rel_paths,
             _commit_message(
                 "apply", cluster.get("title", plan["signature"]), plan["signature"],
-                rung, plan["kind"],
+                plan["kind"],
             ),
         )
 
@@ -1096,7 +1210,7 @@ def apply_relearn_fix(
     applied_at_dt = utcnow()
     record = AppliedFix(
         id=fix_id, signature=plan["signature"], family_key=cluster.get("family_key"),
-        title=cluster.get("title", plan["signature"]), rung=rung, kind=plan["kind"],
+        title=cluster.get("title", plan["signature"]), kind=plan["kind"],
         scope=scope, target_path=str(target),
         repo_root=str(repo_root) if repo_root else None,
         applied_at=applied_at_dt.isoformat(), diff=plan["diff"], enforcement=enforcement,
@@ -1108,21 +1222,24 @@ def apply_relearn_fix(
     # `verify` field's class docstring above); left unset rather than
     # computed since nothing consumes it.
     record.verify["baseline_total_sessions"] = None
-    # A bounded, POINT-IN-TIME snapshot of the cluster's monthly estimate at
-    # the moment of apply — deliberately NOT a live re-measurement. The
+    # A bounded, POINT-IN-TIME snapshot of the cluster's past-overspend figure
+    # at the moment of apply — deliberately NOT a live re-measurement. The
     # perpetual verify/receipts layer that used to fill these fields with an
     # ever-growing post-apply comparison was removed (it made unsupportable
     # realized-savings claims with no confounder control); this is a single
-    # read of the estimate the human actually reviewed and approved, so the
-    # Review inbox's Applied tab has an honest `est.` figure to show. Never
-    # promoted to a "verified" claim — see `relearn_store`/the Review inbox's
-    # Applied-tab rendering, which always labels this `est.` with no chip.
-    record.verify["estimated_monthly_usd"] = cluster.get("estimated_monthly_usd")
-    record.verify["estimated_monthly_tokens"] = cluster.get("estimated_monthly_tokens")
+    # read of the figure the human actually reviewed and approved, so the
+    # Review inbox's Applied tab has an honest figure to show. Never promoted
+    # to a "verified" claim — see `relearn_store`/the Review inbox's
+    # Applied-tab rendering, which always labels this with no chip. This is
+    # `past_overspend_*` (the one canonical dollar field), not a forward
+    # claim — the Applied tab shows what the cluster already cost, same as
+    # every other analyzer's card.
+    record.verify["past_overspend_usd"] = cluster.get("past_overspend_usd")
+    record.verify["past_overspend_tokens"] = cluster.get("past_overspend_tokens")
     return {"dry_run": False, "record": _save_record(config, record)}
 
 
-# --- Enforcement enable/disable (rungs 3-5 only) -------------------------------
+# --- Enforcement enable/disable (the hook mechanisms only) ---------------------
 
 def _read_settings(path: Path) -> dict:
     if not path.is_file():
@@ -1169,14 +1286,17 @@ def _remove_hook_command(settings: dict, hook_command: str) -> dict:
 
 
 def enable_enforcement(config: TjConfig, fix_id: str, *, confirm: bool) -> dict:
-    """Wire a generated hook into settings.json — the ONLY step that makes an
-    enforcement rung (3-5) live. Requires an explicit ``confirm=True`` (the
-    UI's "this intercepts your tools" warning); never auto-fires."""
+    """Wire a generated hook into settings.json — the ONLY step that makes a
+    hook live. Requires an explicit ``confirm=True`` (the UI's "this intercepts
+    your tools" warning); never auto-fires."""
     rec = get_applied(config, fix_id)
     if rec is None:
         raise RelearnApplyRefused(f"no applied fix {fix_id}.")
-    if rec["rung"] not in ENFORCEMENT_RUNGS:
-        raise RelearnApplyRefused("only rung 3-5 (hook/wrapper/config) fixes need enabling.")
+    # Resolved from the record, so a fix applied by an older build is judged on
+    # what it actually wired rather than on a number whose meaning was never
+    # settled. A record that cannot say what it wrote is refused, not enabled.
+    if delivery_from_legacy_record(rec) not in ENFORCEMENT_DELIVERIES:
+        raise RelearnApplyRefused("only hook fixes need enabling.")
     if rec["state"] != "applied":
         raise RelearnApplyRefused("this fix was reverted — re-apply it before enabling.")
     enforcement = rec.get("enforcement") or {}
@@ -1200,7 +1320,10 @@ def enable_enforcement(config: TjConfig, fix_id: str, *, confirm: bool) -> dict:
         rel = str(settings_path.relative_to(repo_root))
         commit_sha = _git_commit(
             repo_root, [rel],
-            _commit_message("enable enforcement for", rec["title"], rec["signature"], rec["rung"]),
+            _commit_message(
+                "enable enforcement for", rec["title"], rec["signature"],
+                str(rec.get("kind") or ""),
+            ),
         )
     new_enforcement = {**enforcement, "enabled": True, "enable_commit": commit_sha}
     return _update_record(config, fix_id, enforcement=new_enforcement)
@@ -1225,13 +1348,16 @@ def disable_enforcement(config: TjConfig, fix_id: str) -> dict:
             rel = str(settings_path.relative_to(repo_root))
             _git_commit(
                 repo_root, [rel],
-                _commit_message("disable enforcement for", rec["title"], rec["signature"], rec["rung"]),
+                _commit_message(
+                    "disable enforcement for", rec["title"], rec["signature"],
+                    str(rec.get("kind") or ""),
+                ),
             )
     new_enforcement = {**enforcement, "enabled": False}
     return _update_record(config, fix_id, enforcement=new_enforcement)
 
 
-# --- Revert (one-step, for any rung) -------------------------------------------
+# --- Revert (one-step, for any mechanism) --------------------------------------
 
 def revert_applied_fix(config: TjConfig, fix_id: str) -> dict:
     """Undo an apply: disables enforcement first (if it was live), restores
@@ -1266,8 +1392,8 @@ def revert_applied_fix(config: TjConfig, fix_id: str) -> dict:
             commit = _run_git(
                 ["commit", "--no-verify", "-m",
                  _commit_message(
-                     "revert", rec["title"], rec["signature"], rec["rung"],
-                     rec.get("kind"),
+                     "revert", rec["title"], rec["signature"],
+                     str(rec.get("kind") or ""),
                  ),
                  "--", rel],
                 repo_root,

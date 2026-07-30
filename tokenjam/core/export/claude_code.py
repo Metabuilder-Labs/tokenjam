@@ -12,13 +12,9 @@ config manually. No `--apply` flag — Claude Code doesn't currently honor
 `tokenjam.routing_recommendations` keys, so writing them automatically
 would change nothing in Claude Code's behavior and erode user trust.
 
-Plan-tier-aware:
-  - API users: rules carry `estimated_savings_usd_month`.
-  - Subscription users: rules carry `estimated_tokens_freed` (per the
-    v1.1 honest-output spec — never quote dollar savings against a
-    flat-rate plan).
-  - Unknown plan-tier: rules carry neither figure; the snippet header
-    comment points the user at `tj onboard --reconfigure`.
+Every rule carries `estimated_savings_usd_month`, regardless of billing mode
+(product decision: dollars are always legitimate; tj no longer
+differentiates its output between subscription and API users).
 """
 from __future__ import annotations
 
@@ -51,22 +47,12 @@ def render_claude_code_snippet(
     rules_blocks: list[str] = []
     if downgrade is not None and downgrade.suggestions:
         for original_model, alt_model in sorted(downgrade.suggestions.items()):
-            # Pick the figure that matches the user's pricing mode.
-            if pricing_mode == "api":
-                figure_line = (
-                    f'      "estimated_savings_usd_month": '
-                    f'{downgrade.monthly_savings_usd}'
-                )
-            elif pricing_mode in {"subscription", "local"}:
-                figure_line = (
-                    f'      "estimated_tokens_freed": '
-                    f'{downgrade.monthly_tokens_in_candidates}'
-                )
-            else:
-                figure_line = (
-                    '      "note": "configure plan tier with '
-                    '`tj onboard --claude-code --reconfigure` to see savings projections"'
-                )
+            # Always the dollar figure (product decision: no differentiated
+            # messaging between subscription and API users).
+            figure_line = (
+                f'      "estimated_savings_usd_month": '
+                f'{downgrade.monthly_savings_usd}'
+            )
 
             rules_blocks.append(
                 "    {\n"

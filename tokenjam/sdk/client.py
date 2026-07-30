@@ -90,7 +90,7 @@ class TokenJamClient:
                     "tj serve returned %d on emit_litellm_span",
                     resp.status_code,
                 )
-        except Exception as exc:  # noqa: BLE001 — non-blocking by design
+        except Exception as exc:  # non-blocking by design
             logger.debug("emit_litellm_span failed: %s", exc)
 
 
@@ -147,6 +147,24 @@ def _build_litellm_span(
         session_id = metadata.get("tj_session_id")
         if session_id:
             attrs[GenAIAttributes.CONVERSATION_ID] = str(session_id)
+        # SDK cost-attribution dimensions (#SDK dashboard shape). LiteLLM's
+        # named callback has no OTel context to read an ambient
+        # sdk.attribution() value from (it runs out-of-process from tj's own
+        # TracerProvider), so these ride through the same `metadata` dict
+        # convention as tj_agent_id/tj_session_id above — pass them via
+        # `litellm.completion(..., metadata={"tj_tenant_id": ..., ...})`.
+        tenant_id = metadata.get("tj_tenant_id")
+        if tenant_id:
+            attrs[TjAttributes.TENANT_ID] = str(tenant_id)
+        feature = metadata.get("tj_feature")
+        if feature:
+            attrs[TjAttributes.FEATURE] = str(feature)
+        prompt_template_id = metadata.get("tj_prompt_template_id")
+        if prompt_template_id:
+            attrs[TjAttributes.PROMPT_TEMPLATE_ID] = str(prompt_template_id)
+        prompt_template_version = metadata.get("tj_prompt_template_version")
+        if prompt_template_version:
+            attrs[TjAttributes.PROMPT_TEMPLATE_VERSION] = str(prompt_template_version)
 
     span: dict[str, Any] = {
         "traceId": _new_trace_id(),

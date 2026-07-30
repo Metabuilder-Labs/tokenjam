@@ -4,6 +4,16 @@ Budget-projection analyzer.
 Projects current monthly run rate against any configured [budget.<provider>]
 ceiling, per-provider. No claim is made for providers without a configured
 budget.
+
+This ceiling (`ProviderBudget.usd`, TOML `[budget.<provider>]`) is a
+per-provider monthly spend FORECAST, distinct from the per-agent
+daily/session enforcement caps (`BudgetConfig`) edited on the Budget screen.
+`BudgetProjection` always carries `provider`, `budget_usd` and
+`cycle_start_day`, so any renderer of this finding can state exactly which
+configured ceiling it is projecting against — the UI does this by naming the
+provider + `$budget_usd/cycle` inline and linking to `#/budget?provider=<p>`,
+where that same `[budget.<provider>]` value is now visible and editable
+(`GET/POST /api/v1/budget/provider` in `tokenjam/api/routes/budget.py`).
 """
 from __future__ import annotations
 

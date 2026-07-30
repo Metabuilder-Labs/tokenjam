@@ -10,10 +10,9 @@ LiteLLM's own `model_list` / `router_settings`, because a downgrade
 translates into their LiteLLM config by hand. No `--apply`: TokenJam writes
 only to `~/.config/tokenjam/exports/` and never touches the LiteLLM config.
 
-Plan-tier-aware (same doctrine as claude_code.py):
-  - API users:          rules carry `estimated_savings_usd_month`.
-  - Subscription/local: rules carry `estimated_tokens_freed`.
-  - Unknown plan-tier:  rules carry a reconfigure note, no figure.
+Every rule carries `estimated_savings_usd_month`, regardless of billing mode
+(product decision: dollars are always legitimate; tj no longer
+differentiates its output between subscription and API users).
 """
 from __future__ import annotations
 

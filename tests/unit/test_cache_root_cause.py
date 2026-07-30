@@ -69,8 +69,8 @@ def test_a1_flagged_when_never_cached_and_prefix_large(db):
     assert c.agent_id == "agent-a1"
     assert c.calls == MIN_CALLS_FOR_ROOT_CAUSE
     assert c.assumed_prefix_tokens > 0
-    assert c.estimated_recoverable_usd is not None
-    assert c.estimated_recoverable_usd >= 0
+    assert c.past_overspend_usd is not None
+    assert c.past_overspend_usd >= 0
     assert "cache_control" in c.cache_control_snippet
     assert not thrash and not lookback
 
@@ -199,7 +199,7 @@ def test_a2_instability_cause_when_gap_under_five_minutes(db):
     assert "timestamp" in c.cache_control_snippet or "invalidator" in c.cache_control_snippet.lower()
     # The instability checklist IS an actionable fix (fix your prompt-assembly
     # code), so the wasted-spend headline stays populated for this variant.
-    assert c.estimated_recoverable_usd is not None
+    assert c.past_overspend_usd is not None
 
 
 def _seed_thrash_chain(db, *, agent="agent-a2-chain", n_sessions=4, calls_per_session=6,
@@ -232,8 +232,8 @@ def test_a2_ttl_worth_it_carries_positive_recoverable_usd(db):
     assert c.ttl_worth_it is True
     # Rollup contract: when the recommended fix DOES recover money, the
     # headline figure is populated (and positive) so it counts.
-    assert c.estimated_recoverable_usd is not None
-    assert c.estimated_recoverable_usd > 0
+    assert c.past_overspend_usd is not None
+    assert c.past_overspend_usd > 0
 
 
 def test_a2_ttl_breakeven_can_be_negative(db):
@@ -251,9 +251,9 @@ def test_a2_ttl_breakeven_can_be_negative(db):
     assert c.ttl_worth_it is False
     # Rollup contract: the "not worth it" variant must not carry a positive
     # headline figure — its own recommended fix (TTL switch) doesn't recover
-    # anything, so estimated_recoverable_usd is excluded (None), never a
+    # anything, so past_overspend_usd is excluded (None), never a
     # positive number a downstream rollup would sum.
-    assert c.estimated_recoverable_usd is None
+    assert c.past_overspend_usd is None
 
 
 def test_a2_not_flagged_when_ratio_at_or_above_threshold(db):
@@ -358,8 +358,8 @@ def test_a3_flagged_on_recurring_post_long_turn_misses(db):
     # uncached call, not a rewritten cache prefix) -- it must still count
     # toward miss_count (asserted above) but must NOT be priced as if the
     # whole input_tokens were a rewritten prefix.
-    assert c.estimated_recoverable_usd == 0.0
-    assert c.estimated_recoverable_tokens == 0
+    assert c.past_overspend_usd == 0.0
+    assert c.past_overspend_tokens == 0
 
 
 def test_a3_zero_cache_write_miss_excluded_from_dollar_estimate(db):
@@ -377,8 +377,8 @@ def test_a3_zero_cache_write_miss_excluded_from_dollar_estimate(db):
     assert len(lookback) == 1
     c = lookback[0]
     assert c.miss_count == MIN_LOOKBACK_MISS_RECURRENCE
-    assert c.estimated_recoverable_usd == 0.0
-    assert c.estimated_recoverable_tokens == 0
+    assert c.past_overspend_usd == 0.0
+    assert c.past_overspend_tokens == 0
 
 
 def test_a3_priced_only_over_misses_with_cache_write(db):
@@ -395,9 +395,9 @@ def test_a3_priced_only_over_misses_with_cache_write(db):
     assert len(lookback) == 1
     c = lookback[0]
     assert c.miss_count == MIN_LOOKBACK_MISS_RECURRENCE
-    assert c.estimated_recoverable_usd is not None
-    assert c.estimated_recoverable_usd > 0
-    assert c.estimated_recoverable_tokens == 1500 * MIN_LOOKBACK_MISS_RECURRENCE
+    assert c.past_overspend_usd is not None
+    assert c.past_overspend_usd > 0
+    assert c.past_overspend_tokens == 1500 * MIN_LOOKBACK_MISS_RECURRENCE
 
 
 def test_a3_not_flagged_below_block_limit(db):
@@ -572,8 +572,8 @@ def test_root_cause_candidates_survive_report_dict_round_trip(db):
     assert len(rebuilt_finding.uncached_agents) == 1
     assert rebuilt_finding.uncached_agents[0].agent_id == "agent-rt"
     assert (
-        rebuilt_finding.uncached_agents[0].estimated_recoverable_usd
-        == finding.uncached_agents[0].estimated_recoverable_usd
+        rebuilt_finding.uncached_agents[0].past_overspend_usd
+        == finding.uncached_agents[0].past_overspend_usd
     )
     assert rebuilt_finding.thrash_agents == []
     assert rebuilt_finding.lookback_miss_agents == []

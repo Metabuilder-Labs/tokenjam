@@ -82,20 +82,15 @@ def select_figure_value(
     monthly_savings_usd: float,
     monthly_tokens_in_candidates: int,
 ) -> tuple[str, object]:
-    """Pick the plan-tier-appropriate savings figure for a rule.
+    """Pick the savings figure for a rule: always a dollar/month estimate.
 
-    Mirrors ``claude_code.py``: API users get a dollar/month estimate;
-    subscription/local users get tokens-freed (never dollars against a flat
-    fee); unknown-plan users get a reconfigure note instead of a number.
+    Previously plan-tier-differentiated (subscription/local got tokens-freed,
+    unknown got a reconfigure note instead of a number). Removed by product
+    decision: dollars are always legitimate and tj no longer differentiates
+    its output between subscription and API users. `pricing_mode` and
+    `monthly_tokens_in_candidates` are kept for call-site compatibility but
+    no longer change the result.
 
     Returns ``(key, value)`` for the generator to render in its own syntax.
     """
-    if pricing_mode == "api":
-        return "estimated_savings_usd_month", monthly_savings_usd
-    if pricing_mode in {"subscription", "local"}:
-        return "estimated_tokens_freed", monthly_tokens_in_candidates
-    return (
-        "note",
-        "configure plan tier with `tj onboard --reconfigure` to see "
-        "savings projections",
-    )
+    return "estimated_savings_usd_month", monthly_savings_usd

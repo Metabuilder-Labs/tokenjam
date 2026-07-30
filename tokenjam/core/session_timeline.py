@@ -36,14 +36,18 @@ class TimelineSession:
     input_tokens: int
     output_tokens: int
     cache_tokens: int  # cache reads (re-read context)
-    cost_usd: float
+    cache_write_tokens: int = 0  # cache creation (first-time caching of a prefix)
+    cost_usd: float = 0.0
 
     @property
     def total_tokens(self) -> int:
+        # All four token types, always (Cache token types in aggregates, root
+        # CLAUDE.md) — omitting cache_write_tokens silently understates spend.
         return (
             self.input_tokens
             + self.output_tokens
             + self.cache_tokens
+            + self.cache_write_tokens
         )
 
     @property
@@ -101,11 +105,12 @@ def compute_session_timeline(
         where += " AND agent_id = $1"
         params.append(agent_id)
 
-    # Aggregate over the full window (not just the capped rows).
+    # Aggregate over the full window (not just the capped rows). All four
+    # token types, always (Cache token types in aggregates, root CLAUDE.md).
     agg = conn.execute(
         "SELECT COUNT(*), "
         "COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0) + "
-        "COALESCE(cache_tokens,0)), 0), "
+        "COALESCE(cache_tokens,0) + COALESCE(cache_write_tokens,0)), 0), "
         "COALESCE(SUM(COALESCE(total_cost_usd,0.0)), 0.0), "
         "MIN(started_at), MAX(COALESCE(ended_at, started_at)), "
         "COUNT(DISTINCT agent_id) "
@@ -125,14 +130,14 @@ def compute_session_timeline(
     rows = conn.execute(
         "SELECT session_id, agent_id, started_at, ended_at, "
         "COALESCE(input_tokens,0), COALESCE(output_tokens,0), "
-        "COALESCE(cache_tokens,0), "
+        "COALESCE(cache_tokens,0), COALESCE(cache_write_tokens,0), "
         "COALESCE(total_cost_usd,0.0) "
         "FROM sessions WHERE " + where
         + " ORDER BY started_at DESC LIMIT " + str(int(limit)),
         params,
     ).fetchall()
 
-    for (sid, aid, started, ended, in_tok, out_tok, cache_tok, cost) in rows:
+    for (sid, aid, started, ended, in_tok, out_tok, cache_tok, cache_w_tok, cost) in rows:
         result.sessions.append(
             TimelineSession(
                 session_id=str(sid) if sid is not None else "unknown",
@@ -142,6 +147,7 @@ def compute_session_timeline(
                 input_tokens=int(in_tok or 0),
                 output_tokens=int(out_tok or 0),
                 cache_tokens=int(cache_tok or 0),
+                cache_write_tokens=int(cache_w_tok or 0),
                 cost_usd=float(cost or 0.0),
             )
         )
@@ -167,6 +173,7 @@ def timeline_to_dict(timeline: SessionTimeline) -> dict[str, Any]:
                 "input_tokens": s.input_tokens,
                 "output_tokens": s.output_tokens,
                 "cache_tokens": s.cache_tokens,
+                "cache_write_tokens": s.cache_write_tokens,
                 "total_tokens": s.total_tokens,
                 "reread_share": round(s.reread_share, 4),
                 "cost_usd": round(s.cost_usd, 6),

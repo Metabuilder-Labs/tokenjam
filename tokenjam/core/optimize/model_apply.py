@@ -19,6 +19,7 @@ functions here only compute the new bytes and the reasons to refuse.
 """
 from __future__ import annotations
 
+import difflib
 import re
 from pathlib import Path
 
@@ -71,7 +72,7 @@ def default_agent_file_path(scope: str, repo_cwd: str, agent_name: str) -> str:
 
     Project scope is tried first by the caller; ``user-global`` is only correct
     when the agent's sessions span repos, which is the same scope routing the
-    relearn note/skill rungs use. Returns ``""`` when a project-scoped lookup
+    relearn's note/skill deliveries use. Returns ``""`` when a project-scoped lookup
     has no repo to anchor on, so the caller must ask rather than guess.
     """
     if not agent_name:
@@ -189,21 +190,45 @@ def _is_clean_in_git(repo_root: Path, target: Path) -> bool:
     return not (status.stdout or "").strip()
 
 
+#: The one precheck failure the USER can clear from the Review inbox, flagged
+#: separately from every other. The remaining gates report something about the
+#: repo the reader cannot fix by answering a question (not a git repo, the model
+#: id in several files, the file dirty), so a row that hits one of those stays
+#: advise-only and says so. "We were never told where the source is" is a
+#: different kind of gap: it is a question, and a question is answerable.
+#:
+#: Callers must branch on this flag, never on the reason string — an
+#: exit-code-style tolerance re-derived from prose is how two gates come to look
+#: like one.
+MODEL_SWAP_NEEDS_SOURCE_PATH = "needs_source_path"
+
+MODEL_SWAP_NO_SOURCE_PATH_REASON = (
+    "tokenjam has not been told where this agent's source lives, so it does "
+    "not know which file sets the model id. Point it at the agent's local "
+    "checkout once and it can make the substitution."
+)
+
+
 def model_swap_precheck(source_path: str, current_model: str) -> dict:
     """Whether the gated model-id swap may run, and where it would write.
 
     Every precondition must hold; any failure returns ``{"ok": False, "reason":
-    ...}`` and the caller falls back to the one-paste artifact, saying why on
-    the card. The preconditions, in order: a registered source path that exists,
+    ...}``. The preconditions, in order: a registered source path that exists,
     a git repo, exactly one file carrying the model id, and that file clean in
     the working tree.
+
+    The FIRST gate additionally sets ``needs_source_path``, because it is the
+    only one the reader can clear themselves — see
+    ``MODEL_SWAP_NEEDS_SOURCE_PATH``. Nothing else about the contract changes:
+    the path still has to be registered in the user's own config before a write
+    is attempted, and every later gate is re-run against the registered path.
     """
     if not source_path:
-        return {"ok": False, "reason": (
-            "no local source path is registered for this agent, so there is "
-            "nothing to edit. Register one with source_path under the agent in "
-            "your tj config, or paste the change yourself."
-        )}
+        return {
+            "ok": False,
+            "reason": MODEL_SWAP_NO_SOURCE_PATH_REASON,
+            MODEL_SWAP_NEEDS_SOURCE_PATH: True,
+        }
     root = Path(source_path).expanduser()
     if not root.is_dir():
         return {"ok": False, "reason": f"the registered source path {root} is not a directory."}
@@ -305,3 +330,106 @@ def build_model_plan(cluster: dict, target: Path, pre_image: str | None) -> str:
     if content is None:
         raise RelearnApplyRefused(reason)
     return content
+
+
+def register_agent_source_path(config, agent_id: str, source_path: str) -> str:
+    """Persist ``source_path`` as ``[agents.<agent_id>] source_path`` in the
+    user's own tj config, and return the resolved absolute path.
+
+    This exists so the Review inbox can offer a model swap on an agent whose
+    source path was never registered. It does NOT weaken the safety property
+    that made ``source_path`` config-only: the write still reads the path out of
+    the config, so a caller cannot aim an edit at an arbitrary repo by putting a
+    path in a request body — it can only ask the user's config to be changed,
+    which is an act the user performed deliberately from their own machine, and
+    which is durable and inspectable afterwards.
+
+    Registration is per AGENT, which is what makes one answer unlock every other
+    proposal for the same agent: the next recompute reads this path for all of
+    them.
+
+    Refuses rather than guesses. A path that does not exist, is not a directory,
+    or is not a git repo cannot be registered at all, because every one of those
+    would produce a card that offers an apply and then fails on the click.
+    """
+    from tokenjam.core.config import write_config
+
+    if not agent_id:
+        raise RelearnApplyRefused("no agent to register a source path for.")
+    resolved = resolve_source_path(source_path)
+
+    path = getattr(config, "config_path", None)
+    if path is None:
+        raise RelearnApplyRefused(
+            "no tj config file to register the path in. Run `tj onboard` first."
+        )
+    agents = getattr(config, "agents", None)
+    if agents is None:
+        raise RelearnApplyRefused("this config carries no agents table.")
+    existing = agents.get(agent_id)
+    if existing is None:
+        from tokenjam.core.config import AgentConfig
+
+        existing = AgentConfig()
+        agents[agent_id] = existing
+    existing.source_path = resolved
+    write_config(config, Path(path))
+    return resolved
+
+
+def resolve_source_path(source_path: str) -> str:
+    """The absolute source root ``source_path`` names, or a refusal.
+
+    Split out of ``register_agent_source_path`` so a PREVIEW can resolve and gate
+    a path without persisting anything: a dry run that left a registration behind
+    would make "preview" a write, and a refused apply would leave the config
+    pointing at a repo the swap turned out to be impossible in.
+
+    Refuses rather than guesses, because each of these would otherwise produce a
+    card that offers an apply and then fails on the click.
+    """
+    if not source_path.strip():
+        raise RelearnApplyRefused("a source path is required.")
+    root = Path(source_path).expanduser()
+    # A file is accepted and read as "the repo this file is in": the reader is
+    # being asked where the agent's code lives, and answering with the file they
+    # know sets the model is a reasonable reading of that question.
+    if root.is_file():
+        root = root.parent
+    if not root.is_dir():
+        raise RelearnApplyRefused(f"{root} is not a directory that exists.")
+    if git_repo_root(root) is None:
+        raise RelearnApplyRefused(
+            f"{root} is not inside a git repository. The swap is only offered "
+            f"where the edit is revertable through git."
+        )
+    return str(root.resolve())
+
+
+def preview_model_swap(
+    target_path: str, current_model: str, proposed_model: str,
+) -> dict:
+    """The diff a swap WOULD write, in the dry-run shape the card renders.
+
+    Reads the target and computes the substitution, and writes nothing — neither
+    the file nor the config. Same keys the apply path's dry run returns, so the
+    row renders one preview regardless of which endpoint produced it.
+    """
+    target = Path(target_path)
+    try:
+        pre_image = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RelearnApplyRefused(f"cannot read {target}: {exc}") from exc
+    new_content, reason = render_model_swap(pre_image, current_model, proposed_model)
+    if new_content is None:
+        raise RelearnApplyRefused(reason)
+    return {
+        "dry_run": True,
+        "kind": APPLY_KIND_MODEL_SWAP,
+        "target_path": str(target),
+        "diff": "".join(difflib.unified_diff(
+            pre_image.splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile="before", tofile="after", n=2,
+        )),
+    }

@@ -66,7 +66,7 @@ Each cluster carries two framings, rendered side by side:
 | **cache-reuse** | `avg_planning_cost × (repetitions − 1)` | Recoverable going forward by reusing the existing skeleton instead of re-planning. Conservative — you already paid once. |
 | **script-replacement** | `avg_planning_cost × repetitions` | Upper bound — replacing every planning call with a deterministic template eliminates all of it. |
 
-The aggregate `estimated_recoverable_usd` (what the Lens Overview tile
+The aggregate `past_overspend_usd` (what the Lens Overview tile
 reads) uses the conservative cache-reuse number. All dollar figures flow
 through `core/framing.py`, so subscription users see token-share framing
 and local users see token counts instead of dollars.

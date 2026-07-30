@@ -178,6 +178,11 @@ def test_card_is_quota_native_for_subscription_no_dollar_spend_brag(db):
     # No dollar figure anywhere on a subscription card.
     assert "$" not in out
     assert "Implied API value" not in out
+    # The subscription-billed qualifier banner was removed by product
+    # decision: tj no longer differentiates its messaging between
+    # subscription and API users.
+    assert "subscription-billed" not in out
+    assert "list-price equivalent" not in out
 
 
 def test_card_surfaces_reclaimable_quota_not_spend(db):

@@ -16,9 +16,9 @@ from tokenjam.core.optimize.analyzers.downsize_agents import (
     thinking_share,
 )
 from tokenjam.core.optimize.analyzers.model_downgrade import analyze_model_downgrade
-from tokenjam.core.pricing import get_rates
 from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span
+from tests.rate_bands import rate_for_window
 
 WINDOW_DAYS = 30.0
 
@@ -68,8 +68,11 @@ def test_per_agent_rows_priced_from_the_real_rate_table(db):
     assert (row.agent_id, row.model, row.alt_model) == (
         "svc-a", "claude-opus-4-8", "claude-haiku-4-5",
     )
-    current = get_rates("anthropic", "claude-opus-4-8")
-    alt = get_rates("anthropic", "claude-haiku-4-5")
+    # Asked of the pricing table for the SAME window the analyzer priced: the
+    # analyzer bills each candidate session at its own start, so a rate that
+    # changes mid-window would make "the rate now" the wrong comparison.
+    current = rate_for_window("anthropic", "claude-opus-4-8", since, until)
+    alt = rate_for_window("anthropic", "claude-haiku-4-5", since, until)
     expected_current = (
         1_000 / 1e6 * current.input_per_mtok
         + 200 / 1e6 * current.output_per_mtok
@@ -122,7 +125,8 @@ def test_group_without_pricing_for_both_sides_is_dropped():
         "model": "claude-opus-4-8", "alt_model": "totally-made-up-model",
         "input_tokens": 1_000, "output_tokens": 100,
         "cache_tokens": 0, "cache_write_tokens": 0,
-    }], WINDOW_DAYS)
+        "started_at": utcnow() - timedelta(days=1),
+    }], WINDOW_DAYS, window_start=utcnow() - timedelta(days=WINDOW_DAYS))
     assert rows == []
 
 
@@ -135,9 +139,10 @@ def test_pricing_counts_cache_reads_and_cache_writes(db):
         "input_tokens": 1_000, "output_tokens": 200,
         "cache_tokens": 100_000, "cache_write_tokens": 50_000,
     }
-    with_cache = price_tokens("anthropic", "claude-opus-4-8", **tokens)
+    at = utcnow() - timedelta(days=1)
+    with_cache = price_tokens("anthropic", "claude-opus-4-8", at=at, **tokens)
     without_cache = price_tokens(
-        "anthropic", "claude-opus-4-8",
+        "anthropic", "claude-opus-4-8", at=at,
         input_tokens=1_000, output_tokens=200,
         cache_tokens=0, cache_write_tokens=0,
     )

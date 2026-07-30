@@ -32,7 +32,11 @@ from tokenjam.core.optimize.analyzers.plan_reuse import (
     _SpanRow,
     _identify_planning_call,
 )
-from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
+from tokenjam.core.optimize.types import (
+    DEGRADED_CAPTURE_MODES,
+    ReuseCluster,
+    ReuseFinding,
+)
 from tokenjam.otel.semconv import GenAIAttributes
 
 REUSE_REPORT_CAVEAT = (
@@ -258,13 +262,12 @@ def prepare_renders(
 # HTML
 # --------------------------------------------------------------------------
 
-def _recoverable_pair(c: ReuseCluster, pricing_mode: str) -> tuple[str, str]:
-    """(cache-reuse, script-replacement) display strings, framed per mode."""
-    if pricing_mode in ("subscription", "local"):
-        return (
-            f"~{c.cache_reuse_recoverable_tokens:,} tokens",
-            f"~{c.script_replacement_recoverable_tokens:,} tokens",
-        )
+def _recoverable_pair(c: ReuseCluster) -> tuple[str, str]:
+    """(cache-reuse, script-replacement) display strings: always dollars.
+
+    Previously framed as tokens for subscription/local plans. Removed by
+    product decision: dollars are always legitimate and tj no longer
+    differentiates its rendering between subscription and API users."""
     return (
         f"${c.cache_reuse_recoverable_usd:,.2f}",
         f"${c.script_replacement_recoverable_usd:,.2f}",
@@ -288,25 +291,40 @@ def render_html(
     since: str,
     pricing_mode: str,
 ) -> str:
+    """Render the Reuse report HTML page. Recoverable figures are always
+    dollars now (product decision: no differentiated messaging between
+    subscription and API users). `pricing_mode` is kept for call-site
+    compatibility with `write_reuse_report` but no longer changes the
+    rendering."""
     scope_label = f"agent={html.escape(agent_scope)}, " if agent_scope else ""
-    cache_total, script_total = (
-        (f"~{finding.estimated_recoverable_tokens or 0:,} tokens", "")
-        if pricing_mode in ("subscription", "local")
-        else (f"${finding.estimated_recoverable_usd or 0.0:,.2f}", "")
-    )
+    # Always dollars (product decision: no differentiated messaging between
+    # subscription and API users). `pricing_mode` is accepted for call-site
+    # compatibility but no longer changes the rendering.
+    cache_total = f"${finding.past_overspend_usd or 0.0:,.2f}"
 
     mode_hint = ""
-    if finding.capture_mode == "tool_sequence_only":
-        mode_hint = (
-            "<div class='hint'>Clustered on tool sequences only. Set "
-            "<code>[capture] prompts = true</code> for narrower, more accurate "
-            "clusters.</div>"
+    if finding.capture_mode in DEGRADED_CAPTURE_MODES:
+        # `capture_mode` is measured over the analyzed window, so this states
+        # the degrade; `hint` carries whichever remedy actually applies (the
+        # toggle is off, it is on and nothing was captured anyway, or only
+        # part of the window carried prompt text).
+        remedy = html.escape(finding.hint) if finding.hint else (
+            "Set <code>[capture] prompts = true</code> for narrower, more "
+            "accurate clusters."
         )
+        lead = (
+            "Clustered on tool sequences only: no prompt text was captured "
+            "for these calls."
+            if finding.capture_mode == "tool_sequence_only" else
+            "Mixed basis: only some of these calls carried prompt text, and "
+            "the rest were clustered on tool sequence alone."
+        )
+        mode_hint = f"<div class='hint'>{lead} {remedy}</div>"
 
     sections: list[str] = []
     for idx, r in enumerate(renders, start=1):
         c = r.cluster
-        cache_str, script_str = _recoverable_pair(c, pricing_mode)
+        cache_str, script_str = _recoverable_pair(c)
         sig_items = "".join(
             f"<li>{html.escape(t)}</li>" for t in c.tool_signature
         ) or "<li><em>(no tools after the plan)</em></li>"

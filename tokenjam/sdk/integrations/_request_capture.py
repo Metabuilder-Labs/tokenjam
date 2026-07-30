@@ -31,6 +31,14 @@ _PARAM_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+# Billing-relevant request metadata, captured outside the content gates because
+# it decides which PRICE applies, not what was said. `speed="fast"` bills the
+# same model id at a premium (see TjAttributes.REQUEST_SPEED).
+_BILLING_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (TjAttributes.REQUEST_SPEED, ("speed",)),
+)
+
+
 def _coerce_attr_value(value: Any) -> Any | None:
     """Coerce a value to something an OTel attribute accepts, else None.
 
@@ -48,8 +56,8 @@ def _coerce_attr_value(value: Any) -> Any | None:
 
 
 def record_request_params(span: Any, kwargs: dict[str, Any]) -> None:
-    """Set ``gen_ai.request.*`` sampling-param attributes from call kwargs."""
-    for attr, aliases in _PARAM_ALIASES:
+    """Set ``gen_ai.request.*`` sampling-param and billing attributes from kwargs."""
+    for attr, aliases in _PARAM_ALIASES + _BILLING_ALIASES:
         for alias in aliases:
             if kwargs.get(alias) is not None:
                 coerced = _coerce_attr_value(kwargs[alias])

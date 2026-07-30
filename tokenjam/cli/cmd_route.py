@@ -36,7 +36,7 @@ def _exports_dir() -> Path:
 
 @click.group("route")
 def cmd_route() -> None:
-    """Compile advisory router configs from TokenJam's downsize findings."""
+    """Advisory model-routing config from your usage."""
 
 
 @cmd_route.command("export")
@@ -141,6 +141,16 @@ def _resolve_finding(ctx, *, agent, since):
             raise click.ClickException(
                 f"Failed to fetch optimize report from tj serve: {exc}"
             ) from exc
+        # The daemon serves a STORED report; a cold store must not be rendered
+        # as "no routing candidates" — that is an absence claim off a scan
+        # that never ran.
+        if report_dict.get("report_available") is False:
+            raise click.ClickException(
+                "tj serve has not computed an analyzer report yet "
+                f"(status: {report_dict.get('status') or 'never_run'}). It "
+                "scans in the background on startup and on a schedule; re-run "
+                "this shortly, or press Rescan in the web UI."
+            )
         report: OptimizeReport = report_from_dict(report_dict)
         plan_mix = report_dict.get("plan_tier_mix") or {}
     else:

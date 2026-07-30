@@ -14,6 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_INJECTING_HOOK,
+)
+
 from tokenjam.core.optimize.analyzers.relearn import (
     MIN_RECURRING_SESSIONS,
     FailureEpisode,
@@ -181,13 +186,13 @@ def test_classify_deferred_tool_cold_still_matches_non_offset_errors():
     assert classify_known_family("Monitor", text) == "deferred_tool_cold"
 
 
-def test_command_not_found_is_rung_one_with_real_guidance():
-    # Downgraded from rung 5 (no safe automatic config/env writer exists) to
-    # a rung-1 CLAUDE.md note with genuinely useful guidance — not a stub.
+def test_command_not_found_is_a_claude_md_rule_with_real_guidance():
+    # Downgraded from a config/env fix (no safe automatic config/env writer
+    # exists) to a CLAUDE.md rule with genuinely useful guidance — not a stub.
     from tokenjam.core.optimize.analyzers.relearn import _FAMILY_BY_KEY
 
     fam = _FAMILY_BY_KEY["command_not_found"]
-    assert fam["rung"] == 1
+    assert fam["delivery"] == DELIVERY_CLAUDE_MD_RULE
     assert "python3" in fam["fix"]
     assert "mapfile" in fam["fix"] or "shopt" in fam["fix"]
 
@@ -276,15 +281,21 @@ def test_recurring_cluster_surfaces_as_a_proposal(tmp_path):
     cluster = finding.clusters[0]
     assert cluster.family_key == "cwd_confusion"
     assert cluster.sessions == MIN_RECURRING_SESSIONS
-    assert cluster.rung == 3
+    # cwd_confusion is a PostToolUseFailure hook: it injects recovery context
+    # rather than blocking anything, which is what makes it prompt text.
+    assert cluster.delivery == DELIVERY_INJECTING_HOOK
     # Spread across 3 distinct repos -> user-global scope (§7).
     assert cluster.scope == "user-global"
-    assert cluster.estimated_recoverable_tokens > 0
+    # The one canonical dollar field, no carve-out: a relearn cluster shows
+    # its PAST figure only, like every other analyzer's card.
+    assert not hasattr(cluster, "estimated_recoverable_tokens")
+    assert not hasattr(finding, "estimated_recoverable_tokens")
+    assert cluster.past_overspend_tokens > 0
     assert len(cluster.examples) <= 3
-    assert finding.estimated_recoverable_tokens == cluster.estimated_recoverable_tokens
+    assert finding.past_overspend_tokens == cluster.past_overspend_tokens
 
 
-def test_command_not_found_proposal_is_rung_one_note(tmp_path):
+def test_command_not_found_proposal_is_a_claude_md_rule(tmp_path):
     for i in range(MIN_RECURRING_SESSIONS):
         _command_not_found_session(tmp_path, f"-Users-test-cnf{i}", f"cnf-{i}")
     sessions = [(f"cnf-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
@@ -294,7 +305,7 @@ def test_command_not_found_proposal_is_rung_one_note(tmp_path):
     assert len(finding.clusters) == 1
     cluster = finding.clusters[0]
     assert cluster.family_key == "command_not_found"
-    assert cluster.rung == 1
+    assert cluster.delivery == DELIVERY_CLAUDE_MD_RULE
     assert "python3" in cluster.proposed_fix
 
 
@@ -477,7 +488,7 @@ def test_single_repo_cluster_scopes_to_project(tmp_path):
     assert finding.clusters[0].repos == ["onerepo"]
 
 
-# --- Persona gating on the rung-1/rung-2 write --------------------------------
+# --- Persona gating on the CLAUDE.md/skill write ------------------------------
 # Mirrors cost_proposals._persona_gated_write_fields's gate on the SAME class
 # of surface (a CLAUDE.md/skill write): only claude-code/mixed get the write.
 # A workspace-having (non-OTel) cluster used to be apply-capable regardless of
@@ -537,7 +548,9 @@ def test_clean_sessions_produce_no_proposals(tmp_path):
 
     assert finding.clusters == []
     assert finding.failures_examined == 0
-    assert finding.estimated_recoverable_tokens is None
+    assert not hasattr(finding, "estimated_recoverable_tokens")
+    assert finding.past_overspend_tokens == 0
+    assert finding.past_overspend_usd is None
 
 
 # --- Novelty filter -------------------------------------------------------------
@@ -595,32 +608,32 @@ _REAL_THIN_SAMPLES: dict[str, list[str]] = {
     # leftover `ls -la` stdout from an EARLIER, successful chain step, not an
     # error description of why the chain's last command failed.
     "bash_output_buffer_limit": [
-        "Exit code 1\ntotal 240\ndrwxr-xr-x@ 21 anshs  staff    672 Jun 28 14:44 .\n"
-        "drwxr-xr-x@ 16 anshs  staff    512 Jun 28 14:44 ..\n"
-        "-rw-r--r--@  1 anshs  staff     75 Jun 28 14:44 .git",
-        "Exit code 1\ntotal 280\ndrwxr-xr-x@ 25 anshs  staff    800 Jun 25 17:52 .\n"
-        "drwxr-xr-x@ 33 anshs  staff   1056 Jun 25 17:53 ..",
+        "Exit code 1\ntotal 240\ndrwxr-xr-x@ 21 user  staff    672 Jun 28 14:44 .\n"
+        "drwxr-xr-x@ 16 user  staff    512 Jun 28 14:44 ..\n"
+        "-rw-r--r--@  1 user  staff     75 Jun 28 14:44 .git",
+        "Exit code 1\ntotal 280\ndrwxr-xr-x@ 25 user  staff    800 Jun 25 17:52 .\n"
+        "drwxr-xr-x@ 33 user  staff   1056 Jun 25 17:53 ..",
     ],
     # -> was confabulated as "bash_output_truncation"
     "bash_output_truncation": [
-        "Exit code 1\ntotal 288\ndrwxr-xr-x@ 24 anshs  staff    768 Jul  3 12:56 .\n"
-        "drwxr-xr-x@ 16 anshs  staff    512 Jul  3 12:56 ..\n"
-        "-rw-r--r--@  1 anshs  staff    553 Jul  3 12:56 .dockerignore",
-        "Exit code 1\ntotal 400\ndrwxr-xr-x@ 32 anshs  staff   1024 Jul  3 00:37 .",
+        "Exit code 1\ntotal 288\ndrwxr-xr-x@ 24 user  staff    768 Jul  3 12:56 .\n"
+        "drwxr-xr-x@ 16 user  staff    512 Jul  3 12:56 ..\n"
+        "-rw-r--r--@  1 user  staff    553 Jul  3 12:56 .dockerignore",
+        "Exit code 1\ntotal 400\ndrwxr-xr-x@ 32 user  staff   1024 Jul  3 00:37 .",
     ],
 }
 
 _REAL_LEGIT_SAMPLES: dict[str, list[str]] = {
     "branch_already_exists": [
-        "Exit code 128\nfatal: a branch named 'ticket-28' already exists",
-        "Exit code 128\nfatal: a branch named 'ticket-322' already exists",
-        "Exit code 128\nfatal: a branch named 'ticket-22' already exists",
+        "Exit code 128\nfatal: a branch named 'feature-28' already exists",
+        "Exit code 128\nfatal: a branch named 'feature-322' already exists",
+        "Exit code 128\nfatal: a branch named 'feature-22' already exists",
     ],
     "read_tool_dir_not_file": [
         "EISDIR: illegal operation on a directory, read "
-        "'/Users/anshs/Folder/code/shiploop.wt/ticket-5/shiploop/templates'",
+        "'/Users/user/Folder/code/myproject.wt/task-5/myproject/templates'",
         "EISDIR: illegal operation on a directory, read "
-        "'/Users/anshs/Folder/code/vibelab.wt/ticket-5'",
+        "'/Users/user/Folder/code/otherproject.wt/task-5'",
     ],
 }
 
@@ -735,7 +748,7 @@ def test_relearn_in_click_choices_and_renderer():
 
 def test_render_relearn_shows_clusters_without_error(tmp_path, capsys):
     """The finding renders through the CLI dispatch path and surfaces the
-    cluster signature + occurrences + rung — not a generic empty state."""
+    cluster signature + occurrences + delivery — not a generic empty state."""
     from tokenjam.cli.cmd_optimize import _render_relearn
 
     for i in range(MIN_RECURRING_SESSIONS):
@@ -749,7 +762,9 @@ def test_render_relearn_shows_clusters_without_error(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "cwd_confusion" in out
     assert f"{finding.clusters[0].occurrences}" in out
-    assert "rung 3" in out
+    # Inverted: the row named a ladder number the reader had to translate.
+    # It now names the mechanism, which is the thing they can act on.
+    assert "hook (context nudge)" in out
     assert "No candidates flagged" not in out
 
 
@@ -800,7 +815,7 @@ def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, c
     sessions = [(f"huge-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
     finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
     assert finding.clusters
-    assert finding.estimated_recoverable_tokens  # a positive, rank-able estimate
+    assert finding.past_overspend_tokens  # a positive, rank-able figure
 
     now = utcnow()
     report = OptimizeReport(
@@ -822,14 +837,14 @@ def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, c
     assert "No candidates flagged" not in out
 
 
-# --- Review inbox monthly-basis fields (§1/§2) --------------------------------
-# Relearn scans unbounded on-disk history, so there's no "the window IS a
-# month" shortcut the way a fixed-window cost analyzer has. These fields
-# extrapolate the corpus's OWN observed timespan to 30 days instead — see
-# `_corpus_window_days`/`_monthly_scale` and the "Recoverable-savings
-# contract" note in model_downgrade.py. The window-basis
-# `estimated_recoverable_tokens` field (asserted elsewhere in this file) is
-# UNCHANGED by any of this — Overview/Optimize keep reading that field.
+# --- The one canonical dollar field, no relearn carve-out ---------------------
+# A relearn cluster used to carry its own forward `estimated_recoverable_*` /
+# `estimated_monthly_*` claim, extrapolated from the corpus's own observed
+# timespan to 30 days (`_corpus_window_days`). That claim is retired: a
+# relearn cluster shows its PAST figure only, like every other analyzer's
+# card — the forward "you could recover $X" claim is deleted from the card
+# entirely, not merely renamed. These tests assert the retired names stay
+# gone rather than deleting the coverage outright.
 
 def _cwd_confusion_session_at(root: Path, project: str, session_id: str, ts: str) -> None:
     """Same fixture as `_cwd_confusion_session`, with a controllable
@@ -849,9 +864,11 @@ def _cwd_confusion_session_at(root: Path, project: str, session_id: str, ts: str
     _write_transcript(root, project, session_id, records)
 
 
-def test_monthly_fields_extrapolate_from_the_corpus_own_observed_window(tmp_path):
-    # Three occurrences spread across exactly 10 observed days -> a 3x
-    # (30/10) extrapolation to the monthly figure, not a raw multiply-by-30.
+def test_retired_forward_fields_stay_gone(tmp_path):
+    # Three occurrences spread across observed days used to drive a 30-day
+    # extrapolation onto `estimated_monthly_*`; that field, and its window-
+    # basis twin `estimated_recoverable_*`, are gone from both the cluster and
+    # the finding — a relearn cluster carries only `past_overspend_*` now.
     days = [0, 5, 10]
     for i, day in enumerate(days):
         ts = (datetime(2026, 6, 1, tzinfo=timezone.utc) + timedelta(days=day)).isoformat().replace("+00:00", "Z")
@@ -860,16 +877,18 @@ def test_monthly_fields_extrapolate_from_the_corpus_own_observed_window(tmp_path
 
     finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
 
+    # window_days itself survives (descriptive corpus metadata), only the
+    # dollar figures derived from it are retired.
     assert finding.window_days == pytest.approx(10.0)
     cluster = finding.clusters[0]
-    assert cluster.estimated_monthly_tokens == round(cluster.estimated_recoverable_tokens * 3.0)
-    # The window-basis field is untouched — Overview/Optimize still read it.
-    assert cluster.estimated_recoverable_tokens == cluster.occurrences * 1_500
-    assert finding.estimated_monthly_tokens == cluster.estimated_monthly_tokens
-    # No DB connection was given, so there's no blended rate to derive a
-    # dollar figure from — tokens-only, exactly the mockup's fallback.
-    assert cluster.estimated_monthly_usd is None
-    assert cluster.monthly_rate_basis == ""
+    for retired in (
+        "estimated_recoverable_tokens", "estimated_recoverable_usd",
+        "estimated_monthly_tokens", "estimated_monthly_usd", "monthly_rate_basis",
+    ):
+        assert not hasattr(cluster, retired)
+        assert not hasattr(finding, retired)
+    assert cluster.past_overspend_tokens == cluster.occurrences * 1_500
+    assert finding.past_overspend_tokens == cluster.past_overspend_tokens
 
 
 def test_single_timestamp_corpus_floors_the_window_to_one_day(tmp_path):
@@ -885,25 +904,44 @@ def test_single_timestamp_corpus_floors_the_window_to_one_day(tmp_path):
 
     assert finding.window_days == 1.0
     cluster = finding.clusters[0]
-    assert cluster.estimated_monthly_tokens == cluster.estimated_recoverable_tokens * 30
+    assert cluster.past_overspend_tokens == cluster.occurrences * 1_500
+
+
+#: The instant a fake rate bucket is priced at. Inside the current rate era for
+#: every model these tests use, so the blend is that model's plain rate.
+_RATE_BUCKET_AT = datetime(2026, 7, 1, tzinfo=timezone.utc)
 
 
 class _FakeSpanConn:
     """Minimal stand-in for a DuckDB connection.
 
     Relearn issues two different queries per cluster — the rate blend
-    (``provider, model, input_tokens, cache_tokens``) and the per-session
-    prompt timeline the re-read tail is measured on (``session_id,
+    (``provider, model, input_tokens, cache_tokens, <bucket instant>``) and the
+    per-session prompt timeline the re-read tail is measured on (``session_id,
     start_time, prompt_size``) — so this dispatches on the SQL text rather
     than returning one canned shape to both.
+
+    Dispatches on ``GROUP BY provider``, which only the rate blend does. It
+    used to dispatch on ``start_time``, which stopped identifying the timeline
+    query the moment the rate blend started carrying a time axis of its own (it
+    now selects ``MIN(start_time)`` and groups by UTC day). A stand-in that
+    silently answers the WRONG query returns plausible-looking rows, so the
+    mistake surfaces as a confusing error far from the cause rather than as a
+    shape mismatch at the seam — pick a discriminator the two queries cannot
+    come to share.
+
+    Rate rows are 4-tuples in the test bodies; the bucket instant every rate
+    row now carries is appended here so each test states only what it is about.
     """
     def __init__(self, rate_rows, timeline_rows=()):
-        self._rate_rows = rate_rows
+        self._rate_rows = [(*r, _RATE_BUCKET_AT) for r in rate_rows]
         self._timeline_rows = list(timeline_rows)
         self._rows: list = []
 
     def execute(self, sql, _params):
-        self._rows = self._timeline_rows if "start_time" in sql else self._rate_rows
+        self._rows = (
+            self._rate_rows if "GROUP BY provider" in sql else self._timeline_rows
+        )
         return self
 
     def fetchall(self):
@@ -941,10 +979,11 @@ def test_blended_rate_profile_degrades_on_query_failure_never_raises():
     assert blended_rate_profile(_RaisingConn(), session_ids={"s1"}) is None
 
 
-def test_monthly_usd_derived_when_conn_has_priced_spans(tmp_path):
+def test_past_overspend_usd_derived_when_conn_has_priced_spans(tmp_path):
     # End-to-end: analyze_relearns(conn=...) stamps a cluster's
-    # estimated_monthly_usd from the input rate observed across its own
-    # sessions, not a hardcoded or invented one.
+    # past_overspend_usd from the input rate observed across its own
+    # sessions, not a hardcoded or invented one. This used to also stamp a
+    # forward `estimated_monthly_usd` — that field no longer exists.
     for i in range(MIN_RECURRING_SESSIONS):
         _cwd_confusion_session(tmp_path, f"-Users-test-usd{i}", f"usd-{i}")
     sessions = [(f"usd-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
@@ -954,9 +993,11 @@ def test_monthly_usd_derived_when_conn_has_priced_spans(tmp_path):
 
     cluster = finding.clusters[0]
     expected_rate = get_rates("anthropic", "claude-sonnet-5").input_per_mtok / 1_000_000
-    assert cluster.estimated_monthly_usd == round(cluster.estimated_monthly_tokens * expected_rate, 6)
-    assert "claude-sonnet-5" in cluster.monthly_rate_basis
-    assert finding.estimated_monthly_usd == pytest.approx(cluster.estimated_monthly_usd)
+    assert cluster.past_overspend_usd == round(cluster.past_overspend_tokens * expected_rate, 6)
+    assert cluster.past_overspend_basis
+    assert finding.past_overspend_usd == pytest.approx(cluster.past_overspend_usd)
+    assert not hasattr(cluster, "estimated_monthly_usd")
+    assert not hasattr(cluster, "monthly_rate_basis")
 
 
 def test_occurrence_is_worth_its_re_read_tail_not_just_one_turn(tmp_path):
@@ -984,7 +1025,7 @@ def test_occurrence_is_worth_its_re_read_tail_not_just_one_turn(tmp_path):
     assert GROUNDED_TOKENS_PER_OCCURRENCE == 1_500
     assert cluster.tail_calls_median == 20
     assert cluster.tail_multiplier > 1.0
-    assert cluster.gross_recoverable_tokens > (
+    assert cluster.past_overspend_tokens > (
         cluster.occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
     )
 

@@ -4,7 +4,7 @@
   1. Mutating endpoints (apply/enable/disable/revert/refresh) require the
      always-on local write token, independent of ``api.auth.enabled``.
   2. ``/apply`` refuses a ``target_path`` outside the user's home directory
-     (defense-in-depth allowlist) and — for rung 1 — a target that isn't an
+     (defense-in-depth allowlist) and — for a CLAUDE.md rule — a target that isn't an
      allowlisted note file (see test_relearn_apply.py for the relearn_apply
      unit-level version of that same guard).
 
@@ -16,11 +16,14 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE, DELIVERY_INJECTING_HOOK
+
 from tokenjam.api.app import create_app
 from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
 from tokenjam.core.optimize import relearn_apply as pa
+from tests.factories import make_session
 
 
 @pytest.fixture
@@ -71,7 +74,7 @@ def stored_proposal(config) -> str:
     cluster = RelearnCluster(
         signature="cwd_confusion", family_key="cwd_confusion",
         title="cwd / relative-path confusion", sessions=5, occurrences=9,
-        repos=["demo"], rung=1, scope="project",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Verify an absolute cwd before a relative Read.",
     )
     relearn_store.write_cache(RelearnFinding(clusters=[cluster]), config=config)
@@ -148,6 +151,34 @@ async def test_read_endpoints_do_not_require_the_write_token(client):
     assert r2.status_code == 200
 
 
+# --- persona: the mistakes-tab empty state needs to know if it applies -------- #
+
+async def test_relearn_proposals_carries_persona_when_never_run(client, db):
+    """`relearn` reads only on-disk Claude Code transcripts (see its module
+    docstring), so an SDK-dominant window's mistakes tab is permanently empty
+    -- the empty state needs `persona` to disclose that, even before any
+    background scan has completed (the `cached is None` branch)."""
+    for i in range(3):
+        db.upsert_session(make_session(session_id=f"sdk-{i}", agent_id="my-sdk-service"))
+
+    resp = await client.get("/api/v1/relearn/proposals")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "never_run"
+    assert body["persona"] == "sdk"
+
+
+async def test_relearn_proposals_persona_reflects_claude_code_dominant_window(
+    client, db, stored_proposal,
+):
+    for i in range(3):
+        db.upsert_session(make_session(session_id=f"cc-{i}", agent_id="claude-code-cli"))
+
+    resp = await client.get("/api/v1/relearn/proposals")
+    assert resp.status_code == 200
+    assert resp.json()["persona"] == "claude-code"
+
+
 # --- must-fix #1 (defense-in-depth): home-anchored target_path allowlist ------
 
 async def test_apply_refuses_target_outside_home(app, client, monkeypatch, tmp_path):
@@ -183,7 +214,7 @@ async def test_apply_allows_target_inside_home(app, client, monkeypatch, tmp_pat
     assert r.json()["dry_run"] is False
 
 
-# --- must-fix #2 (routed through the API): rung-1 note target allowlist -------
+# --- must-fix #2 (routed through the API): note target allowlist -------------
 
 async def test_apply_note_route_refuses_non_markdown_target(
     app, client, monkeypatch, tmp_path, stored_proposal,
@@ -228,7 +259,7 @@ def _store_cost_proposal(config, **overrides) -> str:
         "target_key": {}, "evidence": "", "baseline": {},
         "advise_text": "Route explore to the cheaper same-family model.",
         "proposed_fix": "Route explore to the cheaper same-family model.",
-        "rung": 0, "scope": "project", "apply_capable": True,
+        "delivery": "", "scope": "project", "apply_capable": True,
         "apply_kind": "agent_model", "agent_name": "explore",
         "current_model": "claude-opus-4-8", "proposed_model": "claude-haiku-4-5",
     }
@@ -376,7 +407,7 @@ async def test_apply_refuses_a_stored_proposal_missing_a_required_field(
     assert target.read_text() == _AGENT_FILE
 
 
-async def test_rung_ladder_apply_opens_no_cost_window(
+async def test_delivery_apply_opens_no_cost_window(
     app, client, config, monkeypatch, tmp_path, stored_proposal,
 ):
     """A plain note fix has no priced metric, so it must not create a cost
@@ -434,7 +465,8 @@ async def test_apply_rejects_a_client_constructed_cluster_payload(
     target.write_text("# Repo\n", encoding="utf-8")
 
     body = _apply_body(str(target), proposal_id=stored_proposal)
-    body.update({"signature": "attacker", "rung": 3, "title": "not from the detector",
+    body.update({"signature": "attacker", "delivery": DELIVERY_INJECTING_HOOK,
+                 "title": "not from the detector",
                  "proposed_fix": "rm -rf /"})
     r = await client.post(
         "/api/v1/relearn/apply", json=body,
@@ -578,7 +610,7 @@ async def test_proposals_flag_example_sessions_that_resolve(config, db, client):
     cluster = RelearnCluster(
         signature="cwd_confusion", family_key="cwd_confusion",
         title="cwd / relative-path confusion", sessions=2, occurrences=3,
-        repos=["demo"], rung=1, scope="project",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Verify an absolute cwd before a relative Read.",
         examples=[
             RelearnExample(session_id="ingested-1", repo="demo", ts=None, snippet="a"),
@@ -612,7 +644,7 @@ async def test_advise_only_proposals_carry_their_reason_in_the_payload(config, c
     advise = RelearnCluster(
         signature="http_call:peer closed", family_key=None,
         title="peer closed the connection", sessions=3, occurrences=9,
-        repos=["billing-svc"], rung=1, scope="project",
+        repos=["billing-svc"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Retry the upstream call with backoff.",
         examples=[RelearnExample(session_id="s1", repo="billing-svc", ts=None, snippet="e")],
         advise_only=True,
@@ -620,7 +652,7 @@ async def test_advise_only_proposals_carry_their_reason_in_the_payload(config, c
     workspace = RelearnCluster(
         signature="cwd_confusion", family_key="cwd_confusion",
         title="cwd / relative-path confusion", sessions=4, occurrences=12,
-        repos=["demo"], rung=1, scope="project",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Verify an absolute cwd before a relative Read.",
     )
     relearn_store.write_cache(RelearnFinding(clusters=[advise, workspace]), config=config)
@@ -637,3 +669,81 @@ async def test_advise_only_proposals_carry_their_reason_in_the_payload(config, c
     workspace_card = by_title["cwd / relative-path confusion"]
     assert workspace_card["advise_only"] is False
     assert workspace_card["advise_only_reason"] is None
+
+
+# --- The guard authorizes against the RUN'S scope, not the process's home ----
+# `--projects-root` outside `$HOME` made the two halves of a card disagree: the
+# suggestion followed the scoped home, the guard stayed pinned to `Path.home()`
+# and 403'd the very path the UI had just proposed. These pin the fix at the
+# route, and pin that it is still fail-closed in the directions that matter.
+
+@pytest.fixture
+def scoped_app(tmp_path, db, monkeypatch):
+    """A daemon scoped to a throwaway home OUTSIDE the real `$HOME`, exactly as
+    `--projects-root /tmp/demo-home/.claude/projects` does."""
+    from tokenjam.core.config import OptimizeConfig
+
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: real_home))
+
+    demo_home = tmp_path / "demo-home"
+    (demo_home / ".claude" / "projects").mkdir(parents=True)
+    scoped_config = TjConfig(
+        version="1",
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        storage=StorageConfig(path=str(tmp_path / "telemetry.duckdb")),
+        optimize=OptimizeConfig(projects_root=str(demo_home / ".claude" / "projects")),
+    )
+    pipeline = IngestPipeline(db=db, config=scoped_config)
+    app = create_app(config=scoped_config, db=db, ingest_pipeline=pipeline)
+    return app, real_home, demo_home
+
+
+@pytest.fixture
+def scoped_client(scoped_app):
+    app, _, _ = scoped_app
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+async def _apply_status(client, app, target_path: str) -> int:
+    r = await client.post(
+        "/api/v1/relearn/apply", json=_apply_body(target_path),
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    return r.status_code
+
+
+async def test_scoped_run_accepts_its_own_in_scope_target(scoped_app, scoped_client):
+    """The exact write the UI suggests under a scoped root must be authorized.
+    404 (no such stored proposal) means the guard let it through — that is the
+    assertion; a 403 here is the bug this fixes."""
+    app, _, demo_home = scoped_app
+    in_scope = demo_home / ".claude" / "CLAUDE.md"
+    assert await _apply_status(scoped_client, app, str(in_scope)) == 404
+
+
+async def test_scoped_run_still_rejects_an_out_of_scope_target(scoped_app, scoped_client, tmp_path):
+    app, _, _ = scoped_app
+    outside = tmp_path / "elsewhere" / "CLAUDE.md"
+    assert await _apply_status(scoped_client, app, str(outside)) == 403
+    assert not outside.exists()
+
+
+async def test_scoped_run_rejects_a_path_under_the_real_home(scoped_app, scoped_client):
+    """Scoping is a narrowing, not a shift: the operator's real home is out of
+    bounds while a scope is in force. This is the half that makes 'Approve
+    never writes outside the intended scope' true."""
+    app, real_home, _ = scoped_app
+    real_target = real_home / ".claude" / "CLAUDE.md"
+    assert await _apply_status(scoped_client, app, str(real_target)) == 403
+    assert not real_target.exists()
+
+
+async def test_scoped_run_rejects_a_dot_dot_traversal_out_of_the_scope(scoped_app, scoped_client):
+    """`..` must be judged after resolution, not on the literal string — the
+    path below is textually inside the scope and actually outside it."""
+    app, _, demo_home = scoped_app
+    traversal = demo_home / ".claude" / ".." / ".." / "escaped" / "CLAUDE.md"
+    assert await _apply_status(scoped_client, app, str(traversal)) == 403
+    assert not traversal.resolve().exists()

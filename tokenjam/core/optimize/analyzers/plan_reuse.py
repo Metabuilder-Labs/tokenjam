@@ -37,7 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, Literal, NamedTuple
+from typing import Any, NamedTuple
 
 from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
 from tokenjam.core.optimize.registry import register
@@ -59,6 +59,31 @@ _MODE1_HINT = (
     "Clustering ran on tool-sequence signatures only. Set [capture] prompts = "
     "true in tj.toml to also match planning-prompt prefixes for narrower, more "
     "accurate clusters."
+)
+
+# Hint for the case the config toggle alone can never describe: capture is ON
+# and the analyzed window still carries no prompt text, so clustering silently
+# ran in the weaker mode. The usual cause is that the sessions were ingested
+# live before the live path carried prompt content, or that Claude Code was run
+# without OTEL_LOG_USER_PROMPTS=1 (see api/routes/logs.py).
+_CAPTURE_ON_NO_CONTENT_HINT = (
+    "[capture] prompts is on, but no planning call in this window carried "
+    "prompt text, so clustering ran on tool-sequence signatures only. Sessions "
+    "ingested live carry prompt text only when Claude Code ran with "
+    "OTEL_LOG_USER_PROMPTS=1; `tj backfill claude-code` recovers it from the "
+    "transcripts on disk."
+)
+
+# The partial case: prompt text was there for some planning calls and not
+# others, so the window's clusters were not all built the same way. Naming the
+# split is the point — a reader comparing two runs otherwise cannot tell a
+# fully content-matched result from one that was half tool-signature guesswork.
+_MIXED_CAPTURE_HINT = (
+    "Only some planning calls in this window carried prompt text; the rest "
+    "were clustered on tool-sequence signatures alone, so these clusters do "
+    "not all rest on the same evidence. Sessions ingested live carry prompt "
+    "text only when Claude Code ran with OTEL_LOG_USER_PROMPTS=1; "
+    "`tj backfill claude-code` recovers it from the transcripts on disk."
 )
 
 
@@ -107,6 +132,32 @@ _STRIP_SUBS = [(_PATH_RE, "<PATH>"), (_DATE_RE, "<DATE>"), (_NUM_RE, "<NUM>")]
 def _strip_variables(text: str) -> str:
     """Replace path-, date-, and number-looking spans with fixed placeholders."""
     return mask_variables(text, _STRIP_SUBS)
+
+
+def _basis_with_coverage(basis: str, with_prompt: int, total: int) -> str:
+    """Append the MEASURED prompt-capture coverage to the basis string.
+
+    A finding that degraded to a weaker signal has to say so where its figure
+    is explained, not only in a hint a renderer may drop: clustering on tool
+    sequences alone is coarser than clustering on tool sequences plus prompt
+    prefixes, and a reader comparing two runs cannot otherwise tell which one
+    they are looking at. Recomputed per window, never a stored constant.
+    """
+    if not total:
+        return basis
+    if with_prompt == total:
+        detail = "every planning call in the window carried prompt text"
+    elif with_prompt:
+        detail = (
+            f"{with_prompt} of {total} planning calls carried prompt text; the "
+            f"rest clustered on tool sequence alone"
+        )
+    else:
+        detail = (
+            "no planning call in the window carried prompt text, so clustering "
+            "ran on tool sequence alone"
+        )
+    return f"{basis} Capture coverage: {detail}."
 
 
 def _is_llm(row: _SpanRow) -> bool:
@@ -199,9 +250,12 @@ def run(ctx: AnalyzerContext) -> None:
     min_repetitions = getattr(
         optimize_cfg, "min_reuse_repetitions", MIN_REPETITIONS,
     )
-    capture_mode: Literal["tool_sequence_only", "with_prompt_prefix"] = (
-        "with_prompt_prefix" if prompts_captured else "tool_sequence_only"
-    )
+    # NOTE: `capture_mode` is NOT decided here. The config toggle says what the
+    # user asked for; the finding has to say what clustering actually ran on,
+    # and those diverged silently for as long as this field echoed the config —
+    # a report declared "with_prompt_prefix" while every cluster member's
+    # `prompt_prefix_hash` was None. It is derived below, after the planning
+    # calls have been read, from how many of them carried prompt text.
 
     # Single windowed query; all per-session walking happens in Python. No N+1.
     # Values are bound via DuckDB positional placeholders ($1, $2, ...). The
@@ -224,7 +278,7 @@ def run(ctx: AnalyzerContext) -> None:
     ).fetchall()
 
     finding = ReuseFinding(
-        capture_mode=capture_mode,
+        capture_mode="tool_sequence_only",
         hint="" if prompts_captured else _MODE1_HINT,
         min_repetitions=min_repetitions,
     )
@@ -256,6 +310,32 @@ def run(ctx: AnalyzerContext) -> None:
                 _prompt_prefix_hash(plan_row) if prompts_captured else None
             ),
         ))
+
+    # Measured, not configured: the share of planning calls that actually
+    # carried prompt text, and the mode clustering therefore really ran in.
+    # A window can be entirely live-ingested, or predate the live path
+    # carrying prompt content, and produce zero coverage with the toggle on.
+    with_prompt = sum(1 for p in plans if p.prompt_prefix_hash is not None)
+    finding.prompt_capture_coverage = (
+        round(with_prompt / len(plans), 4) if plans else None
+    )
+    if with_prompt and with_prompt == len(plans):
+        finding.capture_mode = "with_prompt_prefix"
+    elif with_prompt:
+        # Partly degraded. The prompt-free calls in this window were clustered
+        # on tool signature alone, so the window's clusters do not share one
+        # basis and no surface may present them as content-matched. Claiming
+        # the full mode here contradicted the basis string built two lines
+        # down, which has always said "the rest clustered on tool sequence
+        # alone".
+        finding.capture_mode = "mixed_prompt_prefix"
+        finding.hint = _MIXED_CAPTURE_HINT
+    elif prompts_captured and plans:
+        # Asked for, not delivered — the case the toggle alone cannot describe.
+        finding.hint = _CAPTURE_ON_NO_CONTENT_HINT
+    finding.estimate_basis = _basis_with_coverage(
+        finding.estimate_basis, with_prompt, len(plans),
+    )
 
     clusters_raw = _cluster_sessions(plans)
 
@@ -300,18 +380,22 @@ def run(ctx: AnalyzerContext) -> None:
 
     finding.clusters = surfaced
     if surfaced:
-        # Headline uses the script-replacement premise (a template/skill
-        # removes the planning call entirely: avg cost x reps) rather than
-        # the more conservative cache-reuse premise (avg cost x (reps - 1)) —
-        # both are legitimate readings of the same measured cluster, and the
-        # conservative figure stays available per-cluster as
-        # cache_reuse_recoverable_usd/_tokens. See REUSE_ESTIMATE_BASIS for
-        # which premise this total rests on.
-        finding.estimated_recoverable_usd = round(
-            sum(c.script_replacement_recoverable_usd for c in surfaced), 6
+        # Headline uses the CONSERVATIVE cache-reuse premise (a template only
+        # removes the re-plan delta: avg cost x (reps - 1)), not the
+        # script-replacement upper bound (avg cost x reps). The first planning
+        # call in a cluster had to happen — there was nothing to reuse yet —
+        # so the headline may not charge for it. This matters more now that
+        # every surface states these figures in the PAST tense ("this is what
+        # you already overspent"): "you wasted $X" where X includes necessary
+        # work is a claim a user can disprove on inspection, and on a
+        # 2-repetition cluster it is a 2x overclaim. The upper bound stays
+        # available per-cluster as script_replacement_recoverable_usd/_tokens
+        # for the template-authoring case. See REUSE_ESTIMATE_BASIS.
+        finding.past_overspend_usd = round(
+            sum(c.cache_reuse_recoverable_usd for c in surfaced), 6
         )
-        finding.estimated_recoverable_tokens = sum(
-            c.script_replacement_recoverable_tokens for c in surfaced
+        finding.past_overspend_tokens = sum(
+            c.cache_reuse_recoverable_tokens for c in surfaced
         )
 
     ctx.report.findings["reuse"] = finding

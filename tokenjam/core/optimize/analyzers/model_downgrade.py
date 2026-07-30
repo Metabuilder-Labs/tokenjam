@@ -1,10 +1,29 @@
 """
-Model-downgrade analyzer.
+Model-downgrade analyzer — "was this model the right ROLE for this session?"
 
-Flags sessions whose structural shape (short input, short output, few tool
-calls) matches a class of work where a cheaper model in the same provider
-family is worth reviewing. Never claims quality equivalence — only that the
-*shape* matches a class worth a closer look.
+Two cases, in order of how much they are worth:
+
+**Primary — the driver-role case.** A premium-tier model acting as the DRIVER
+of a long session, doing the reads and edits inline instead of routing them to
+cheap workers. Every turn it runs inline re-reads the whole accumulated context
+at the premium rate, so the material it introduces is billed again and again
+until the next compaction. See :func:`analyze_driver_role` and
+``analyzers/resend_tail.py`` for the tail arithmetic and the disjointness
+partition against ``resend``.
+
+**Secondary — the tiny-session case.** Sessions whose structural shape (short
+input, short output, few tool calls) matches a class of work where a cheaper
+model in the same provider family is worth reviewing. This was the analyzer's
+whole definition until it was measured against a real coding-agent corpus: over
+a 30-day window of 2,258 Claude Code sessions, 231 of them (10.2%) cleared the
+``SMALL_*`` gate — but those sessions carried $6.74 of $8,222.53 in main-thread
+spend, 0.082%, and only $4.81 of that had a cheaper same-family target at all.
+The gate is not unreachable; it selects sessions that are worth nothing. So it
+is kept (it is correct, just small) and demoted to a secondary contribution
+beside the driver-role case, which is where the money for this persona is.
+
+Neither case claims quality equivalence — only that the *shape* matches a class
+worth a closer look.
 """
 from __future__ import annotations
 
@@ -17,6 +36,14 @@ from tokenjam.core.context_diagnostic import (
     load_turn_compositions,
 )
 from tokenjam.core.model_tiers import is_premium_tier
+from tokenjam.core.optimize.analyzers.resend_tail import (
+    DRIVER_TOOL_FANOUT_FLOOR,
+    MIN_SESSION_CONTEXT_TOKENS,
+    main_thread_turns,
+    premium_driver_role,
+    tail_lengths,
+    tool_driven_stretch_mask,
+)
 from tokenjam.core.optimize.analyzers.batch_placement import (
     MIN_GROUP_COST_USD,
     MIN_SESSIONS_FOR_CADENCE,
@@ -27,22 +54,35 @@ from tokenjam.core.optimize.analyzers.downsize_agents import (
     build_agent_price_rows,
 )
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.span_pricing import price_span, rates_at, span_instant
 from tokenjam.core.optimize.stats import bootstrap_ci
 from tokenjam.core.optimize.types import (
     AnalyzerContext,
     DowngradeExample,
+    DriverRoleExample,
     DowngradeFinding,
     OpusAuditExample,
     OpusQuotaAudit,
 )
-from tokenjam.core.pricing import get_rates
 
-# Structural heuristic thresholds. Sessions are flagged only when ALL three
-# hold; the analyzer never claims the cheaper model would have produced the
-# same answer — it claims the *shape* matches a class of work worth reviewing.
+# Structural heuristic thresholds for the SECONDARY tiny-session case. Sessions
+# are flagged only when ALL three hold; the analyzer never claims the cheaper
+# model would have produced the same answer — it claims the *shape* matches a
+# class of work worth reviewing.
+#
+# Deliberately NOT loosened. Measured on a real coding-agent corpus these select
+# 10.2% of sessions carrying 0.082% of spend (see the module docstring): the
+# problem was never that the gate is too tight, it is that small sessions are
+# cheap. Widening it produces MORE cards rather than bigger ones, against the
+# standing don't-fill-the-inbox constraint; the driver-role case below is where
+# the money is.
 SMALL_INPUT_TOKENS = 5_000
 SMALL_OUTPUT_TOKENS = 500
 SMALL_TOOL_CALLS = 5
+
+# Cap on the number of spot-check example sessions carried on the driver-role
+# case, mirroring OPUS_AUDIT_MAX_EXAMPLES for the quota audit.
+DRIVER_MAX_EXAMPLES = 5
 
 # Per-TURN cheap-shape thresholds for the segment-level premium quota audit. A
 # turn is a fraction of a session, so these sit well below the session-level
@@ -69,17 +109,32 @@ OPUS_AUDIT_MAX_EXAMPLES = 5
 # Premium → cheaper alternative in the same provider family. Pricing for both
 # sides is resolved at runtime from pricing/models.toml; if either is missing
 # the candidate is silently skipped (we won't invent a savings number).
-# Premium-tier ladder: Fable → Sonnet and Opus → Haiku each drop two tiers, the
+# Premium-tier ladder (fable/mythos > opus > sonnet > haiku): Fable/Mythos and
+# Opus (4.x) each drop TWO tiers (to Sonnet and Haiku respectively), the
 # aggressive step justified because the quota audit only proposes these for
-# structurally tiny (Sonnet-shaped) sessions. Keep new premium families in sync
-# with tokenjam.core.model_tiers.PREMIUM_TIERS so every flagged session has a
-# real routing target.
+# structurally tiny (Sonnet-shaped) sessions. `claude-opus-5` is the one
+# exception, mapped only ONE tier down to `claude-sonnet-5`: it is also the
+# swap target subagent_rightsizing.py prices its own over_powered candidates
+# against (a full agent loop, not a tiny session, so it earns the narrower
+# step) — keeping both consumers of "what does opus-5 downgrade to" in
+# agreement matters more than matching the opus-4.x precedent. `claude-sonnet-5`
+# itself downgrades to haiku, same as sonnet-4.x. Keep new premium families in
+# sync with tokenjam.core.model_tiers.PREMIUM_TIERS so every flagged session
+# has a real routing target. `claude-mythos-5` used to be a cautionary example
+# of the two lists drifting: it had a row here and a rate in models.toml but no
+# "mythos" entry in model_tiers.TIER_SUBSTRINGS, so it was invisible to every
+# premium-gated flag and only the tiny-session case below (gated on membership
+# HERE, not on is_premium_tier) ever reached it. Both lists now carry it, and
+# `test_every_priced_model_resolves_to_a_tier` fails the next half-added family.
 DOWNGRADE_CANDIDATES: dict[str, dict[str, str]] = {
     "anthropic": {
         "claude-fable-5":    "claude-sonnet-4-6",
+        "claude-mythos-5":   "claude-sonnet-5",
+        "claude-opus-5":     "claude-sonnet-5",
         "claude-opus-4-8":   "claude-haiku-4-5",
         "claude-opus-4-7":   "claude-haiku-4-5",
         "claude-opus-4-6":   "claude-haiku-4-5",
+        "claude-sonnet-5":   "claude-haiku-4-5",
         "claude-sonnet-4-6": "claude-haiku-4-5",
         "claude-sonnet-4-5": "claude-haiku-4-5",
     },
@@ -163,15 +218,247 @@ _lookup_downgrade = lookup_downgrade
 
 
 def _alt_unit_cost(provider: str, original_model: str, alt_model: str,
-                   input_tokens: int, output_tokens: int, cache_tokens: int) -> float | None:
-    rates = get_rates(provider, alt_model)
-    if rates is None:
-        return None
-    return (
-        (input_tokens / 1_000_000) * rates.input_per_mtok
-        + (output_tokens / 1_000_000) * rates.output_per_mtok
-        + (cache_tokens / 1_000_000) * rates.cache_read_per_mtok
+                   input_tokens: int, output_tokens: int, cache_tokens: int,
+                   cache_write_tokens: int = 0, *,
+                   at: datetime) -> float | None:
+    """Cost of the given token mix priced at ``alt_model``, or ``None`` when the
+    alternative has no pricing data at ``at``.
+
+    Routes through :func:`tokenjam.core.optimize.span_pricing.price_span` — and
+    so through :func:`tokenjam.core.cost.calculate_cost`, the ONE place that
+    prices all four token classes (input, output, cache-read, cache-write) —
+    rather than hand-rolling the arithmetic here a second time. The hand-rolled
+    version used to price only input/output/cache-read, silently dropping
+    cache-write from the alternative side while the actual side (the
+    ``cost_usd`` column) already includes it; that asymmetry inflated every
+    savings figure derived from this function by the full cache-write cost of
+    the candidate. ``cache_write_tokens`` defaults to 0 for the one call site
+    (the per-turn quota-audit counterfactual) whose upstream aggregation does
+    not carry a cache-write figure at all — that is unchanged behaviour, not a
+    new omission.
+
+    ``at`` is the instant the ORIGINAL traffic ran, and is required. A
+    counterfactual priced at a different date than the traffic it replaces
+    would make the delta between them part rate-change and part model choice,
+    with nothing in the number to say which — and the old default (whatever
+    today's rate happened to be) made every historical window that way.
+
+    ``original_model`` is unused by the arithmetic (kept for call-site
+    readability / potential future per-model-pair overrides).
+    """
+    del original_model
+    return price_span(
+        provider, alt_model, at=at,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        cache_read_tokens=cache_tokens, cache_write_tokens=cache_write_tokens,
     )
+
+
+# ---------------------------------------------------------------------------
+# Primary case: a premium model in the DRIVER role
+# ---------------------------------------------------------------------------
+
+
+def _turns_by_session(
+    conn, since: datetime, until: datetime, agent_id: str | None,
+) -> dict[str, list[TurnComposition]]:
+    """Window turns grouped by session, ordered, with tool activity attached.
+
+    ``with_tool_activity=True`` is not optional here: ``tool_fanout`` and
+    ``delegates`` default to inert values without it, which would make every
+    premium session look like an undelegated tool-heavy one.
+    """
+    by_session: dict[str, list[TurnComposition]] = {}
+    for turn in load_turn_compositions(
+        conn, since, until, agent_id, ordered=True, with_tool_activity=True,
+    ):
+        by_session.setdefault(turn.session_id, []).append(turn)
+    return by_session
+
+
+DRIVER_ROLE_BASIS_TEMPLATE = (
+    "Sessions where a premium-tier model drove the whole session inline: it "
+    "never dispatched a subagent, ran {floor}+ main-thread tool calls, and "
+    "accumulated more than {ctx:,} tokens of context. Two exact arithmetic "
+    "halves over the turns inside a tool-driven stretch (a contiguous run of "
+    "turns that each ran at least one tool — the reads/searches/edits a worker "
+    "would have carried). (1) OFFLOAD: the uncached material those turns pulled "
+    "in — tool results, file contents — is re-read by every later main-thread "
+    "turn until the next compaction, billed at the premium cache-read rate; a "
+    "worker's tool output never enters the caller's context, so that tail is "
+    "removed. Only the pulled-in material is counted, never the assistant's own "
+    "output, because a worker's short conclusion does come back to the caller. "
+    "(2) TIER: those same turns' own input and output repriced at the "
+    "substitute worker tier ({substitutes}) instead of the premium driver's. "
+    "The two compound — where the work runs and what it runs on are "
+    "independent. The premium driver itself is left in place and is NOT "
+    "repriced: an interactive session must stay smart, so nothing here assumes "
+    "you downgrade your own thread. Disjoint by construction from the resend "
+    "card (which skips exactly these sessions) and from the subagent card "
+    "(these sessions dispatch no subagent, so they carry no subagent spans)."
+)
+
+
+class _DriverAgg:
+    """One flagged driver-role session's arithmetic, kept per session so the
+    example list and the confidence interval both describe real sessions."""
+
+    __slots__ = ("session_id", "agent_id", "provider", "model", "alt_model",
+                 "offload_usd", "tier_usd", "tokens", "turns", "stretch_turns",
+                 "tool_calls", "tail_tokens")
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self.agent_id = "unknown"
+        self.provider = ""
+        self.model = ""
+        self.alt_model = ""
+        self.offload_usd = 0.0
+        self.tier_usd = 0.0
+        self.tokens = 0
+        self.turns = 0
+        self.stretch_turns = 0
+        self.tool_calls = 0
+        self.tail_tokens = 0
+
+    @property
+    def recoverable_usd(self) -> float:
+        return self.offload_usd + self.tier_usd
+
+
+def _driver_session_arithmetic(
+    session_id: str,
+    main_turns: list[TurnComposition],
+    provider: str,
+    driver_model: str,
+    alt_model: str,
+    *,
+    window_start: datetime,
+) -> _DriverAgg | None:
+    """Price one flagged session's inline-vs-routed counterfactual.
+
+    ``None`` when the session carries no tool-driven stretch, or when no turn in
+    one had priced rates on both sides — we refuse to invent a savings number.
+
+    Both sides are resolved per turn at that turn's own timestamp, so the tier
+    gap is a gap between two models on one date rather than a gap that has
+    absorbed a price change. ``window_start`` is the fallback instant for a turn
+    with no recorded time; see :func:`span_pricing.span_instant`.
+    """
+    # No `offloadable_share`-style factor is applied here, and that is a
+    # deliberate difference in MECHANISM, not an omission — this case scopes by
+    # SELECTION rather than by a fraction.
+    #
+    # `context_resend` multiplies every main-thread turn's tail by a measured
+    # delegable-share proxy. This case instead prices only the turns `mask`
+    # admits: contiguous runs where each turn actually ran a tool, inside
+    # sessions `premium_driver_role` has already restricted to premium drivers
+    # that never delegated. That selection IS the delegability scope — the
+    # material claimed is the exploration/edit work a subagent would have
+    # carried, taken at full weight, with everything outside a stretch priced
+    # at nothing.
+    #
+    # So both analyzers scope the same quantity by different means: a fraction
+    # of a broad population there, all of a narrow one here. The difference is
+    # which structure each population offers to select on — resend's figure
+    # deliberately covers the sessions this gate REJECTS, where no contiguous
+    # tool-run signal is available to select with. Neither carries a
+    # realization or compliance discount, and adding one here would be a
+    # second, different claim rather than a consistency fix.
+    mask = tool_driven_stretch_mask(main_turns)
+    if not any(mask):
+        return None
+    lengths = tail_lengths(main_turns)
+
+    agg = _DriverAgg(session_id)
+    agg.provider = provider
+    agg.model = driver_model
+    agg.alt_model = alt_model
+    agg.turns = len(main_turns)
+    agg.tool_calls = sum(t.tool_fanout for t in main_turns)
+    priced_any = False
+
+    for i, turn in enumerate(main_turns):
+        if not mask[i]:
+            continue
+        at = span_instant(turn.start_time, window_start=window_start)
+        rates = rates_at(turn.provider or provider, turn.model, at)
+        alt_rates = rates_at(provider, alt_model, at)
+        if rates is None or alt_rates is None:
+            continue
+        priced_any = True
+        agg.stretch_turns += 1
+
+        # (1) OFFLOAD. Only `new_input_tokens` — the material this turn pulled
+        # INTO the thread (tool results, file contents, pasted context) — is
+        # counted as removed. The turn's own output is deliberately excluded:
+        # a subagent's short conclusion does return to the caller, so claiming
+        # its tail as well would be claiming a saving the fix does not deliver.
+        # That is the one place this case is strictly more conservative than
+        # `resend`'s own tail, which prices `new_input + output`.
+        tail_tokens = turn.new_input_tokens * lengths[i]
+        if rates.cache_read_per_mtok > 0:
+            agg.offload_usd += tail_tokens / 1_000_000 * rates.cache_read_per_mtok
+        agg.tail_tokens += tail_tokens
+
+        # (2) TIER. The same turns' own work, repriced at the worker tier. Both
+        # sides of the turn move: the worker reads the material at its own input
+        # rate and produces the output at its own output rate. Clamped at zero
+        # per rate so a pricing table where the "cheaper" model is dearer on one
+        # axis can never turn into a negative contribution.
+        agg.tier_usd += (
+            turn.new_input_tokens / 1_000_000
+            * max(0.0, rates.input_per_mtok - alt_rates.input_per_mtok)
+            + turn.output_tokens / 1_000_000
+            * max(0.0, rates.output_per_mtok - alt_rates.output_per_mtok)
+        )
+        agg.tokens += tail_tokens + turn.new_input_tokens + turn.output_tokens
+
+    if not priced_any or agg.recoverable_usd <= 0:
+        return None
+    return agg
+
+
+def analyze_driver_role(
+    turns_by_session: dict[str, list[TurnComposition]],
+    agent_by_session: dict[str, str],
+    *,
+    window_start: datetime,
+    tool_fanout_floor: int = DRIVER_TOOL_FANOUT_FLOOR,
+) -> list[_DriverAgg]:
+    """Flagged driver-role sessions, priced.
+
+    ``turns_by_session`` must come from ``load_turn_compositions(...,
+    ordered=True, with_tool_activity=True)`` — the ordering is what makes a
+    contiguous stretch meaningful, and ``tool_fanout`` / ``delegates`` are inert
+    without the tool-activity join.
+
+    The flag test itself is ``resend_tail.premium_driver_role``, shared with
+    ``context_resend`` so the two analyzers partition the same population
+    instead of each carrying its own copy of the thresholds.
+    """
+    flagged: list[_DriverAgg] = []
+    for session_id, session_turns in turns_by_session.items():
+        driver = premium_driver_role(
+            session_turns, tool_fanout_floor=tool_fanout_floor,
+        )
+        if driver is None:
+            continue
+        provider, driver_model = driver
+        if not provider:
+            continue
+        alt = lookup_downgrade(provider, driver_model)
+        if not alt:
+            continue
+        agg = _driver_session_arithmetic(
+            session_id, main_thread_turns(session_turns),
+            provider, driver_model, alt, window_start=window_start,
+        )
+        if agg is None:
+            continue
+        agg.agent_id = agent_by_session.get(session_id, "unknown")
+        flagged.append(agg)
+    return flagged
 
 
 def analyze_model_downgrade(
@@ -182,10 +469,24 @@ def analyze_model_downgrade(
     window_days: float,
 ) -> DowngradeFinding | None:
     """
-    Walk sessions in the window. For each:
+    Two cases, one finding (see the module docstring for why the split exists).
+
+    PRIMARY — the driver-role case. A per-turn walk that flags premium-tier
+    models driving long, undelegated, tool-heavy sessions and prices the
+    inline-vs-routed counterfactual. This is the case that carries the money for
+    a coding-agent corpus.
+
+    SECONDARY — the tiny-session case. Walk sessions in the window. For each:
       - aggregate input/output/cache tokens, tool count, cost, dominant model
       - if model is in DOWNGRADE_CANDIDATES and shape matches the heuristic,
         treat as a candidate and compute alternative cost
+
+    A session flagged by the driver-role case is EXCLUDED from the tiny-session
+    case. The two gates can both admit the same session — the ``SMALL_*`` gate
+    reads uncached ``input_tokens``, so a session with 3K of uncached input and
+    500K of cache reads clears it while still being a context-heavy driver
+    session — and both contribute to the one ``past_overspend_usd``, so
+    without the exclusion the finding would double-count against itself.
 
     The candidate aggregation is scoped to the MAIN THREAD (``sub_agent_id IS
     NULL``). Task-dispatched subagent turns live under the parent session id,
@@ -193,7 +494,7 @@ def analyze_model_downgrade(
     them (``sub_agent_id IS NOT NULL``, per (session, subagent)). Without this
     filter the two analyzers claim the same tokens under two structurally
     different signatures (``cost:downsize:<agent>`` and
-    ``cost:subagent[:<name>]``), which ``estimated_recoverable_rollup``'s
+    ``cost:subagent[:<name>]``), which ``past_overspend_rollup``'s
     dedup-by-signature cannot catch — so the Review-inbox headline came out
     inflated by the overlap. Same class of guard as
     ``cost_proposals._per_agent_cache_recoverable_by_model`` provides for the
@@ -230,6 +531,17 @@ def analyze_model_downgrade(
 
     if not llm_rows:
         return None
+
+    # PRIMARY case first: its flagged sessions are excluded from the
+    # tiny-session loop below, so it has to run before that loop, not after.
+    agent_by_session = {
+        str(r[0]): (str(r[2]) if r[2] else "unknown") for r in llm_rows if r[0]
+    }
+    driver_aggs = analyze_driver_role(
+        _turns_by_session(conn, since, until, agent_id), agent_by_session,
+        window_start=since,
+    )
+    driver_sessions = {a.session_id for a in driver_aggs}
 
     # Tool span counts per session (separate query — tool spans have model=NULL).
     # Main thread only, matching the aggregation above: a subagent's own tool
@@ -277,6 +589,11 @@ def analyze_model_downgrade(
             in_tok, out_tok, cache_tok, cache_write_tok, cost = row
         if not provider or not model:
             continue
+        if session_id in driver_sessions:
+            # Already claimed, in full, by the driver-role case above. Both
+            # cases feed one `past_overspend_usd`, so a session admitted
+            # by both gates would be counted twice against itself.
+            continue
         alt = _lookup_downgrade(provider, model)
         if not alt:
             continue
@@ -288,7 +605,14 @@ def analyze_model_downgrade(
         ):
             continue
 
-        alt_unit = _alt_unit_cost(provider, model, alt, int(in_tok), int(out_tok), int(cache_tok))
+        # Priced at this session's own start, not today: the row is a
+        # per-session aggregate, and a session is short enough that its start is
+        # inside whatever rate era billed all of it.
+        alt_unit = _alt_unit_cost(
+            provider, model, alt, int(in_tok), int(out_tok), int(cache_tok),
+            int(cache_write_tok or 0),
+            at=span_instant(start_time, window_start=since),
+        )
         if alt_unit is None:
             # No pricing data for the alternative — refuse to invent a savings number.
             continue
@@ -313,6 +637,7 @@ def analyze_model_downgrade(
             "output_tokens": int(out_tok or 0),
             "cache_tokens": int(cache_tok or 0),
             "cache_write_tokens": int(cache_write_tok or 0),
+            "started_at": start_time,
         })
         suggestions[model] = alt
         if (provider, model, alt) not in swaps:
@@ -334,12 +659,18 @@ def analyze_model_downgrade(
                 cost_usd=float(cost or 0.0),
             ))
 
-    if candidate_sessions == 0:
+    if candidate_sessions == 0 and not driver_aggs:
         return None
 
     savings_window = max(actual_cost - alt_cost, 0.0)
-    monthly_savings = (savings_window / window_days * 30.0) if window_days > 0 else 0.0
+    driver_savings = sum(a.recoverable_usd for a in driver_aggs)
+    driver_tokens = sum(a.tokens for a in driver_aggs)
+    total_savings = savings_window + driver_savings
+    monthly_savings = (total_savings / window_days * 30.0) if window_days > 0 else 0.0
     percent = (candidate_sessions / total_sessions * 100.0) if total_sessions else 0.0
+    # The confidence interval brackets what the card actually shows, so it has
+    # to resample BOTH cases' per-session values, not just the tiny-session one.
+    per_session_savings.extend(a.recoverable_usd for a in driver_aggs)
 
     # Sampling confidence on the monthly projection (#308). Resample the
     # candidate sessions with replacement and recompute the projected monthly
@@ -367,10 +698,47 @@ def analyze_model_downgrade(
         thinking_tokens_by_session(
             conn, since, until, agent_id, main_thread_only=True,
         ),
+        window_start=since,
     )
 
     commands = [f"tjb run --original {p}:{orig} --candidate {p}:{alt}" for p, orig, alt in swaps]
     bench_command = "\n".join(commands) if commands else None
+
+    # Driver-role rollup. `driver_substitutes` names the worker tier every
+    # flagged driver would have routed to, which is what the basis string has to
+    # state: a counterfactual whose substitute is unnamed is not inspectable.
+    driver_substitutes: dict[str, str] = {}
+    for a in driver_aggs:
+        driver_substitutes[a.model] = a.alt_model
+    driver_ordered = sorted(
+        driver_aggs, key=lambda a: a.recoverable_usd, reverse=True,
+    )
+    driver_examples = [
+        DriverRoleExample(
+            session_id=a.session_id,
+            agent_id=a.agent_id,
+            model=a.model,
+            alt_model=a.alt_model,
+            turns=a.turns,
+            stretch_turns=a.stretch_turns,
+            tool_calls=a.tool_calls,
+            tail_tokens=a.tail_tokens,
+            offload_usd=round(a.offload_usd, 6),
+            tier_usd=round(a.tier_usd, 6),
+            recoverable_usd=round(a.recoverable_usd, 6),
+        )
+        for a in driver_ordered[:DRIVER_MAX_EXAMPLES]
+    ]
+    driver_basis = (
+        DRIVER_ROLE_BASIS_TEMPLATE.format(
+            floor=DRIVER_TOOL_FANOUT_FLOOR,
+            ctx=MIN_SESSION_CONTEXT_TOKENS,
+            substitutes=", ".join(
+                f"{m} -> {alt}" for m, alt in sorted(driver_substitutes.items())
+            ) or "none priced",
+        )
+        if driver_aggs else ""
+    )
 
     return DowngradeFinding(
         candidate_sessions=candidate_sessions,
@@ -386,20 +754,14 @@ def analyze_model_downgrade(
         window_total_tokens=window_total_tokens,
         percent_of_tokens=round(percent_tokens, 1),
         monthly_tokens_in_candidates=monthly_tokens_in_candidates,
-        # Recoverable-savings contract (#111). Use the WINDOW savings (not the
-        # 30-day projection) so every analyzer's estimated_recoverable_usd shares
-        # one time basis — "recoverable over the analyzed window" — and the
-        # Overview/Optimize tiles are directly comparable (#122). This module's
-        # OWN `monthly_savings_usd` / `monthly_tokens_in_candidates` are a SECOND,
-        # separately-named basis (a 30-day linear projection) that the Review
-        # inbox's cost-advisories tab reads directly (surfaced onto
-        # `CostProposal.estimated_monthly_usd`/`estimated_monthly_tokens` — see
-        # `cost_proposals._downsize_to_proposal`); every other cost-advisory
-        # analyzer gets the same 30-day basis via a generic window-days
-        # extrapolation applied once in `cost_proposals_from_report`, since
-        # they don't compute their own monthly figure. Two bases, two
-        # explicitly-named surfaces: Overview/Optimize stay window-scoped,
-        # the Review inbox is always monthly. Never mix the two on one card.
+        # THE canonical field (see the field contract in the repo CLAUDE.md).
+        # The WINDOW savings, never the 30-day projection, so this analyzer's
+        # figure sits on the same time basis as every other analyzer's and a
+        # sum across them means something. This module's OWN
+        # `monthly_savings_usd` / `monthly_tokens_in_candidates` survive for
+        # the CLI's `tj optimize` line only; they reach NO cost card, NO
+        # payload, and NO aggregate. Routing a paced figure onto a card is the
+        # exact defect the field collapse removed — do not re-open it.
         #
         # Deliberately session-scoped, not turn-scoped: `audit_opus_quota`
         # below also computes a cheap-segment / mechanical-stretch dollar
@@ -426,16 +788,43 @@ def analyze_model_downgrade(
         # product decision beyond a bug fix — see CLAUDE.md anti-pattern #18
         # (a ticket's Where: line is the scope boundary, not an "approved
         # design" narrative to redesign a whole subsystem from).
-        estimated_recoverable_usd=round(savings_window, 6),
-        estimated_recoverable_tokens=candidate_tokens,
+        #
+        # BOTH cases sum into this one field. They are disjoint by
+        # construction: a driver-flagged session is skipped by the
+        # tiny-session loop above, and the two never price the same span.
+        past_overspend_usd=round(total_savings, 6),
+        past_overspend_tokens=candidate_tokens + driver_tokens,
         estimate_basis=(
-            "candidate sessions routed to a cheaper model over the window — "
-            "structural fit only, no quality validation"
+            (
+                "PRIMARY (premium model in the driver role): " + driver_basis
+                + " "
+            ) if driver_basis else ""
+        ) + (
+            (
+                "SECONDARY (structurally tiny sessions): candidate sessions "
+                "routed to a cheaper model over the window — structural fit "
+                "only, no quality validation."
+            ) if candidate_sessions else ""
         ),
-        n_sessions=candidate_sessions,
+        n_sessions=candidate_sessions + len(driver_aggs),
         ci_low=ci_low,
         ci_high=ci_high,
         per_agent=per_agent,
+        driver_sessions=len(driver_aggs),
+        driver_recoverable_usd=round(driver_savings, 6),
+        driver_offload_usd=round(sum(a.offload_usd for a in driver_aggs), 6),
+        driver_tier_usd=round(sum(a.tier_usd for a in driver_aggs), 6),
+        driver_tokens=driver_tokens,
+        driver_tail_tokens=sum(a.tail_tokens for a in driver_aggs),
+        driver_substitutes=driver_substitutes,
+        driver_examples=driver_examples,
+        driver_estimate_basis=driver_basis,
+        # Per-session breakdown of `driver_tokens` above (they sum to it),
+        # carried so the rule this card proposes can be placed in the projects
+        # that actually incurred it — see `DowngradeFinding.driver_session_tokens`.
+        driver_session_tokens={
+            str(a.session_id): int(a.tokens) for a in driver_aggs if a.session_id
+        },
     )
 
 
@@ -577,10 +966,15 @@ class _SessionAgg:
     spot-check example list (largest-quota first)."""
 
     __slots__ = ("session_id", "quota_by_model", "quota", "new_input",
-                 "output", "reread", "tool_calls", "cost")
+                 "output", "reread", "tool_calls", "cost", "first_turn_at")
 
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
+        # Earliest flagged turn in this session — the instant the counterfactual
+        # below is priced at. Carried on the aggregate because the aggregate is
+        # what gets priced: without it the dollar figure would fall back to
+        # today's rate for traffic that ran weeks ago.
+        self.first_turn_at: datetime | None = None
         # (provider, model) -> flagged premium quota, so the example reports the
         # model that actually carried the most misallocated quota in this session
         # rather than freezing on whichever premium turn happened to appear first
@@ -690,6 +1084,10 @@ def audit_opus_quota(
                 agg.reread += t.reread_tokens
                 agg.tool_calls += t.tool_fanout
                 agg.cost += t.cost_usd
+                if t.start_time is not None and (
+                    agg.first_turn_at is None or t.start_time < agg.first_turn_at
+                ):
+                    agg.first_turn_at = t.start_time
                 key = (t.provider, t.model)
                 agg.quota_by_model[key] = (
                     agg.quota_by_model.get(key, 0.0) + t.quota_weighted_tokens
@@ -707,7 +1105,7 @@ def audit_opus_quota(
     # Secondary API-only implied-dollar counterfactual, aggregated over the
     # flagged premium turns and priced at each session's dominant premium model's
     # cheaper alternative (never the headline). Deliberately never folded into
-    # `analyze_model_downgrade`'s `DowngradeFinding.estimated_recoverable_usd`
+    # `analyze_model_downgrade`'s `DowngradeFinding.past_overspend_usd`
     # (the `tj optimize` downsize card) — see the comment on that assignment
     # for why the two stay separate.
     for agg in aggs.values():
@@ -719,6 +1117,7 @@ def audit_opus_quota(
         assert provider is not None
         alt_unit = _alt_unit_cost(
             provider, model, alt, agg.new_input, agg.output, agg.reread,
+            at=span_instant(agg.first_turn_at, window_start=since),
         )
         if alt_unit is not None:
             actual_cost += agg.cost
@@ -738,7 +1137,7 @@ def audit_opus_quota(
     audit.actual_cost_usd = round(actual_cost, 6)
     audit.alternative_cost_usd = round(alt_cost, 6)
 
-    # Confidence interval on the HEADLINE PERCENT (design §6, founder D3). Each
+    # Confidence interval on the HEADLINE PERCENT (design §6, D3). Each
     # flagged segment contributes its premium-quota value; scaling the resampled
     # SUM by 100/premium_quota turns the bootstrap into an interval on the share.
     # Resampling segments (not sessions) widens the band honestly when the

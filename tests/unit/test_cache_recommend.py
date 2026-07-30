@@ -300,11 +300,11 @@ def test_candidate_and_finding_carry_a_priced_recoverable_estimate(db):
     finding = report.findings["cache-recommend"]
     c = finding.candidates[0]
     assert c.model == "claude-sonnet-4-6"
-    assert c.estimated_recoverable_usd is not None
-    assert c.estimated_recoverable_usd > 0
-    assert c.estimated_recoverable_tokens == c.estimated_cacheable_tokens * (c.occurrences - 1)
-    assert finding.estimated_recoverable_usd == pytest.approx(c.estimated_recoverable_usd)
-    assert finding.estimated_recoverable_tokens == c.estimated_recoverable_tokens
+    assert c.past_overspend_usd is not None
+    assert c.past_overspend_usd > 0
+    assert c.past_overspend_tokens == c.estimated_cacheable_tokens * (c.occurrences - 1)
+    assert finding.past_overspend_usd == pytest.approx(c.past_overspend_usd)
+    assert finding.past_overspend_tokens == c.past_overspend_tokens
     assert finding.estimate_basis
 
 
@@ -322,10 +322,10 @@ def test_no_dollar_figure_for_unpriced_model(db):
     finding = report.findings["cache-recommend"]
     c = finding.candidates[0]
     assert c.model == "totally-unpriced-model-xyz"
-    assert c.estimated_recoverable_usd is None
-    assert c.estimated_recoverable_tokens is None
-    assert finding.estimated_recoverable_usd is None
-    assert finding.estimated_recoverable_tokens is None
+    assert c.past_overspend_usd is None
+    assert c.past_overspend_tokens is None
+    assert finding.past_overspend_usd is None
+    assert finding.past_overspend_tokens is None
 
 
 # -- CLI rendering respects pricing_mode --

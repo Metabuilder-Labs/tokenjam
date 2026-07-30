@@ -431,3 +431,35 @@ def test_run_does_not_attribute_project_file_for_mismatched_repo(db, monkeypatch
     finding = report.findings["trim"]
     assert finding.prompts_with_provenance == 0
     assert finding.per_prompt[0].source_path is None
+
+
+def test_per_prompt_carries_a_priced_dollar_figure_alongside_tokens(db, monkeypatch):
+    """BloatPrompt used to carry only estimated_token_reduction (tokens), with
+    no dollar counterpart even though the finding-level aggregate is priced —
+    a dollars+tokens gap. It should now carry estimated_cost_reduction_usd,
+    priced at the same window-average input rate the aggregate uses, whenever
+    a priced model was observed."""
+    text = "important " + ("filler " * 40) + "important"
+    scores = (
+        [("important", 0.9)]
+        + [("filler", 0.1)] * 40
+        + [("important", 0.9)]
+    )
+    _install_fake_llmlingua(monkeypatch, scores)
+    _seed_prompt(db, text=text, count=3)
+    config = _config(prompts=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["trim"])
+    finding = report.findings["trim"]
+    p = finding.per_prompt[0]
+    assert p.estimated_token_reduction > 0
+    assert p.estimated_cost_reduction_usd is not None
+    assert p.estimated_cost_reduction_usd > 0
+    # The per-prompt rate must match the finding-level aggregate's rate (same
+    # window-average input rate, not two independently-derived numbers).
+    implied_rate = finding.past_overspend_usd / finding.past_overspend_tokens
+    assert p.estimated_cost_reduction_usd / p.estimated_token_reduction == pytest.approx(
+        implied_rate, rel=1e-6,
+    )

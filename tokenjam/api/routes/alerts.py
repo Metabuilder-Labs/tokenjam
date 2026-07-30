@@ -29,9 +29,13 @@ async def get_alerts(
         typ = AlertType(type) if type else None
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid type: {type!r}")
+    try:
+        since_dt = parse_since(since) if since else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     filters = AlertFilters(
         agent_id=agent_id,
-        since=parse_since(since) if since else None,
+        since=since_dt,
         severity=sev,
         type=typ,
         unread=unread,

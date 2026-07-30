@@ -76,6 +76,28 @@ class ApiBackend:
         resp.raise_for_status()
         return resp.json()
 
+    def _post(self, path: str, body: dict) -> dict:
+        """POST `body` as JSON to `path` and return the parsed JSON response."""
+        resp = self.client.post(path, json=body)
+        resp.raise_for_status()
+        return resp.json()
+
+    def fetch_ingested_session_ids(self, session_ids: list[str]) -> set[str]:
+        """Subset of `session_ids` present in the daemon's sessions table.
+
+        The serve-mode counterpart to `transcript_sync._ingested_session_ids`'s
+        direct SQL anti-join: when `tj serve` holds the DB write-lock the CLI
+        gets an `ApiBackend` with no `.conn`, so `tj backfill status` reported
+        `0 already ingested` on a fully-ingested install (#642). Routes the same
+        anti-join through the daemon that owns the connection.
+        """
+        if not session_ids:
+            return set()
+        data = self._post(
+            "/api/v1/sessions/ingested-ids", {"session_ids": session_ids}
+        )
+        return {str(s) for s in data.get("ingested", [])}
+
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
         params: dict[str, str | int] = {"limit": filters.limit, "offset": filters.offset}
         if filters.agent_id:
@@ -107,8 +129,28 @@ class ApiBackend:
         ]
 
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
+        # No ?attributes=false -> the route defaults to FULL spans, so the shim
+        # reconstructs complete spans (attributes intact) exactly as the DuckDB
+        # backend does. The light waterfall payload is opt-in and used only by
+        # the Lens UI (#653); do NOT add attributes=false here or exports and
+        # every other complete-span consumer silently lose captured content.
         data = self._get(f"/api/v1/traces/{trace_id}")
         return [_dict_to_span(s) for s in data.get("spans", [])]
+
+    def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None:
+        """Targeted single-span fetch over the daemon (#653).
+
+        Mirrors DuckDBBackend.get_span: hits the single-span endpoint (a WHERE
+        span_id=? lookup server-side) rather than pulling the whole trace.
+        Returns None on 404 so the route's 404-on-unknown contract holds.
+        """
+        try:
+            data = self._get(f"/api/v1/traces/{trace_id}/spans/{span_id}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        return _dict_to_span(data)
 
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]:
         params: dict[str, str] = {}
@@ -120,6 +162,14 @@ class ApiBackend:
             params["until"] = filters.until.isoformat()
         if filters.group_by:
             params["group_by"] = filters.group_by
+        if filters.tenant_id:
+            params["tenant_id"] = filters.tenant_id
+        if filters.feature:
+            params["feature"] = filters.feature
+        if filters.environment:
+            params["environment"] = filters.environment
+        if filters.prompt_version:
+            params["prompt_version"] = filters.prompt_version
         data = self._get("/api/v1/cost", params)
         return [
             CostRow(
@@ -155,6 +205,27 @@ class ApiBackend:
             params["agent_id"] = agent_id
         data = self._get("/api/v1/cost", params)
         return data.get("framing")
+
+    def fetch_pricing_coverage(
+        self, *, since: str = "7d", agent_id: str | None = None,
+    ) -> dict | None:
+        """Return the `pricing_coverage` block from /api/v1/cost.
+
+        `tj cost` names any model priced at the flat default rate, so a cost
+        figure that was guessed does not read identically to one backed by a
+        published rate. That check needs a direct DuckDB handle, which the CLI
+        does not have while the daemon holds the lock — the mode most users
+        actually run in — so it reuses the block the API already computes.
+        Without this the warning simply never appeared on the daemon path.
+
+        Returns None if the response carries no block; the caller must treat
+        that as UNMEASURED, never as "nothing unpriced".
+        """
+        params: dict[str, str] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        data = self._get("/api/v1/cost", params)
+        return data.get("pricing_coverage")
 
     def get_alerts(self, filters: AlertFilters) -> list[Alert]:
         params: dict[str, str | int | bool] = {}

@@ -4,6 +4,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
@@ -26,6 +27,22 @@ logger = logging.getLogger("tokenjam.ingest")
 # queue is full, _enqueue_hook drops the OLDEST queued span (see its docstring)
 # and logs the drop — post-ingest hooks are advisory, so newest telemetry wins.
 HOOK_QUEUE_MAXSIZE = 10_000
+
+# Cap on the per-process record of calls suppressed as duplicates (see
+# IngestPipeline._is_duplicate_observation). Each entry is a small tuple key
+# and an int, and only a call an OTHER ingest source already recorded ever
+# lands here, so the map stays tiny in practice; the cap exists so a pathological
+# stream cannot grow it without bound. Oldest entries are dropped on overflow —
+# losing one only costs the exactness of that call's remaining budget, and the
+# budget is re-derived from the store on the next arrival.
+DUPLICATE_SUPPRESSION_MEMO_MAXSIZE = 10_000
+
+# How long a negative "no other ingest source has written here" answer is
+# trusted before it is re-asked. Only the NEGATIVE answer is cached: it is the
+# one that skips work, and it is the one that can go stale (a backfill can run
+# at any time). Staleness costs at most this much suppression, which
+# `tj doctor --repair` then collapses — never a lost span.
+_OTHER_SOURCE_PROBE_INTERVAL_S = 60.0
 
 
 class SpanRejectedError(Exception):
@@ -95,6 +112,15 @@ _REQUEST_PARAM_ATTRS: tuple[str, ...] = (
     GenAIAttributes.REQUEST_SEED,
 )
 
+# Billing-relevant request metadata. Projected into request_params like the
+# sampling params above, but deliberately NOT listed in the block that
+# strip_captured_content drops with the `prompts` toggle: it names which PRICE
+# applied (fast mode bills the same model id at a premium), so dropping it would
+# silently halve the recorded cost of every fast call.
+_RATE_VARIANT_ATTRS: tuple[str, ...] = (
+    TjAttributes.REQUEST_SPEED,
+)
+
 
 def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
     """Remove prompt/completion/tool content from attributes based on capture config.
@@ -143,7 +169,7 @@ def extract_request_capture(span: NormalizedSpan) -> None:
     request_params / request_tools columns.
     """
     params: dict[str, Any] = {}
-    for key in _REQUEST_PARAM_ATTRS:
+    for key in _REQUEST_PARAM_ATTRS + _RATE_VARIANT_ATTRS:
         if key in span.attributes:
             # Store under the short param name (strip the gen_ai.request. prefix).
             params[key.rsplit(".", 1)[-1]] = span.attributes.pop(key)
@@ -196,6 +222,19 @@ class IngestPipeline:
         self._shutdown_event = threading.Event()
         self._hook_dropped = 0  # count of spans dropped on queue overflow
 
+        # Calls this process has already suppressed as another source's
+        # restatement, keyed (session_id, call fingerprint). A suppressed
+        # observation is never stored, so without this the same duplicate
+        # budget would be spent again on the next arrival and a genuinely
+        # repeated call would be dropped. See accounting.duplicate_budget.
+        self._suppressed_calls: dict[tuple[str, str], int] = {}
+        self._duplicates_suppressed = 0
+        # Cached answer to "is there any other observer's span in this store at
+        # all", so a machine that only ever ingests live pays one scan per
+        # `_OTHER_SOURCE_PROBE_INTERVAL_S` instead of a lookup per LLM span.
+        self._other_source_seen: bool | None = None
+        self._other_source_checked_at = 0.0
+
     def process(self, span: NormalizedSpan) -> None:
         """
         Full ingest pipeline for one span:
@@ -222,6 +261,22 @@ class IngestPipeline:
 
         # Normalize agent_id so spans and sessions always agree
         span.agent_id = span.agent_id or "unknown"
+
+        # 3b. Drop an observation another ingest path already recorded. The
+        # same LLM call reaches the store twice whenever a session is both
+        # observed live and backfilled from its transcript: each path mints its
+        # own span_id, so span_id-keyed idempotency never sees the overlap and
+        # every cost figure prices the call twice. Suppressing here keeps the
+        # correction in ONE place — every downstream SUM stays a plain SUM, and
+        # the two paths agree whichever order they arrive in.
+        if self._is_duplicate_observation(span):
+            self._duplicates_suppressed += 1
+            logger.debug(
+                "suppressed duplicate observation of an already-ingested call "
+                "(session=%s model=%s); %d suppressed so far",
+                span.session_id, span.model, self._duplicates_suppressed,
+            )
+            return
 
         # 4. Write span
         self.db.insert_span(span)
@@ -269,6 +324,89 @@ class IngestPipeline:
 
         # 6. Post-ingest hooks (never let hook errors kill the pipeline)
         self._run_hooks(span)
+
+    def _is_duplicate_observation(self, span: NormalizedSpan) -> bool:
+        """True when another ingest source already recorded this exact call.
+
+        Only ever fires on a priced LLM call span in a known session: a tool or
+        marker span carries no money, and the fingerprint is a claim about
+        billed shape. The check is deliberately asymmetric — it collapses two
+        observations that came from DIFFERENT sources and never two from the
+        same one, because one observer seeing the same shape twice saw two real
+        calls (see `accounting.call_fingerprint`).
+
+        Best-effort by design: any backend without a queryable connection, or
+        any failure in the lookup, means the span is written. Losing a real call
+        under-reports spend, so an unanswerable question resolves to "keep".
+        """
+        if span.name != GenAIAttributes.SPAN_LLM_CALL:
+            return False
+        if not span.session_id or span.model is None or span.tool_name:
+            return False
+        conn = getattr(self.db, "conn", None)
+        if conn is None:
+            return False
+
+        from tokenjam.core.db import stored_observations_of_call
+        from tokenjam.core.optimize import accounting
+
+        own_source = accounting.ingest_source(span.attributes)
+        if not self._another_source_has_written(conn, own_source):
+            return False
+
+        try:
+            stored = stored_observations_of_call(
+                conn, span.session_id, span.model,
+                span.input_tokens or 0, span.output_tokens or 0,
+                span.cache_tokens or 0, span.cache_write_tokens or 0,
+            )
+        except Exception as exc:  # never let the guard break the ingest
+            logger.warning("duplicate-observation check skipped: %s", exc)
+            return False
+        if not stored:
+            return False
+
+        key = (
+            span.session_id,
+            accounting.call_fingerprint(
+                span.session_id, span.model,
+                span.input_tokens or 0, span.output_tokens or 0,
+                span.cache_tokens or 0, span.cache_write_tokens or 0,
+            ),
+        )
+        already = self._suppressed_calls.get(key, 0)
+        if accounting.duplicate_budget(stored, own_source, already) <= 0:
+            return False
+
+        if len(self._suppressed_calls) >= DUPLICATE_SUPPRESSION_MEMO_MAXSIZE:
+            self._suppressed_calls.pop(next(iter(self._suppressed_calls)), None)
+        self._suppressed_calls[key] = already + 1
+        return True
+
+    def _another_source_has_written(self, conn, own_source: str) -> bool:
+        """Whether a duplicate could exist in this store at all, cached.
+
+        The per-call lookup is a scan, so on a machine that only ever receives
+        live telemetry it would be paid once per LLM span to learn nothing.
+        Only the NEGATIVE answer is cached and only briefly: a positive answer
+        cannot become false (spans are not un-ingested here), while a negative
+        one goes stale the moment a backfill runs.
+        """
+        if self._other_source_seen:
+            return True
+        now = time.monotonic()
+        if (self._other_source_seen is not None
+                and now - self._other_source_checked_at < _OTHER_SOURCE_PROBE_INTERVAL_S):
+            return False
+        from tokenjam.core.db import has_spans_from_another_source
+
+        try:
+            self._other_source_seen = has_spans_from_another_source(conn, own_source)
+        except Exception as exc:  # never let the guard break the ingest
+            logger.warning("duplicate-observation probe skipped: %s", exc)
+            self._other_source_seen = False
+        self._other_source_checked_at = now
+        return bool(self._other_source_seen)
 
     @staticmethod
     def _is_session_end(span: NormalizedSpan) -> bool:

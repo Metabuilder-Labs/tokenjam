@@ -9,7 +9,7 @@ from tokenjam.utils.formatting import console, make_table
 
 @click.group("pricing", invoke_without_command=False)
 def cmd_pricing() -> None:
-    """Inspect the resolved model pricing table (read-only)."""
+    """Inspect the model pricing table."""
 
 
 @cmd_pricing.command("list")

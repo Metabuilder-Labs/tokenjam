@@ -63,7 +63,7 @@ def write_attribution_cache(
             "inclusion_type": inclusion_type,
             "computed_at": utcnow().isoformat(),
         }))
-    except Exception:  # noqa: BLE001 - a cache write must never break ingest
+    except Exception:  # a cache write must never break ingest
         pass
 
 
@@ -97,7 +97,7 @@ def read_attribution_cache(
         if age is None or age > max_age_seconds:
             return None
         return data
-    except Exception:  # noqa: BLE001 - fail-safe read for the statusline hook
+    except Exception:  # fail-safe read for the statusline hook
         return None
 
 
@@ -115,7 +115,7 @@ def format_driver(*, path: Path | None = None) -> tuple[str | None, str | None]:
     """
     try:
         cached = read_attribution_cache(path=path)
-    except Exception:  # noqa: BLE001 - a display helper must never raise
+    except Exception:  # a display helper must never raise
         return None, None
     if not cached:
         return None, None
@@ -151,7 +151,7 @@ def _age_seconds(computed_at: str) -> float | None:
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=now.tzinfo)
         return (now - ts).total_seconds()
-    except Exception:  # noqa: BLE001
+    except Exception:  # 1
         return None
 
 
@@ -191,7 +191,7 @@ def refresh_attribution_cache(
             _short_label(top), top.occurrences, top.sessions,
             top.inclusion_type, path=path,
         )
-    except Exception:  # noqa: BLE001 - must never break the ingest it follows
+    except Exception:  # must never break the ingest it follows
         pass
 
 

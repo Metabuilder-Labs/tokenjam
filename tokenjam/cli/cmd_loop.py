@@ -47,7 +47,7 @@ def _outcome_style(outcome: str) -> str:
 
 @click.group("loop")
 def cmd_loop() -> None:
-    """Close the loop: annotate runs, promote expectations, track fix-history."""
+    """Annotate runs and track fix outcomes."""
 
 
 @cmd_loop.command("annotate")

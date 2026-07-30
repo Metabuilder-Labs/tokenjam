@@ -162,8 +162,6 @@ def test_quota_audit_parity(tmp_path, monkeypatch):
     assert d_audit.opus_sessions == 3
     assert d_framing.pricing_mode == "subscription"
     # The renamed headline key is present on both paths, and the deprecated
-    # 0.5.4 alias mirrors it byte-for-byte (so parity holds while it lives).
     assert "percent_quota_misallocated" in d_payload
-    assert d_payload["percent_quota_reclaimable"] == \
-        d_payload["percent_quota_misallocated"]
+    assert "percent_quota_reclaimable" not in d_payload
     db.close()

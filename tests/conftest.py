@@ -94,3 +94,23 @@ def _tj_guard_real_home_db(monkeypatch):
         original_init(self, config)
 
     monkeypatch.setattr(db_mod.DuckDBBackend, "__init__", _guarded_init)
+
+
+@pytest.fixture(autouse=True)
+def _tj_isolated_analyzer_report_store(tmp_path, monkeypatch):
+    """Give every test its own analyzer-report store.
+
+    `report_store.default_report_path` resolves off `storage.path`'s parent, so
+    two tests that both build a default `TjConfig` share one file under the
+    session-wide fake HOME. That makes cold-vs-warm assertions order-dependent:
+    a test asserting the COLD state ("nothing computed yet") would pass alone
+    and fail after any earlier test warmed the store. Since the cold state is
+    load-bearing here — a cold store must never render as a zero or an absence
+    claim — the isolation has to be per-test, not per-session.
+    """
+    from tokenjam.core.optimize import report_store
+
+    store = tmp_path / "optimize_report.json"
+    monkeypatch.setattr(
+        report_store, "default_report_path", lambda config=None: store,
+    )

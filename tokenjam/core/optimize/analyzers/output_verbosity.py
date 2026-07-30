@@ -47,10 +47,11 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any
 
+from tokenjam.core import fixes as _fixes
 from tokenjam.core.optimize.analyzers.workflow_restructure import _arg_signature
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
-from tokenjam.core.pricing import get_rates
+from tokenjam.core.optimize.span_pricing import rates_at, span_instant
 from tokenjam.otel.semconv import GenAIAttributes
 
 # A task-shape cohort needs at least this many sessions before its median is a
@@ -93,13 +94,8 @@ VERBOSITY_ESTIMATE_BASIS = (
 # analyzer's own honesty caveat above says output length is not waste. So this
 # names the cohort instead of asserting a rule, and states the tradeoff rather
 # than commanding brevity.
-VERBOSITY_REMEDY_SNIPPET = (
-    "This shape of task ran noticeably longer, output-wise, than similar "
-    "sessions recently. Worth a look: if a shorter answer would serve this "
-    "shape of task just as well, prefer it — but only when brevity doesn't "
-    "cost completeness, correctness, or clarity. A longer answer is often "
-    "the right one; this is a candidate to review, not a rule to enforce."
-)
+# THE text lives in `core/fixes/registry.py`, so the lint sees it.
+VERBOSITY_REMEDY_SNIPPET = _fixes.fix_text("verbosity.prefer_shorter_when_it_serves")
 
 
 @dataclass
@@ -147,8 +143,8 @@ class VerbosityFinding:
     caveat: str = VERBOSITY_HONESTY_CAVEAT
     # Recoverable-savings contract (#111). See types.DowngradeFinding for field
     # semantics. None when no candidate cleared the threshold.
-    estimated_recoverable_usd: float | None = None
-    estimated_recoverable_tokens: int | None = None
+    past_overspend_usd: float | None = None
+    past_overspend_tokens: int | None = None
     estimate_basis: str = ""
     estimate_confidence: str = "heuristic"
     # The effective cohort-size bar this run applied (config-overridable, see
@@ -225,7 +221,8 @@ def run(ctx: AnalyzerContext) -> None:
         f"MIN(provider) AS provider, "
         f"MODE(model) AS model, "
         f"COALESCE(SUM(output_tokens), 0) AS output_tokens, "
-        f"COALESCE(SUM(input_tokens), 0) AS input_tokens "
+        f"COALESCE(SUM(input_tokens), 0) AS input_tokens, "
+        f"MIN(start_time) AS started_at "
         f"FROM spans WHERE {where} AND model IS NOT NULL "
         f"GROUP BY session_id",
         params,
@@ -259,10 +256,14 @@ def run(ctx: AnalyzerContext) -> None:
         output_tokens: int
         input_tokens: int
         signature: tuple[tuple[str, tuple[str, ...]], ...]
+        # When the session started — the instant its output is priced at, so a
+        # window that straddles a rate change bills each session at the rate
+        # that actually billed it rather than at today's list price.
+        started_at: Any
 
     sessions: list[_Session] = []
     for row in llm_rows:
-        session_id, agent_id, provider, model, out_tok, in_tok = row
+        session_id, agent_id, provider, model, out_tok, in_tok, started_at = row
         if not model:
             continue
         sig = tuple(session_signatures.get(str(session_id), []))
@@ -274,6 +275,7 @@ def run(ctx: AnalyzerContext) -> None:
             output_tokens=int(out_tok or 0),
             input_tokens=int(in_tok or 0),
             signature=sig,
+            started_at=started_at,
         ))
 
     finding.sessions_examined = len(sessions)
@@ -308,7 +310,10 @@ def run(ctx: AnalyzerContext) -> None:
             over = int(round(m.output_tokens - median))
             if over <= 0:
                 continue
-            rates = get_rates(m.provider or "", m.model)
+            rates = rates_at(
+                m.provider, m.model,
+                span_instant(m.started_at, window_start=ctx.since),
+            )
             recoverable_usd: float | None = None
             if rates is not None:
                 recoverable_usd = round(
@@ -345,8 +350,8 @@ def run(ctx: AnalyzerContext) -> None:
     candidates.sort(key=lambda c: c.over_baseline_tokens, reverse=True)
     finding.total_candidates = len(candidates)
     finding.candidates = candidates[:MAX_EXAMPLES]
-    finding.estimated_recoverable_tokens = total_recoverable_tokens
-    finding.estimated_recoverable_usd = (
+    finding.past_overspend_tokens = total_recoverable_tokens
+    finding.past_overspend_usd = (
         round(total_recoverable_usd, 6) if have_any_usd else None
     )
     # Suggested max_tokens cap = the median cohort baseline (the point most

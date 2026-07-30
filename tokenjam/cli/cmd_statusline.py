@@ -112,16 +112,6 @@ def _session_figures(path: str) -> tuple[int, float, int]:
     return total, reread_pct, window_tokens
 
 
-def session_shares(path: str) -> tuple[int, float]:
-    """Return ``(total_tokens, reread_pct)`` over a session's assistant turns.
-
-    Thin wrapper over :func:`_session_figures` for callers (the ``tj quickstart``
-    preview, tests) that only need the two shares, not the window occupancy.
-    """
-    total, reread_pct, _window = _session_figures(path)
-    return total, reread_pct
-
-
 def _model_name(data: dict) -> str:
     """Extract a display model name from the statusline payload.
 
@@ -287,7 +277,7 @@ def render_line(data: dict) -> str:
 
 @click.command("statusline")
 def cmd_statusline() -> None:
-    """Print a zero-token Claude Code status line (reads payload JSON on stdin).
+    """Print the zero-token Claude Code statusline.
 
     Wire it into ``~/.claude/settings.json`` as::
 

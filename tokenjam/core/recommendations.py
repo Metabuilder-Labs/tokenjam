@@ -224,8 +224,11 @@ def _premium_usage(conn, premium_norm: set[str], start: datetime, end: datetime)
     rows = conn.execute(
         "SELECT model, "
         "COALESCE(SUM(cost_usd), 0.0), "
+        # All four token types, always (Cache token types in aggregates, root
+        # CLAUDE.md) — omitting cache_write_tokens understates the measured
+        # pre/post shift this feeds into detect_downsize_adoption().
         "COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) "
-        "+ COALESCE(SUM(cache_tokens), 0) "
+        "+ COALESCE(SUM(cache_tokens), 0) + COALESCE(SUM(cache_write_tokens), 0) "
         "FROM spans WHERE model IS NOT NULL AND start_time >= $1 AND start_time < $2 "
         "GROUP BY model",
         [start, end],

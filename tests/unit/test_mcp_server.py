@@ -1015,3 +1015,46 @@ def test_mcp_server_tool_count():
         f"  Tools found: {sorted(tools_found)}\n"
         f"If you added a tool, update both docs with the new count and tool list."
     )
+
+
+# --- get_optimize_report direct-DB path emits framing (dollars+tokens sweep) ---
+
+def test_get_optimize_report_direct_db_path_includes_framing_and_pricing_mode(tmp_path):
+    """The direct-DB fallback path (_tool_get_optimize_report) used to call
+    report_to_dict() and return straight away, emitting neither `framing` nor
+    `plan_tier_mix` — contradicting this tool's own docstring, which documents
+    a `pricing_mode` field, and leaving a caller with no way to tell an
+    api-billed window from a subscription/local/unknown one. The HTTP-proxy
+    path (via ApiBackend, /api/v1/optimize) already built both; this pins the
+    direct-DB path to agree."""
+    import duckdb
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.db import DuckDBBackend
+    from tests.factories import make_llm_span
+
+    db_file = tmp_path / "telemetry.duckdb"
+    backend = DuckDBBackend(StorageConfig(path=str(db_file)))
+    session = make_session(agent_id="alpha", plan_tier="api", total_cost_usd=1.0)
+    backend.upsert_session(session)
+    backend.insert_span(make_llm_span(
+        agent_id="alpha", session_id=session.session_id,
+        input_tokens=1000, output_tokens=200, cost_usd=1.0,
+    ))
+    backend._conn.close()
+
+    ro_conn = duckdb.connect(str(db_file), read_only=True)
+    config = _make_config("alpha")
+    config.storage = StorageConfig(path=str(db_file))
+    _srv._ro_conn = ro_conn
+    _srv._config = config
+    _set_serve_url(None)
+    try:
+        result = _srv.get_optimize_report(since="30d")
+        assert "framing" in result, "direct-DB path must carry the same framing block /optimize does"
+        assert result["framing"].get("pricing_mode") == "api"
+        assert "plan_tier_mix" in result
+        assert result["plan_tier_mix"].get("api", 0) >= 1
+    finally:
+        ro_conn.close()
+        _srv._ro_conn = None
+        _srv._config = None

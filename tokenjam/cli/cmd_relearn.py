@@ -18,7 +18,7 @@ from tokenjam.utils.formatting import console
 
 @click.group("relearn", invoke_without_command=False)
 def cmd_relearn() -> None:
-    """Self-improve loop: review and apply recurring-mistake fixes."""
+    """Review & apply self-improvement suggestions."""
 
 
 @cmd_relearn.command("eval-case")

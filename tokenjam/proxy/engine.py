@@ -143,7 +143,7 @@ class PolicyContext:
         sql = "SELECT COALESCE(SUM(cost_usd), 0.0) FROM spans WHERE " + " AND ".join(clauses)
         try:
             row = conn.execute(sql, params).fetchone()
-        except Exception:  # noqa: BLE001 — a spend-query failure must not break eval
+        except Exception:  # a spend-query failure must not break eval
             return None
         return float(row[0] or 0.0) if row else 0.0
 
@@ -416,7 +416,7 @@ class PolicyEngine:
             )
         try:
             outcome = _call_evaluator(evaluator, policy, request, self.context)
-        except Exception as exc:  # noqa: BLE001 — one bad policy never breaks the rest
+        except Exception as exc:  # one bad policy never breaks the rest
             return PolicyEvaluation(
                 policy_name=name, kind=kind, mode=mode, would_action=ACTION_ERROR,
                 reason=f"evaluator raised: {exc}", enforcement_gated=gated, details={},

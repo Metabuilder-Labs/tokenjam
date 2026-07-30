@@ -1,9 +1,9 @@
 # Map board — what this surface is for (direction note)
 
-Status: working direction, 2026-07-02. Grew out of founder dogfooding on real long
-sessions (meta tickets #56/#58): the original board was five raw telemetry lanes +
-two mechanism controls, and a developer looking at it could not say what it was
-telling them. This note pins the job so future changes have a test.
+Status: working direction, 2026-07-02. Grew out of dogfooding on real long
+sessions: the original board was five raw telemetry lanes + two mechanism
+controls, and a developer looking at it could not say what it was telling
+them. This note pins the job so future changes have a test.
 
 ## The job
 
@@ -12,7 +12,7 @@ healthy?"** One question. Every element must either answer it directly or be
 evidence for it one hover away. Method-judgment ("was the approach good") is
 explicitly NOT this surface — that's the Approach tab.
 
-## The reading model (current, post-#56/#58)
+## The reading model (current)
 
 1. **Insights strip answers first, in text.** Costliest active stretch (+ share of
    spend), friction (errors · true retries), top delegation by cost, idle share,
@@ -49,14 +49,15 @@ the thing that worries you."
 Candidate follow-ups, in value order:
 1. Chip → zoom (costliest-stretch chip is the obvious first).
 2. Drag-select zoom on any lane, Esc to reset.
-3. Phase segmentation quality (meta #57 — merge adjacent identical titles) so the
+3. Phase segmentation quality (merge adjacent identical titles) so the
    phase lane reads as acts, not confetti.
 4. Consider folding the tools histogram and cost bars into ONE lane (same buckets
    already) — height = cost, stack color = tool mix — reclaiming vertical space.
 
-## Open questions (founder)
+## Open questions
 
 - Step-default: confirmed good after living with it a few days?
 - Does the sub-agents lane earn its row on sessions with 0–2 delegations, or
   should it collapse into a chip until there are ≥3?
-- Is the phase lane worth its height at all before #57 lands?
+- Is the phase lane worth its height at all before the phase-segmentation-quality
+  follow-up above lands?

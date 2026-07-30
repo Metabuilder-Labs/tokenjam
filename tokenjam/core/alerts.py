@@ -12,7 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from tokenjam.core.config import AlertChannelConfig, TjConfig, resolve_effective_budget
+from tokenjam.core.agent_kind import classify_agent_kind, group_agent_ids
+from tokenjam.core.config import (
+    AlertChannelConfig,
+    TjConfig,
+    resolve_effective_budget,
+    resolve_group_budget,
+)
 from tokenjam.core.models import Alert, AlertType, Severity
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.utils.formatting import console, severity_colour
@@ -358,13 +364,24 @@ class AlertEngine:
     # ── Per-session checks ─────────────────────────────────────────────────
 
     def _check_cost_budgets(self, session: SessionRecord) -> None:
-        """Check daily and session cost thresholds against the agent's budget config."""
-        from tokenjam.core.config import BudgetConfig
-        budget = resolve_effective_budget(session.agent_id, self.config)
-        if budget == BudgetConfig():
-            return
+        """Check daily and session cost thresholds.
 
-        # Session budget
+        Daily enforcement branches on agent KIND (``core/agent_kind.py``): a
+        coding-tool agent (claude-code / codex) is checked against its
+        GROUP's summed daily spend across every member agent_id (e.g. every
+        ``claude-code-<project>`` variant) — a group cap ceilings the tool as
+        a whole, not any one project, so 20 members at $3 each must trip a
+        $50 group cap even though no single member crosses it alone. An SDK
+        workflow keeps the original per-agent daily check.
+
+        Session-cap enforcement (COST_BUDGET_SESSION) is UNCHANGED and
+        per-agent for both kinds — kept alive for backward compatibility
+        with any already-configured `session_usd`, even though the
+        redesigned Budget UI no longer offers a way to set a new one.
+        """
+        budget = resolve_effective_budget(session.agent_id, self.config)
+
+        # Session budget (per-agent, both kinds; backward-compat only).
         if budget.session_usd is not None and session.total_cost_usd is not None:
             if session.total_cost_usd > budget.session_usd:
                 alert = Alert(
@@ -383,26 +400,70 @@ class AlertEngine:
                 )
                 self._fire(alert)
 
-        # Daily budget
-        if budget.daily_usd is not None:
-            today = utcnow().date()
-            daily_cost = self.db.get_daily_cost(session.agent_id, today)
-            if daily_cost > budget.daily_usd:
-                alert = Alert(
-                    alert_id=new_uuid(),
-                    fired_at=utcnow(),
-                    type=AlertType.COST_BUDGET_DAILY,
-                    severity=Severity.CRITICAL,
-                    title=f"cost_budget_daily — {session.agent_id}",
-                    detail={
-                        "daily_cost": daily_cost,
-                        "budget": budget.daily_usd,
-                        "message": f"Daily cost ${daily_cost:.4f} exceeds budget ${budget.daily_usd:.4f}",
-                    },
-                    agent_id=session.agent_id,
-                    session_id=session.session_id,
-                )
-                self._fire(alert)
+        kind = classify_agent_kind(session.agent_id)
+        if kind.is_coding and kind.group:
+            self._check_coding_group_daily_budget(session, kind.group)
+        else:
+            self._check_agent_daily_budget(session, budget)
+
+    def _check_coding_group_daily_budget(self, session: SessionRecord, group_id: str) -> None:
+        """Daily cap for a coding-tool GROUP: compares the SUM of today's
+        spend across every agent_id that classifies into `group_id` (not
+        just `session.agent_id` alone) against the group's resolved cap."""
+        group_budget = resolve_group_budget(group_id, self.config)
+        if group_budget.daily_usd is None:
+            return
+        today = utcnow().date()
+        member_ids = group_agent_ids(self.db.get_distinct_agent_ids(), group_id)
+        if session.agent_id not in member_ids:
+            # A brand-new agent_id whose first span/session hasn't landed in
+            # get_distinct_agent_ids() yet (e.g. same-transaction ingest).
+            member_ids = [*member_ids, session.agent_id]
+        daily_cost = self.db.get_daily_cost_for_agents(member_ids, today)
+        if daily_cost > group_budget.daily_usd:
+            alert = Alert(
+                alert_id=new_uuid(),
+                fired_at=utcnow(),
+                type=AlertType.COST_BUDGET_DAILY,
+                severity=Severity.CRITICAL,
+                title=f"cost_budget_daily — {group_id} (group)",
+                detail={
+                    "daily_cost": daily_cost,
+                    "budget": group_budget.daily_usd,
+                    "group": group_id,
+                    "member_agent_ids": member_ids,
+                    "message": (
+                        f"Daily cost ${daily_cost:.4f} across the {group_id} "
+                        f"group exceeds budget ${group_budget.daily_usd:.4f}"
+                    ),
+                },
+                agent_id=session.agent_id,
+                session_id=session.session_id,
+            )
+            self._fire(alert)
+
+    def _check_agent_daily_budget(self, session: SessionRecord, budget) -> None:
+        """Daily cap for an SDK workflow: unchanged, per-agent."""
+        if budget.daily_usd is None:
+            return
+        today = utcnow().date()
+        daily_cost = self.db.get_daily_cost(session.agent_id, today)
+        if daily_cost > budget.daily_usd:
+            alert = Alert(
+                alert_id=new_uuid(),
+                fired_at=utcnow(),
+                type=AlertType.COST_BUDGET_DAILY,
+                severity=Severity.CRITICAL,
+                title=f"cost_budget_daily — {session.agent_id}",
+                detail={
+                    "daily_cost": daily_cost,
+                    "budget": budget.daily_usd,
+                    "message": f"Daily cost ${daily_cost:.4f} exceeds budget ${budget.daily_usd:.4f}",
+                },
+                agent_id=session.agent_id,
+                session_id=session.session_id,
+            )
+            self._fire(alert)
 
     def _check_session_duration(self, session: SessionRecord) -> None:
         """Fire SESSION_DURATION if session wall time exceeds threshold.

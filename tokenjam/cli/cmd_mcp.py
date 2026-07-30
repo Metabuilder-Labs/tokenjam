@@ -17,7 +17,7 @@ from pathlib import Path
 import click
 import duckdb
 
-from tokenjam.core.config import find_config_file, load_config
+from tokenjam.core.config import load_config, resolve_config_path
 
 
 def _port_open(host: str, port: int) -> bool:
@@ -60,7 +60,7 @@ def _start_and_wait(host: str, port: int, timeout: float = 10.0) -> bool:
 @click.command("mcp")
 @click.pass_context
 def cmd_mcp(ctx: click.Context) -> None:
-    """Start the TokenJam MCP server (stdio transport, for SDK / API users).
+    """Start the MCP server for SDK/API integrations.
 
     The MCP puts tj in the request path — the right surface for SDK / API
     integrations. Claude Code / Codex subscription users get tj out-of-band via
@@ -69,7 +69,9 @@ def cmd_mcp(ctx: click.Context) -> None:
     """
     from tokenjam.mcp.server import mcp, init
 
-    config_path = find_config_file()
+    # The invocation's own config wins: `tj --config PATH mcp` must serve that
+    # file, and an explicit override is invisible to rediscovery.
+    config_path = resolve_config_path((ctx.obj or {}).get("config_path_override"))
     if config_path is not None:
         config = load_config(str(config_path))
         host = config.api.host

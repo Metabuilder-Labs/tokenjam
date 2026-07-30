@@ -244,6 +244,61 @@ async def test_status_archives_completed_sessions(_db, _client):
     assert not [a for a in data["agents"] if a["agent_id"] == "claude-code-done"]
 
 
+async def test_archived_total_matches_list_length_when_under_limit(_db, _client):
+    now = utcnow()
+    for i in range(5):
+        _db.upsert_session(make_session(
+            agent_id="claude-code-few", session_id=f"few-{i}", status="closed",
+            input_tokens=100, output_tokens=20, tool_call_count=1,
+            started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1),
+        ))
+    data = (await _client.get("/api/v1/status")).json()
+    assert data["archived_total"] == len(data["archived"]) == 5
+
+
+async def test_archived_total_is_zero_for_empty_archive(_db, _client):
+    data = (await _client.get("/api/v1/status")).json()
+    assert data["archived"] == []
+    assert data["archived_total"] == 0
+
+
+async def test_archived_total_is_not_clamped_to_archive_limit(_db, _client):
+    # ARCHIVE_LIMIT caps the returned list at 50, but archived_total must
+    # report the TRUE count so the UI can show "latest 50 of N" honestly
+    # instead of silently presenting the capped page as the whole archive.
+    now = utcnow()
+    for i in range(60):
+        _db.upsert_session(make_session(
+            agent_id="claude-code-many", session_id=f"many-{i}", status="closed",
+            input_tokens=100, output_tokens=20, tool_call_count=1,
+            started_at=now - timedelta(hours=2),
+            ended_at=now - timedelta(minutes=i + 1),
+        ))
+    data = (await _client.get("/api/v1/status")).json()
+    assert len(data["archived"]) == 50
+    assert data["archived_total"] == 60
+
+
+async def test_archived_total_excludes_zero_signal_zombies(_db, _client):
+    # archived_total must describe the SAME population as the list beside it —
+    # a zero-signal terminal the list drops must not inflate the total either,
+    # or the two figures would disagree about what "archived" means.
+    now = utcnow()
+    _db.upsert_session(make_session(
+        agent_id="claude-code-zombie", session_id="zt-1", status="closed",
+        input_tokens=0, output_tokens=0, tool_call_count=0,
+        started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1),
+    ))
+    _db.upsert_session(make_session(
+        agent_id="claude-code-real", session_id="zt-2", status="closed",
+        input_tokens=500, output_tokens=100, tool_call_count=3,
+        started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1),
+    ))
+    data = (await _client.get("/api/v1/status")).json()
+    assert len(data["archived"]) == 1
+    assert data["archived_total"] == 1
+
+
 async def test_status_zone_split_by_lifecycle_status(_db, _client):
     # Pin the whole mapping: 'active' + recent -> live tile; 'closed' and
     # 'completed' -> archive only.

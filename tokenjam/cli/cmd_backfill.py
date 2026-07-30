@@ -25,7 +25,7 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 
 @click.group("backfill")
 def cmd_backfill() -> None:
-    """Backfill historical session data from local agent logs."""
+    """Import past sessions from your agents."""
 
 
 @cmd_backfill.command("claude-code")
@@ -140,6 +140,120 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
             "  [dim]Less than 7 days of history available — `tj optimize` will "
             "flag thin-data projections.[/dim]"
         )
+
+
+@cmd_backfill.command("status")
+@click.option("--root", "root_path", default=None,
+              help=f"Override Claude Code projects root (default {CLAUDE_CODE_PROJECTS_ROOT}).")
+@click.option("--since", "since_value", default=None,
+              help="Only compare sessions since a window like 30d, 7d, or YYYY-MM-DD.")
+@click.option("--json", "output_json", is_flag=True, help="Emit the report as JSON.")
+@click.option("--limit", type=int, default=10, show_default=True,
+              help="How many missing sessions to list.")
+@click.pass_context
+def status(ctx: click.Context, root_path: str | None, since_value: str | None,
+           output_json: bool, limit: int) -> None:
+    """Show which on-disk Claude Code sessions are NOT yet ingested.
+
+    Claude Code prunes its own transcripts after roughly 30 days, so a session
+    that never made it into the DB is on a clock: once the file is gone it is
+    unrecoverable. This surfaces the gap while the source still exists.
+
+    Sessions are compared by the transcript's INTERNAL `sessionId`, not by
+    filename — roughly half the `.jsonl` files under the projects root live in
+    nested `subagents/` folders and carry their PARENT's session id, so a
+    filename-based count wildly over-reports the gap.
+    """
+    import json as _json
+
+    from tokenjam.core.transcript_sync import reconcile_claude_code
+
+    db = ctx.obj.get("db")
+    if db is None:
+        raise click.ClickException("backfill status requires a database connection.")
+
+    root = Path(root_path).expanduser() if root_path else None
+    since = None
+    if since_value:
+        try:
+            since = parse_since(since_value)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="'--since'") from exc
+
+    report = reconcile_claude_code(db, root=root, since=since)
+
+    if output_json:
+        console.print_json(_json.dumps(report.to_dict()))
+        return
+
+    if not report.root.exists():
+        console.print(f"[yellow]No Claude Code logs found at {report.root}.[/yellow]")
+        return
+
+    console.print(
+        f"Compared [bold]{report.files_scanned}[/bold] transcript files at "
+        f"{report.root} → [bold]{report.disk_sessions}[/bold] distinct session"
+        f"{'s' if report.disk_sessions != 1 else ''} "
+        f"([dim]deduped on internal sessionId[/dim])."
+    )
+
+    if not report.verified:
+        # The disk-vs-DB anti-join never ran (the daemon holds the write-lock
+        # and its HTTP shim lookup failed). The ingested/missing/skipped buckets
+        # are all 0 by default here — printing them would falsely claim
+        # "everything is ingested" (#642). Be honest instead.
+        console.print(
+            f"  [yellow]![/yellow] Couldn't verify ingestion status — "
+            f"found [bold]{report.disk_sessions}[/bold] on-disk session"
+            f"{'s' if report.disk_sessions != 1 else ''} but the tj daemon was "
+            f"unreachable, so the DB comparison could not run."
+        )
+        console.print(
+            "  [dim]Try `tj stop` then re-run `tj backfill status`, or check "
+            "that `tj serve` is healthy.[/dim]"
+        )
+        return
+
+    console.print(
+        f"  [bold]{report.ingested_sessions}[/bold] already ingested · "
+        f"[bold]{report.missing_count}[/bold] missing · "
+        f"{report.skipped_empty_count} skipped (no assistant turn)."
+    )
+
+    if report.files_unreadable:
+        console.print(
+            f"  [dim]{report.files_unreadable} file(s) had no readable session id.[/dim]"
+        )
+
+    if not report.missing:
+        console.print("[green]✓[/green] Every on-disk session with usage is ingested.")
+        return
+
+    days_left = report.days_until_rotation()
+    if days_left is not None and days_left <= 7:
+        console.print(
+            f"[red]![/red] The oldest missing session is ~{days_left:.0f} day(s) from "
+            f"being pruned by Claude Code — after that it is unrecoverable."
+        )
+    elif days_left is not None:
+        console.print(
+            f"  [dim]Oldest missing session stays recoverable for ~{days_left:.0f} "
+            f"more day(s).[/dim]"
+        )
+
+    for session in report.missing[:limit]:
+        started = (
+            session.started_at.strftime("%Y-%m-%d %H:%M")
+            if session.started_at else "unknown"
+        )
+        console.print(f"    [dim]{session.session_id[:8]}  {started}  {session.project}[/dim]")
+    if report.missing_count > limit:
+        console.print(f"    [dim]… and {report.missing_count - limit} more.[/dim]")
+
+    console.print(
+        "  Run [bold]tj backfill claude-code[/bold] to ingest them now, or start "
+        "[bold]tj serve[/bold] — it catches up automatically."
+    )
 
 
 @cmd_backfill.command("codex")

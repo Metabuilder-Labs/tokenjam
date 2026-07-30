@@ -69,31 +69,32 @@ def test_api_plan_shows_raw_dollars(db):
     assert "Subscription plan" not in result.output
 
 
-def test_subscription_plan_suppresses_raw_dollars(db):
-    """Max-plan users must NOT see the raw $2599 they never paid; the COST
-    column is reframed as a share of the monthly plan, with an honest note."""
+def test_subscription_plan_shows_raw_dollars_like_api(db):
+    """Max-plan users now see the same raw $2,599 COST figure an API user
+    would (`_cost_cell` made unconditional by product decision: dollars are
+    always legitimate, so tj no longer differentiates its rendering between
+    subscription and API users). Previously this figure was reframed as a
+    "% of cycle" share of the monthly plan, and a subscription-billed
+    qualifier note ("list-price equivalent, not an amount billed") was
+    printed above the table; both are gone."""
     _seed(db, plan_tier="max_5x", cost_usd=2599.13)
     result = _invoke(db, _config("max_5x"), ["cost", "--since", "30d", "--group-by", "model"])
     assert result.exit_code == 0, result.output
-    assert "$2,599" not in result.output         # raw dollars suppressed
-    # render_dollar's "X% of cycle" framing (the COST column may wrap it, so
-    # match the distinctive token rather than the whole phrase).
-    assert "cycle" in result.output
-    # The generic "Subscription plan — flat-fee billing" note was superseded
-    # by compute_framing's list-price-equivalent qualifier, which now fires
-    # unconditionally for subscription mode (not just mixed subscription/API
-    # windows) so the honesty note is never a bare mode label.
-    assert "list-price equivalent, not an amount billed" in result.output
+    assert "$2,599" in result.output
+    assert "% of cycle" not in result.output
+    assert "list-price equivalent, not an amount billed" not in result.output
+    assert "subscription-billed" not in result.output
 
 
-def test_unknown_plan_keeps_dollars_with_qualifier(db):
-    """Unknown plan tier keeps dollar figures but surfaces the overstate
-    qualifier (defensive honesty), per compute_framing's unknown path."""
+def test_unknown_plan_keeps_dollars_with_no_qualifier(db):
+    """Unknown plan tier still keeps dollar figures (never suppressed); the
+    "may overstate" qualifier note was removed by product decision, same as
+    the subscription case above."""
     _seed(db, plan_tier="unknown", cost_usd=2599.13)
     result = _invoke(db, _config(None), ["cost", "--since", "30d", "--group-by", "model"])
     assert result.exit_code == 0, result.output
     assert "$2,599" in result.output             # dollars still shown
-    assert "may overstate" in result.output       # qualifier surfaced
+    assert "may overstate" not in result.output   # qualifier note removed
 
 
 def test_group_by_tool_reports_per_tool_call_counts(db):

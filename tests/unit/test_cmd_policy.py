@@ -299,6 +299,7 @@ def test_decisions_reads_persisted_from_db(runner):
     assert "unvalidated" in result.output
     # The savings meter is shown and is ESTIMATED / RECOVERABLE — never "saved".
     assert "Estimated recoverable" in result.output
+    assert "tj optimize" in result.output
 
 
 def test_decisions_savings_never_says_saved(runner):

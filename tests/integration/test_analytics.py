@@ -82,6 +82,29 @@ async def test_metric_dimension_matrix(metric, unit):
 
 
 @pytest.mark.asyncio
+async def test_tokens_metric_includes_cache_read_and_write_tokens():
+    """The `tokens` metric must sum all four token columns (input, output,
+    cache-read, cache-write), not just input+output. Cache reads dominate
+    real corpora, so omitting them understates token volume by roughly an
+    order of magnitude while the axis just says "Tokens" (see root
+    CLAUDE.md, "Cache token types in aggregates")."""
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    now = utcnow()
+    db.upsert_session(make_session(session_id="s-cache", plan_tier="api", agent_id="cc"))
+    db.insert_span(make_llm_span(
+        session_id="s-cache", agent_id="cc", model="claude-opus-4-7",
+        provider="anthropic", input_tokens=100, output_tokens=50,
+        cache_tokens=10_000, cache_write_tokens=2_000, cost_usd=0.05,
+        start_time=now,
+    ))
+    d = await _get(db, cfg, "metric=tokens&group_by=agent&since=30d")
+    # 100 + 50 + 10_000 + 2_000 = 12_150 — a bare input+output sum would be 150.
+    assert d["kpis"]["tokens"] == 12_150
+    assert d["rows"][0]["value"] == 12_150
+
+
+@pytest.mark.asyncio
 async def test_tool_category_dimension_includes_tool_spans():
     """tool / tool_category breakdowns must see tool spans (NULL model), which
     the LLM-cost `model IS NOT NULL` gate would otherwise hide."""

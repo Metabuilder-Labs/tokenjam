@@ -52,11 +52,15 @@ REUSE_HONESTY_CAVEAT = (
 # contract). Must contain the word "review".
 REUSE_ESTIMATE_BASIS = (
     "structurally repeated planning calls — the headline prices the "
-    "script-replacement premise (a template/skill removes the planning call "
-    "entirely: avg cost x reps); the more conservative cache-reuse premise "
-    "(a template only removes the re-plan delta: avg cost x (reps - 1)) "
-    "stays available on every cluster as cache_reuse_recoverable_usd/"
-    "_tokens; review templates before reusing"
+    "cache-reuse premise (a template only removes the RE-plan delta: avg cost "
+    "x (reps - 1)), because the first planning call in a cluster had to "
+    "happen: nothing existed to reuse yet. The script-replacement premise "
+    "(a template/skill removes every planning call: avg cost x reps) stays "
+    "available on every cluster as script_replacement_recoverable_usd/"
+    "_tokens, but it is never the headline: charging the user for the one "
+    "instance that was necessary work states a figure they can disprove "
+    "(a 2-repetition cluster would be a 2x overclaim); review templates "
+    "before reusing"
 )
 
 
@@ -71,13 +75,15 @@ class WindowSummary:
     total_cost_usd: float
     thin_data:   bool
     #: Distinct calendar days within the window with >=1 session — the
-    #: user's own "active day" pace, the `D_active` term of the shared 30-day
-    #: projection basis every cost analyzer's rollup uses (see
-    #: `cost_proposals.compute_projection_ratio` / `core/optimize/
-    #: projection.py`). Defaults to 0 for a hand-built `WindowSummary` (tests,
-    #: older callers, a cached report predating the field) — a 0 fails that
-    #: ratio's guardrail, so the projection is simply skipped rather than
-    #: dividing by zero or inventing a pace from a missing count.
+    #: user's own "active day" pace, the `D_active` term of the 30-day
+    #: projection basis in `core/optimize/projection.py`. Read by exactly ONE
+    #: consumer: `write_budget`, which needs "how many sessions will re-send
+    #: this artifact in a month" to price a permanent CLAUDE.md rule. It does
+    #: NOT pace any per-analyzer dollar figure — no such figure exists any
+    #: more (see the field contract in the repo `CLAUDE.md`). Defaults to 0
+    #: for a hand-built `WindowSummary` (tests, older callers, a cached report
+    #: predating the field) — a 0 fails that basis's guardrail, so the standing
+    #: cost is simply not charged rather than invented from a missing count.
     active_days: int = 0
 
 
@@ -89,6 +95,27 @@ class DowngradeExample:
     tool_calls: int
     duration_seconds: float | None
     cost_usd:   float
+
+
+@dataclass
+class DriverRoleExample:
+    """One session where a premium model drove undelegated, tool-heavy work.
+
+    A spot-check row, not the aggregate: `offload_usd` + `tier_usd` are this
+    session's own two halves of the inline-vs-routed counterfactual, so a user
+    can open the session and check the claim against what actually happened.
+    """
+    session_id:      str
+    agent_id:        str
+    model:           str
+    alt_model:       str
+    turns:           int   # main-thread turns in the session
+    stretch_turns:   int   # of those, turns inside a tool-driven stretch
+    tool_calls:      int   # main-thread tool calls
+    tail_tokens:     int   # tokens re-read purely because work stayed inline
+    offload_usd:     float
+    tier_usd:        float
+    recoverable_usd: float
 
 
 @dataclass
@@ -111,14 +138,14 @@ class DowngradeFinding:
     window_total_tokens:        int   = 0  # input + output + cache, all sessions
     percent_of_tokens:          float = 0.0
     monthly_tokens_in_candidates: int = 0  # projected to a 30-day month
-    # Recoverable-savings contract (#111). estimated_recoverable_usd is for
-    # api-billed framing; estimated_recoverable_tokens for subscription / local.
+    # Recoverable-savings contract (#111). past_overspend_usd is for
+    # api-billed framing; past_overspend_tokens for subscription / local.
     # None means "no estimate available for this finding state". estimate_basis
     # is the one-line heuristic explanation surfaced behind the "estimated" tag.
     # estimate_confidence is the estimate's confidence (distinct from any
     # structural `confidence` on wave-2 findings); always "heuristic" in v1.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
     # Sampling confidence (#308). `n_sessions` is the candidate-session sample
@@ -136,8 +163,57 @@ class DowngradeFinding:
     # candidate sessions): exact per-type tokens at the current model's rates
     # versus the proposed model's, over the window and projected to 30 days.
     # Typed loosely to keep `types` free of an analyzer import; empty when no
-    # candidate group had pricing data for both sides.
-    per_agent:                    list[Any]    = field(default_factory=list)
+    # candidate group had pricing data for both sides. `list[Any]` costs the
+    # round trip its TYPE, though: `hydrate_dataclass` has nothing to dispatch
+    # on, so a stored report came back with plain dicts here and every
+    # consumer reading `row.delta_usd` raised — silently, wherever an adapter
+    # caught broadly. The element type is therefore declared as DATA, resolved
+    # lazily at hydration time (see `runner._hydrate_target`), which keeps this
+    # module analyzer-free while making the round trip lossless in type as
+    # well as in value.
+    per_agent:                    list[Any]    = field(
+        default_factory=list,
+        metadata={
+            "hydrate": "tokenjam.core.optimize.analyzers.downsize_agents:AgentPriceRow",
+        },
+    )
+    # --- The PRIMARY case: a premium model in the driver role ---------------
+    # Sessions where a premium-tier model drove long, undelegated, tool-heavy
+    # work inline instead of routing it to cheap workers. Every field here
+    # describes ONLY that case; the fields above describe ONLY the secondary
+    # tiny-session case. The two populations are disjoint (a driver-flagged
+    # session is excluded from the tiny-session walk), which is what makes it
+    # safe for `past_overspend_usd` to be their sum.
+    driver_sessions:          int   = 0
+    driver_recoverable_usd:   float = 0.0
+    # The two halves of the driver-role claim, kept visible so the headline is
+    # never a black box. `driver_offload_usd` is the re-read tail that stops
+    # happening once the work runs in a worker's own context;
+    # `driver_tier_usd` is the same turns' own work repriced at the worker
+    # tier. They compound (where the work runs vs what it runs on) and sum to
+    # `driver_recoverable_usd`.
+    driver_offload_usd:       float = 0.0
+    driver_tier_usd:          float = 0.0
+    driver_tokens:            int   = 0
+    driver_tail_tokens:       int   = 0
+    # Premium driver model -> the worker tier its work would have routed to.
+    # Named on the card: a counterfactual whose substitute is unstated cannot
+    # be inspected.
+    driver_substitutes:       dict[str, str] = field(default_factory=dict)
+    driver_examples:          list[DriverRoleExample] = field(default_factory=list)
+    driver_estimate_basis:    str   = ""
+    #: ``session_id -> that session's own driver-role tokens``. A BREAKDOWN of
+    #: `driver_tokens`, not a second quantity: the values sum to it. It exists
+    #: so `core/optimize/rule_placement` can answer "which projects incurred
+    #: this, and in what proportion" — the fix for this card is a CLAUDE.md
+    #: rule, and a rule written into the projects that exhibited the behaviour
+    #: is re-sent in those projects only, rather than in every session of every
+    #: project the user has. Weights are TOKENS and are the single attribution
+    #: weight for both the token and the dollar split, so every destination's
+    #: implied per-token rate equals the finding's own (Critical Rule 28).
+    #: Empty when the driver-role case did not fire; placement then falls back
+    #: to the user-global file, which is the historical behaviour.
+    driver_session_tokens:    dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -187,7 +263,7 @@ class OpusQuotaAudit:
     # (segment_estimate_confidence + the bootstrap CI below), not two numbers.
     percent_quota_misallocated: float = 0.0
     percent_sessions: float = 0.0
-    # Segment accounting + confidence (design §5.2 / §6, founder D3). The number
+    # Segment accounting + confidence (design §5.2 / §6, D3). The number
     # is a heuristic estimate, shown with an explicit label + a WIDE bootstrap
     # interval that resamples SEGMENTS (not sessions), so the band widens honestly
     # when few segments carry the estimate. ci low/high are None below 2 segments
@@ -252,19 +328,42 @@ class ReuseCluster:
     caveat:            str = REUSE_HONESTY_CAVEAT
 
 
+#: Capture modes whose clusters were built, wholly or partly, on tool
+#: signature alone. Every surface that shows a reuse finding must warn on ALL
+#: of these — branching on `== "tool_sequence_only"` is how the partial case
+#: silently rendered as the confident, unqualified path.
+DEGRADED_CAPTURE_MODES = frozenset({"tool_sequence_only", "mixed_prompt_prefix"})
+
+
 @dataclass
 class ReuseFinding:
     """Clusters of sessions with structurally repeated planning calls."""
     clusters:      list[ReuseCluster] = field(default_factory=list)
-    capture_mode:  Literal["tool_sequence_only", "with_prompt_prefix"] = (
-        "tool_sequence_only"
-    )
+    # What clustering ACTUALLY ran on, derived from the analyzed window — never
+    # from the `[capture] prompts` toggle. Echoing the toggle let a report
+    # declare "with_prompt_prefix" while every cluster member's
+    # `prompt_prefix_hash` was None, i.e. advertise content matching while
+    # silently degrading to tool-signature-only clustering.
+    # `mixed_prompt_prefix` is the partially-degraded middle: SOME planning
+    # calls carried prompt text and the rest were clustered on tool signature
+    # alone, so the window's clusters do not share one basis. Collapsing it
+    # into `with_prompt_prefix` (the old behavior — any nonzero coverage) made
+    # a partly tool-signature-only result advertise full content matching,
+    # while the basis string on the same finding said the opposite.
+    capture_mode:  Literal[
+        "tool_sequence_only", "mixed_prompt_prefix", "with_prompt_prefix"
+    ] = "tool_sequence_only"
+    # Measured share of the window's planning calls that carried prompt text,
+    # 0.0-1.0. `None` means "no planning call to measure", never 0.0 — the
+    # difference between an unanswered question and a measured absence.
+    prompt_capture_coverage: float | None = None
     # Recoverable-savings contract (#111). The aggregate uses the conservative
-    # cache-reuse number — the front-page tile shows what's recoverable going
-    # forward, not the script-replacement upper bound. None when no cluster
-    # cleared the thresholds.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    # cache-reuse number (avg cost x (reps - 1)), never the script-replacement
+    # upper bound (avg cost x reps): the first planning call in a cluster was
+    # necessary work, so a figure that includes it is one a user can disprove.
+    # None when no cluster cleared the thresholds.
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:    str = REUSE_ESTIMATE_BASIS
     confidence:        Literal["heuristic"] = "heuristic"
     # Populated in Mode 1 (capture.prompts off) to nudge the richer mode.
@@ -298,6 +397,15 @@ class OptimizeReport:
     # (e.g. `cost_proposals.cost_proposals_from_report`) never has to
     # recompute it from a bare `conn`.
     persona:   str = "unknown"
+    # Why the filesystem-reading analyzers (deadweight, relearn, summarize)
+    # scanned nothing, when they scanned nothing — see
+    # `core/optimize/scope.py`. `None` means they DID scan, which is a
+    # different statement from "scanned and found nothing" and must render
+    # differently (root anti-pattern 22): an empty deadweight finding under a
+    # suppressed scope reads as "no dead MCP servers" when the truth is that
+    # no config was ever looked at. One field on the report rather than one
+    # per finding, so every surface reads the same answer.
+    filesystem_scan_skipped_reason: str | None = None
 
 
 @dataclass
@@ -330,6 +438,13 @@ class AnalyzerContext:
     # looking at an SDK caller (e.g. deciding fix modality) read it here
     # instead of re-deriving it from `conn`.
     persona:                str            = "unknown"
+    # Which filesystem the filesystem-reading analyzers (deadweight, relearn,
+    # summarize) may read, and why. Resolved once in `runner.build_report` via
+    # `core.optimize.scope.resolve_analyzer_scope` — an analyzer must never
+    # re-derive a root from `Path.home()` or the env var itself, or `--db`
+    # stops isolating it. `None` only in a hand-built context (tests): treat it
+    # as the unscoped default. See `core/optimize/scope.py` for the contract.
+    scope:                  Any            = None
 
 
 # ---------------------------------------------------------------------------
@@ -353,12 +468,6 @@ def audit_to_dict(audit: OpusQuotaAudit) -> dict[str, Any]:
         "candidate_sessions": audit.candidate_sessions,
         "candidate_tokens": audit.candidate_tokens,
         "percent_quota_misallocated": audit.percent_quota_misallocated,
-        # DEPRECATED alias — kept one release (through 0.6.x) because
-        # ``percent_quota_reclaimable`` shipped publicly in 0.5.4. Consumers
-        # should read ``percent_quota_misallocated``; this mirror will be
-        # removed. Emitted on BOTH the direct and serve paths so the parity
-        # contract (byte-identical audit_to_dict output) still holds.
-        "percent_quota_reclaimable": audit.percent_quota_misallocated,
         "percent_sessions": audit.percent_sessions,
         # Segment accounting + confidence (design §5.2 / §6). Every key here must
         # survive the round-trip below, or the data-access parity test fails —
@@ -403,11 +512,8 @@ def audit_from_dict(data: dict[str, Any]) -> OpusQuotaAudit:
         opus_tokens=int(data.get("opus_tokens", 0) or 0),
         candidate_sessions=int(data.get("candidate_sessions", 0) or 0),
         candidate_tokens=int(data.get("candidate_tokens", 0) or 0),
-        # Prefer the new key; fall back to the deprecated alias so a payload
-        # produced by a pre-rename (0.5.4) daemon still reconstructs.
         percent_quota_misallocated=float(
-            data.get("percent_quota_misallocated",
-                     data.get("percent_quota_reclaimable", 0.0)) or 0.0
+            data.get("percent_quota_misallocated", 0.0) or 0.0
         ),
         percent_sessions=float(data.get("percent_sessions", 0.0) or 0.0),
         segment_count=int(data.get("segment_count", 0) or 0),

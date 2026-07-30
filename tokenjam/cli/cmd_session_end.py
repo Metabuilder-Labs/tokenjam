@@ -27,7 +27,7 @@ _REQUEST_TIMEOUT_S = 2.0
               help="session_id to close (alternative/addition to --instance)")
 @click.pass_context
 def cmd_session_end(ctx: click.Context, instance: str | None, session: str | None) -> None:
-    """Mark a terminal's active sessions as closed (best-effort, over HTTP)."""
+    """Mark a terminal's sessions as closed."""
     if not instance and not session:
         raise click.UsageError("Provide --instance and/or --session.")
 

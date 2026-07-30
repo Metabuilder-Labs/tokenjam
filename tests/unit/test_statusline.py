@@ -22,7 +22,7 @@ from tokenjam.cli.cmd_statusline import (
     cmd_statusline,
     format_status_line,
     render_line,
-    session_shares,
+    _session_figures,
 )
 
 
@@ -49,20 +49,20 @@ def _run(payload) -> str:
 # --- token / re-read math ---------------------------------------------------
 
 
-def test_session_shares_sums_all_usage_buckets(tmp_path):
+def test_session_figures_sums_all_usage_buckets(tmp_path):
     path = write_claude_transcript(tmp_path / "s.jsonl", [
         make_claude_transcript_assistant_line(
             message_id="m1", input_tokens=100, output_tokens=50,
             cache_read_input_tokens=800, cache_creation_input_tokens=50,
         ),
     ])
-    total, reread_pct = session_shares(path)
+    total, reread_pct, _ = _session_figures(path)
     # 100 + 50 + 800 + 50 = 1000 total; 800 of it re-read.
     assert total == 1000
     assert reread_pct == 80.0
 
 
-def test_session_shares_dedupes_by_message_id(tmp_path):
+def test_session_figures_dedupes_by_message_id(tmp_path):
     # Claude Code streams several transcript lines per message, each carrying the
     # SAME cumulative usage. Counting them all would inflate every number.
     dup = make_claude_transcript_assistant_line(
@@ -70,11 +70,11 @@ def test_session_shares_dedupes_by_message_id(tmp_path):
         output_tokens=0, cache_creation_input_tokens=0,
     )
     path = write_claude_transcript(tmp_path / "s.jsonl", [dup, dup, dup])
-    total, _ = session_shares(path)
+    total, _, _ = _session_figures(path)
     assert total == 1000  # counted once, not 3000
 
 
-def test_session_shares_dedupes_last_wins(tmp_path):
+def test_session_figures_dedupes_last_wins(tmp_path):
     # Mid-stream snapshots of one message carry PARTIAL, growing usage under the
     # same message id; the final record is authoritative. Last-wins keeps that
     # finalized total (matching core/backfill) — first-wins would undercount.
@@ -87,11 +87,11 @@ def test_session_shares_dedupes_last_wins(tmp_path):
         cache_read_input_tokens=0, cache_creation_input_tokens=0,
     )
     path = write_claude_transcript(tmp_path / "s.jsonl", [early, final])
-    total, _ = session_shares(path)
+    total, _, _ = _session_figures(path)
     assert total == 500  # 100 + 400 (final), not 110 (first)
 
 
-def test_session_shares_ignores_non_assistant_and_bad_lines(tmp_path):
+def test_session_figures_ignores_non_assistant_and_bad_lines(tmp_path):
     path = tmp_path / "s.jsonl"
     good = make_claude_transcript_assistant_line(
         message_id="m1", input_tokens=500, output_tokens=0,
@@ -103,7 +103,7 @@ def test_session_shares_ignores_non_assistant_and_bad_lines(tmp_path):
         + json.dumps(good) + "\n",
         encoding="utf-8",
     )
-    total, reread_pct = session_shares(str(path))
+    total, reread_pct, _ = _session_figures(str(path))
     assert total == 1000
     assert reread_pct == 50.0
 
@@ -361,7 +361,7 @@ def test_format_status_line_matches_render_line_for_same_inputs(tmp_path):
         ),
     ])
     via_render_line = render_line({"model": "Opus 4.8", "transcript_path": path})
-    total, reread_pct = session_shares(path)
+    total, reread_pct, _ = _session_figures(path)
     via_formatter = format_status_line("Opus 4.8", total, reread_pct)
     assert via_formatter == via_render_line
 

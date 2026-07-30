@@ -41,7 +41,7 @@ def get_recommendations(request: Request) -> dict[str, Any]:
     if conn is not None:
         try:
             detect_downsize_adoption(conn, config)
-        except Exception:  # noqa: BLE001 — detection is advisory; never 500 the read
+        except Exception:  # detection is advisory; never 500 the read
             pass
 
     return summarize_outcomes(read_outcomes(config))

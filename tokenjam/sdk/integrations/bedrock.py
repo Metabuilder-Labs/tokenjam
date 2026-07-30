@@ -13,6 +13,7 @@ import logging
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.attribution import stamp_span_attribution
 from tokenjam.sdk.integrations._request_capture import (
     extract_anthropic_completion,
     record_completion_content,
@@ -100,6 +101,7 @@ class BedrockIntegration:
                 # prompts is on. Completion is set in _extract_bedrock_usage,
                 # which already parses the response body (avoids re-reading it).
                 record_prompt_content(span, _bedrock_request_messages(kwargs))
+                stamp_span_attribution(span)
                 try:
                     response = method(self_client, *args, **kwargs)
                     _extract_bedrock_usage(response, span)

@@ -22,6 +22,7 @@ from __future__ import annotations
 # documents the ladder for the downgrade suggestions below.
 TIER_SUBSTRINGS: tuple[tuple[str, str], ...] = (
     ("fable", "fable"),
+    ("mythos", "mythos"),
     ("opus", "opus"),
     ("sonnet", "sonnet"),
     ("haiku", "haiku"),
@@ -30,10 +31,21 @@ TIER_SUBSTRINGS: tuple[tuple[str, str], ...] = (
 # Tiers whose sessions are worth a premium-quota audit / right-sizing flag.
 # Extend this (and TIER_SUBSTRINGS) when a new premium family launches — that is
 # the single edit that teaches every consumer about the new tier.
-PREMIUM_TIERS: frozenset[str] = frozenset({"fable", "opus"})
+#
+# Mythos sits alongside Fable: `claude-mythos-5` carries the SAME published
+# rates as `claude-fable-5` in pricing/models.toml, so a session that ran on it
+# burns premium quota exactly as a Fable one does. It was priced but untiered
+# for a while, which made it invisible to every premium-gated flag while still
+# being billed at the top rate — see `test_every_priced_model_resolves_to_a_tier`
+# for the guard that now stops the next family landing half-added.
+PREMIUM_TIERS: frozenset[str] = frozenset({"fable", "mythos", "opus"})
 
 # Human-facing label for the premium tier, for copy that names what is audited.
-PREMIUM_TIER_LABEL = "Opus/Fable"
+# Must name every tier in PREMIUM_TIERS: it appears in "the quota audit only
+# inspects premium-tier (…) sessions", and a tier the audit DOES inspect but the
+# label omits reads to the user as out of scope. Pinned by
+# `test_premium_tier_label_names_every_premium_tier`.
+PREMIUM_TIER_LABEL = "Opus/Fable/Mythos"
 
 
 def model_tier(model: str | None) -> str | None:

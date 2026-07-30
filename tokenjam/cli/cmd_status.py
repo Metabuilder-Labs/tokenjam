@@ -91,8 +91,6 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) ->
         if active_alerts:
             has_active_alerts = True
 
-        framing = _agent_framing(db, config, aid) if hasattr(db, "conn") else None
-
         agent_data = {
             "agent_id": aid,
             "status": session.status if session else "idle",
@@ -110,7 +108,7 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) ->
         agents_data.append(agent_data)
 
         if not output_json:
-            _print_agent_status(agent_data, active_alerts, session, framing)
+            _print_agent_status(agent_data, active_alerts, session)
 
     # Count sessions with plan_tier='unknown' so the user knows to reconfigure.
     # Informational only — exit code stays driven by alert state.
@@ -146,7 +144,7 @@ def _recoverable_teaser(db, config) -> str | None:
     doctor, statusline or the banner ever mentioned optimize existed.
 
     Reuses the same recoverable-savings contract every analyzer already
-    carries (`estimated_recoverable_usd`, #111) rather than inventing a new
+    carries (`past_overspend_usd`, #111) rather than inventing a new
     figure, scoped to `COST_ANALYZERS` — the analyzers that actually feed the
     cost/apply rail (`cost_proposals.py`).
 
@@ -158,44 +156,41 @@ def _recoverable_teaser(db, config) -> str | None:
     single largest entry is honest standalone because it isn't a sum of
     anything (see `_recoverable_overlap_note` in `api/routes/cost.py` for the
     full rationale). Silent (returns None) whenever the figure wouldn't mean
-    anything: no direct DB connection (daemon holds the lock), no usage, a
-    non-api pricing mode (a raw dollar figure misrepresents a flat-fee/local
-    plan), or a sub-$1 figure.
+    anything: no direct DB connection (daemon holds the lock), no usage, or a
+    sub-$1 figure. Dollars are shown regardless of billing mode (product
+    decision: no differentiated messaging between subscription and API
+    users).
     """
     conn = getattr(db, "conn", None)
     if conn is None or config is None:
         return None
     try:
-        from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
         from tokenjam.core.optimize import build_report
         from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
 
         since_dt = utcnow() - timedelta(days=_TEASER_WINDOW_DAYS)
         until_dt = utcnow()
 
-        plan_mix = plan_tier_mix(conn, since_dt, until_dt, None)
-        if pricing_mode_for(dominant_plan(plan_mix)) != "api":
-            return None
-
         report = build_report(
             db=db, config=config, since=since_dt, until=until_dt,
             findings=list(COST_ANALYZERS),
         )
-        estimates: list[float] = []
+        estimates: list[tuple[float, int]] = []
         if report.downgrade is not None:
-            usd = report.downgrade.estimated_recoverable_usd
+            usd = report.downgrade.past_overspend_usd
             if usd is not None:
-                estimates.append(usd)
+                estimates.append((usd, getattr(report.downgrade, "past_overspend_tokens", None) or 0))
         for finding in (report.findings or {}).values():
-            usd = getattr(finding, "estimated_recoverable_usd", None)
+            usd = getattr(finding, "past_overspend_usd", None)
             if usd is not None:
-                estimates.append(usd)
-        largest = max(estimates, default=0.0)
+                estimates.append((usd, getattr(finding, "past_overspend_tokens", None) or 0))
+        largest_usd, largest_tokens = max(estimates, default=(0.0, 0))
 
-        if largest < _TEASER_MIN_USD:
+        if largest_usd < _TEASER_MIN_USD:
             return None
         return (
-            f"[dim]{format_cost(largest)} recoverable (largest single fix): run "
+            f"[dim]{format_cost(largest_usd)} / {format_tokens(largest_tokens)} tokens "
+            f"recoverable (largest single fix): run "
             f"[bold]tj optimize[/bold][/dim]"
         )
     except Exception:
@@ -220,65 +215,18 @@ def _fmt_dur(seconds: float | None, *, coarse: bool = False) -> str:
     return f"{mins}m {s}s"
 
 
-def _agent_framing(db, config, agent_id: str):
-    """Plan-tier framing for one agent's Cost line (#96).
+def _cost_line(data: dict) -> str:
+    """Render the 'Cost today' line (#96): always the raw dollar figure.
 
-    Window-independent (per #177: the pricing mode is a property of the
-    user's plan, not the selected window) — the same `plan_determination_mix`
-    + `compute_framing` pairing `tj cost` / `tj optimize` / `tj tokenmaxx`
-    already use, so `tj status` doesn't invent a fourth convention. Returns
-    None in API mode (no direct conn) — callers fall back to raw format_cost.
+    Previously reframed to a "% of cycle" share for subscription/local plans
+    via `core/framing.render_dollar`. Removed by product decision: dollars
+    are always legitimate and tj no longer differentiates its rendering
+    between subscription and API users.
+
+    `daily_limit` is a user-configured DAILY dollar cap (`budget.daily_usd`);
+    shown as its literal dollar amount with a `/day` suffix.
     """
-    conn = getattr(db, "conn", None)
-    if conn is None:
-        return None
-    from tokenjam.core.framing import WindowSummary, compute_framing, plan_determination_mix
-
-    mix = plan_determination_mix(conn, agent_id)
-    return compute_framing(config, WindowSummary(sessions=sum(mix.values()), plan_tier_mix=mix))
-
-
-def _framing_note(framing) -> str | None:
-    """The honesty note printed under the Cost today line (#96).
-
-    Mirrors `cmd_cost._cost_note`: prefers the framing's own qualifier_text
-    (only set for mixed subscription/API session history); otherwise
-    synthesizes a concise mode note so a pure subscription/local Cost line is
-    never unexplained. api/unknown -> None (unchanged rendering, no note)."""
-    if framing is None:
-        return None
-    if framing.qualifier_text:
-        return framing.qualifier_text
-    if framing.pricing_mode == "subscription":
-        return ("Subscription plan — flat-fee billing; cost shown as share of "
-                "your monthly plan, not dollars spent.")
-    if framing.pricing_mode == "local":
-        return "Local inference — no marginal cost; dollar figures suppressed."
-    return None
-
-
-def _cost_line(data: dict, framing) -> str:
-    """Render the 'Cost today' line, plan-tier-aware (#96).
-
-    Subscription plans are flat-fee: a raw "$0.00" (or any USD figure) line
-    misrepresents metered spend the user never incurs. Mirrors the
-    subscription/local gate `cmd_cost._cost_cell` uses via
-    `core/framing.render_dollar` — known-fee subscription plans (pro /
-    max_5x / max_20x / plus) show a % of cycle; unmetered plans (team /
-    enterprise, no declared fee) and local inference show "—". API/unknown
-    keep the historical dollar rendering.
-
-    `daily_limit` is a user-configured DAILY dollar cap (`budget.daily_usd`),
-    not a share of the monthly subscription fee — running it through
-    `render_dollar` would express a daily cap as a percentage of the wrong
-    cycle. It's always shown as its literal dollar amount with a `/day`
-    qualifier; only the spend-so-far figure is plan-tier-framed.
-    """
-    if framing is not None and framing.pricing_mode in ("subscription", "local"):
-        from tokenjam.core.framing import render_dollar
-        cost_str = render_dollar(data["cost_today"], framing)
-    else:
-        cost_str = format_cost(data["cost_today"])
+    cost_str = format_cost(data["cost_today"])
     if data["daily_limit"]:
         cost_str += f" / {format_cost(data['daily_limit'])}/day limit"
     return cost_str
@@ -308,8 +256,7 @@ def _dedupe_alerts(alerts: list[Alert]) -> list[tuple[Alert, int]]:
     return [(first_seen[key], counts[key]) for key in order]
 
 
-def _print_agent_status(data: dict, active_alerts: list, session: object | None,
-                         framing=None) -> None:
+def _print_agent_status(data: dict, active_alerts: list, session: object | None) -> None:
     status = data["status"]
     icon = status_icon(status)
     style = "green" if status == "active" else "dim"
@@ -318,10 +265,7 @@ def _print_agent_status(data: dict, active_alerts: list, session: object | None,
                   f"{status}")
     console.print()
 
-    console.print(f"  Cost today:     {_cost_line(data, framing)}")
-    note = _framing_note(framing)
-    if note:
-        console.print(f"  [dim]{note}[/dim]")
+    console.print(f"  Cost today:     {_cost_line(data)}")
 
     in_tok = format_tokens(data["input_tokens"])
     out_tok = format_tokens(data["output_tokens"])

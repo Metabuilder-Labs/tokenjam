@@ -162,6 +162,15 @@ async def test_cost_framing_resolves_declared_plan(tmp_path):
     db.close()
 
 
+def _warm_scan(db, config):
+    """Run the daemon's background analyzer scan so /optimize has a STORED
+    report to serve — no route runs an analyzer any more (see
+    core/optimize/report_store.py)."""
+    from tokenjam.core.optimize import report_store
+
+    return report_store.recompute_now(db, config)
+
+
 @pytest.mark.asyncio
 async def test_optimize_framing_resolves_declared_plan(tmp_path):
     """/api/v1/optimize framing must agree with /cost on the round-tripped
@@ -174,6 +183,7 @@ async def test_optimize_framing_resolves_declared_plan(tmp_path):
 
     pipeline = IngestPipeline(db=db, config=config)
     app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    _warm_scan(db, config)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         payload = (await c.get("/api/v1/optimize?since=90d&fast=true")).json()
@@ -198,6 +208,7 @@ async def test_cost_and_optimize_framing_agree(tmp_path):
 
     pipeline = IngestPipeline(db=db, config=config)
     app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    _warm_scan(db, config)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         cost = (await c.get("/api/v1/cost?since=90d")).json()["framing"]

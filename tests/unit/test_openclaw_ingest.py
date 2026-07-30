@@ -352,4 +352,9 @@ class TestAgentsEndpoint:
     async def test_list_agents_empty(self, client):
         resp = await client.get("/api/v1/agents")
         assert resp.status_code == 200
-        assert resp.json() == {"agents": []}
+        data = resp.json()
+        # /agents now also carries a framing block (the dollars+tokens sweep:
+        # it was the only dollar-bearing read route with none), so this no
+        # longer round-trips to a bare {"agents": []}.
+        assert data["agents"] == []
+        assert "framing" in data

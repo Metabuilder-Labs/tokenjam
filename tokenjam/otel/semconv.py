@@ -45,6 +45,12 @@ class GenAIAttributes:
     # Conversation / session continuity
     CONVERSATION_ID = "gen_ai.conversation.id"
 
+    # The provider's own id for the response (Anthropic `msg_...`, OpenAI
+    # `chatcmpl-...`). Names the underlying API CALL, so two observations of
+    # one call — a live provider patch and a later transcript backfill —
+    # can be recognised as the same call rather than counted twice.
+    RESPONSE_ID = "gen_ai.response.id"
+
     # Prompt / completion capture (off by default)
     PROMPT_CONTENT     = "gen_ai.prompt.content"
     COMPLETION_CONTENT = "gen_ai.completion.content"
@@ -91,9 +97,6 @@ class OpenInferenceAttributes:
     CACHE_READ_TOKENS   = "llm.token_count.prompt_details.cache_read"
     CACHE_WRITE_TOKENS  = "llm.token_count.prompt_details.cache_write"
 
-    # Span-kind values
-    KIND_LLM  = "LLM"
-    KIND_TOOL = "TOOL"
 
 
 class ClaudeCodeEvents:
@@ -109,6 +112,12 @@ class ClaudeCodeEvents:
     SESSION_ID     = "session.id"
     PROMPT_ID      = "prompt.id"
     EVENT_SEQUENCE = "event.sequence"
+
+    # The human's turn text, on `user_prompt` events only, and only when the
+    # user runs Claude Code with OTEL_LOG_USER_PROMPTS=1. The `api_request`
+    # event that becomes the priced LLM span carries no text at ALL, so this
+    # is the exporter's one and only textual signal — see logs.py.
+    PROMPT         = "prompt"
 
     # api_request attributes
     COST_USD              = "cost_usd"
@@ -148,9 +157,7 @@ class CodexEvents:
 
     # Standard context attributes on all events
     CONVERSATION_ID = "conversation.id"
-    APP_VERSION     = "app.version"
     MODEL           = "model"
-    SLUG            = "slug"
     EVENT_TIMESTAMP = "event.timestamp"  # ISO-8601 UTC; Codex sets timeUnixNano=0
 
     # api_request attributes
@@ -185,15 +192,37 @@ class CodexEvents:
 
 class ResourceAttributes:
     """OTel standard resource attributes (set per process / service)."""
-    SERVICE_NAME      = "service.name"
     # Logical grouping above service.name. tj uses it as the "project" a
     # service belongs to, so the dashboard can roll up every repo under one
     # project tile (e.g. all `Aquanodeio/*` repos -> namespace "aquanode").
     SERVICE_NAMESPACE = "service.namespace"
     # Per-instance identifier (one process / terminal). tj uses it as the
-    # human label for a session's terminal (e.g. "founder-os") when set at
+    # human label for a session's terminal (e.g. "dev-box") when set at
     # launch via OTEL_RESOURCE_ATTRIBUTES.
     SERVICE_INSTANCE_ID = "service.instance.id"
+
+    # -- SDK cost-attribution dimensions (multi-tenant cost breakdown) --
+    # Standard OTel semantic-convention names, preferred over inventing tj.*
+    # equivalents so any OTLP producer (a gateway, a collector processor, an
+    # already-instrumented service) populates them for free via the standard
+    # `OTEL_RESOURCE_ATTRIBUTES` env var — no tj-specific code required.
+
+    # Deployment tier ("staging" | "production" | ...). Current stable name;
+    # supersedes the deprecated bare `deployment.environment`.
+    DEPLOYMENT_ENVIRONMENT_NAME = "deployment.environment.name"
+    # The exact build identifier for the CALLING service (semver, git hash, or
+    # an arbitrary version string). NOTE: tj's own TracerProvider stamps this
+    # with tokenjam's *own* package version as a default (see
+    # otel/provider.py::build_tracer_provider) — that default only applies
+    # when the caller hasn't already declared their own via
+    # OTEL_RESOURCE_ATTRIBUTES, so a caller's real service.version always wins.
+    SERVICE_VERSION = "service.version"
+    # VCS commit/revision the running build was cut from. `VCS_REF_HEAD_REVISION`
+    # is the current stable name; `VCS_REPOSITORY_REF_REVISION` is the OLDER,
+    # now-deprecated name some existing OTLP producers still emit — read as a
+    # fallback so this repo doesn't miss data from an un-upgraded exporter.
+    VCS_REF_HEAD_REVISION = "vcs.ref.head.revision"
+    VCS_REPOSITORY_REF_REVISION = "vcs.repository.ref.revision"  # deprecated
 
 
 class TjAttributes:
@@ -211,6 +240,14 @@ class TjAttributes:
     # on individual spans. Analyzers JOIN through SessionRecord to read it.
     BILLING_ACCOUNT  = "tokenjam.billing_account"
     PLAN_TIER        = "tokenjam.plan_tier"
+
+    # How the request was BOUGHT, when that differs from the model's standard
+    # rate — currently Anthropic's fast mode (`speed="fast"`), which bills the
+    # same model id at a premium. Billing metadata, not content, so unlike the
+    # gen_ai.request.* sampling params it is NOT gated by a [capture] toggle:
+    # dropping it would silently price fast traffic at half its real rate. Read
+    # by core/cost.rate_variant_for_span to pick the pricing variant.
+    REQUEST_SPEED    = "tokenjam.request.speed"
 
     # Full tools / tool_choice payload for the request (issue #209). OTel GenAI
     # has no single attribute for the tool-definition list, so this is a
@@ -264,6 +301,56 @@ class TjAttributes:
     # detection tell an identical repeated call from normal repeated tool use
     # without retaining the (potentially sensitive) raw input.
     TOOL_ARG_SIG      = "tokenjam.tool_arg_sig"
+
+    # Internal stamp naming the API call a span observes, for ingest paths
+    # that know a stable per-call id but have no provider response id to put
+    # in `gen_ai.response.id` (the Claude Code transcript backfill stamps the
+    # assistant message key here). Read by core.optimize.accounting.
+    CALL_ID           = "tj.call_id"
+    # How this observation reached the store: the ingest path's own name
+    # ("backfill.claude_code", a `tj backfill <adapter>` name, ...). Absent
+    # means the live receive path. Load-bearing for duplicate suppression:
+    # two observations of one call always differ here, two genuinely distinct
+    # calls seen by one observer never do.
+    INGEST_SOURCE     = "source"
+
+    # -- SDK cost-attribution dimensions, continued --
+    # No established OTel semantic convention exists for multi-tenant
+    # customer/tenant identity or an application "feature"/workflow label (the
+    # OTel `user.*` namespace covers an END USER, not a billing tenant), so
+    # these are tj-specific extensions. Span-level (not resource-level):
+    # tenant/feature/prompt identity vary per call, not per process.
+    TENANT_ID        = "tokenjam.tenant_id"
+    FEATURE          = "tokenjam.feature"
+    # Prompt/template identity pair. No stable gen_ai.* prompt-template
+    # convention exists yet (gen_ai.prompt / gen_ai.completion were removed as
+    # deprecated rather than replaced with a template identity attribute), so
+    # this is a tj-specific extension. template_id names the prompt/template
+    # itself (e.g. "support-triage"); template_version is its version/hash —
+    # together they let the Cost view show which prompt revision is driving
+    # spend, e.g. after a prompt change regresses token usage.
+    PROMPT_TEMPLATE_ID      = "tokenjam.prompt.template_id"
+    PROMPT_TEMPLATE_VERSION = "tokenjam.prompt.template_version"
+
+    # -- Streaming usage data-quality --
+    # A streamed response only reports its token usage in a FINAL payload: the
+    # `message_delta`/`message_stop` pair on Anthropic, and — only when the
+    # caller opted in with `stream_options={"include_usage": true}` — a trailing
+    # usage chunk on OpenAI-compatible APIs. If the caller abandons the iterator
+    # early (a client disconnect, a `break`, an exception) or never opted in,
+    # that payload never arrives and the call is recorded with no token counts
+    # at all. Nothing about the recorded span distinguishes that from a call
+    # that genuinely cost nothing, so the spend total silently reads LOW.
+    #
+    # These three are set by every code path that observes a stream (the SDK
+    # provider patches and the proxy's SSE tap) so the `stream-usage` analyzer
+    # can tell the three states apart: not a stream at all, a stream that
+    # reported usage, and a stream that produced content and then closed
+    # without reporting any. Metadata about the observation itself, not
+    # content, so they are NOT gated by a [capture] toggle.
+    STREAMING             = "tokenjam.llm.streaming"
+    STREAM_USAGE_REPORTED = "tokenjam.llm.stream_usage_reported"
+    STREAM_CONTENT_CHUNKS = "tokenjam.llm.stream_content_chunks"
 
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"

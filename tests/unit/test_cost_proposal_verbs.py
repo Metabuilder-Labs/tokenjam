@@ -15,6 +15,8 @@ import subprocess
 
 import click
 import pytest
+
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
 from click.testing import CliRunner
 
 from tokenjam.cli.cost_proposal_verbs import register_cost_proposal_verbs
@@ -48,8 +50,8 @@ def _advise_only(**overrides) -> CostProposal:
         baseline={"sessions_present": 12, "invocations": 0},
         advise_text="Remove it; it costs a standing schema-injection tax.",
         suggestion="claude mcp remove foo --scope user",
-        estimated_recoverable_usd=12.5,
-        estimated_recoverable_tokens=50_000,
+        past_overspend_usd=12.5,
+        past_overspend_tokens=50_000,
         estimate_basis="measured over the last 90d.",
         apply_capable=False,
     )
@@ -66,11 +68,11 @@ def _apply_capable(*, target_path: str, **overrides) -> CostProposal:
         evidence="`bar` subagent averages 200 tokens output across 40 calls.",
         baseline={"apply_sessions": 40, "apply_repos": ["demo"]},
         advise_text="Route `bar` to a smaller model.",
-        estimated_recoverable_usd=8.0,
-        estimated_recoverable_tokens=20_000,
+        past_overspend_usd=8.0,
+        past_overspend_tokens=20_000,
         estimate_basis="measured over the last 30d.",
         apply_capable=True,
-        rung=1,
+        delivery=DELIVERY_CLAUDE_MD_RULE,
         scope="project",
         proposed_fix="`bar` rarely needs deep reasoning -- size it to a smaller model.",
         target_path=target_path,
@@ -160,32 +162,82 @@ def test_list_json_carries_the_full_proposal_and_framing(cfg):
     assert "framing" in payload
 
 
-def test_list_backfills_monthly_fields_missing_from_a_pre_redesign_cache(cfg):
-    # A cache written by a build that predates the Review inbox's monthly-
-    # basis fields: the raw dict on disk simply doesn't have
-    # estimated_monthly_usd/estimated_monthly_tokens keys at all (unlike a
-    # CostProposal built fresh by this build, which always carries them via
-    # _with_monthly_extrapolation). Without a read-time backfill this renders
-    # a tokens-only headline forever for an item that's genuinely priceable,
-    # until the next successful scheduled recompute.
+def test_list_migrates_the_pre_collapse_field_names_from_an_old_cache(cfg):
+    # A cache written before the per-analyzer dollar fields were collapsed:
+    # the raw dict on disk carries `estimated_recoverable_*` (the same
+    # quantity under its old forward-framed name) and its paced twin. Without
+    # a read-time migration this renders an em dash where the headline number
+    # belongs, until the next successful scheduled recompute.
     from tokenjam.core.optimize import relearn_proposals
 
     legacy_dict = {
         "kind": "cost", "analyzer": "downsize", "signature": "cost:downsize:claude-code",
         "title": "Model over-sizing in claude-code (claude-opus-4-7 to claude-haiku-4-5)",
         "estimated_recoverable_usd": 36.65, "estimated_recoverable_tokens": 10_144_061,
+        "estimated_monthly_usd": 39.27, "estimated_monthly_tokens": 10_869_075,
         "advise_only": True, "apply_capable": False,
     }
     relearn_store.write_cost_proposals([legacy_dict], config=cfg)
     [prop] = relearn_proposals.list_cost_proposals(cfg)
-    assert prop["estimated_monthly_usd"] == 36.65
-    assert prop["estimated_monthly_tokens"] == 10_144_061
+    assert prop["past_overspend_usd"] == 36.65
+    assert prop["past_overspend_tokens"] == 10_144_061
+    # The paced twin is dropped rather than promoted onto the past-tense field.
+    assert "estimated_monthly_usd" not in prop
+    assert "estimated_recoverable_usd" not in prop
 
 
-def test_list_shows_estimated_recoverable_rollup(cfg):
+def test_list_shows_past_overspend_rollup(cfg):
     _store(cfg, _advise_only())
     result = _run(cfg, ["cost-proposals"])
-    assert "estimated recoverable" in result.output
+    assert "already overspent" in result.output
+
+
+def test_headline_covers_relearn_rows_the_same_way_the_web_route_does(cfg):
+    """The CLI headline used to sum cost proposals only, while the web Review
+    inbox headline (``GET /relearn/cost-proposals``) also folds in every open
+    relearn cluster as an ordinary row on the canonical field (see
+    ``core/optimize/inbox_contribution.py``). Both surfaces read the SAME
+    shared-module calls now, so a relearn cluster's windowed contribution
+    lands in the terminal total too -- not just the cost proposal's $12.5.
+    """
+    from tokenjam.core.optimize.analyzers.relearn import RelearnCluster, RelearnExample
+    from tokenjam.core.optimize.cost_proposals import FALLBACK_COST_WINDOW_DAYS
+    from tokenjam.core.optimize.relearn_window import RelearnWindowedObservation
+
+    bucket = RelearnWindowedObservation(
+        label=f"{FALLBACK_COST_WINDOW_DAYS}d", window_days=float(FALLBACK_COST_WINDOW_DAYS),
+        window_start="2026-06-27T12:00:00+00:00", window_end="2026-07-27T12:00:00+00:00",
+        occurrences=6, sessions=3, detour_turns=4.0, undated_occurrences=0,
+        tail_calls_median=3, tail_multiplier=1.4,
+        past_overspend_tokens=200_000, past_overspend_usd=20.0,
+        past_reread_tokens=20_000, past_reread_usd=2.0, capped_at_unbounded=False,
+        basis="windowed",
+    )
+    cluster = RelearnCluster(
+        signature="cwd_confusion", family_key="cwd_confusion",
+        title="cwd / relative-path confusion", sessions=12, occurrences=324,
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
+        proposed_fix="Verify an absolute cwd before a relative Read.",
+        examples=[RelearnExample(session_id="s1", repo="demo", ts=None, snippet="no such file")],
+        past_overspend_tokens=486_000, past_overspend_usd=40.0,
+        past_overspend_windows={f"{FALLBACK_COST_WINDOW_DAYS}d": bucket},
+    )
+    from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
+    relearn_store.write_cache(
+        RelearnFinding(clusters=[cluster],
+                       past_overspend_windows={f"{FALLBACK_COST_WINDOW_DAYS}d": None}),
+        config=cfg,
+    )
+    _store(cfg, _advise_only())  # $12.5 cost proposal.
+
+    result = _run(cfg, ["cost-proposals"])
+    assert result.exit_code == 0, result.output
+    assert "already overspent" in result.output
+    # $12.5 cost proposal + (20.0 - 2.0) relearn contribution = $30.5, across
+    # 2 of 2 open proposals -- the cost feed alone would report only $12.5
+    # across 1 of 1.
+    assert "$30.50" in result.output
+    assert "across 2 of 2 open proposal(s)" in result.output
 
 
 def test_list_omits_the_advise_only_footer_when_every_proposal_is_apply_capable(cfg, tmp_path):
@@ -196,15 +248,20 @@ def test_list_omits_the_advise_only_footer_when_every_proposal_is_apply_capable(
 
 # --- pricing-mode honesty -------------------------------------------------------
 
-def test_subscription_plan_suppresses_the_raw_dollar_figure(tmp_path):
+def test_subscription_plan_shows_the_same_dollar_figure_as_api(tmp_path):
+    """Subscription users now see the same `$12.50` recoverable figure an API
+    user would (core/framing.render_savings, made unconditional by product
+    decision: dollars are always legitimate, so tj no longer differentiates
+    its rendering between subscription and API users). Previously this
+    figure was suppressed in favour of a bare token count for subscription
+    plans."""
     cfg = TjConfig(
         version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")),
         budgets={"anthropic": ProviderBudget(plan="max_5x")},
     )
     _store(cfg, _advise_only())
     result = _run(cfg, ["cost-proposals"])
-    assert "$12.50" not in result.output
-    assert "12.5" not in result.output.replace("12,500", "")  # no bare dollar amount leaks
+    assert "$12.50" in result.output
 
 
 # --- cost-apply: the workspace-write verb ---------------------------------------

@@ -19,6 +19,24 @@ from tokenjam.core.config import StorageConfig, find_config_file
 from tokenjam.utils.formatting import console
 
 
+def _tj_config_env_path() -> Path | None:
+    """A valid ``TJ_CONFIG`` path, if the env var is set and points at a real
+    file — ``None`` otherwise (including when it's set but broken).
+
+    Shared by ``_is_set_up`` and ``_db_has_data``: both need to honor
+    ``TJ_CONFIG`` (like every other config-reading path in this codebase, via
+    ``resolve_config_path``) but must NOT raise on a bad value. The bare ``tj``
+    landing screen renders before ``main.py``'s group callback validates
+    config (it returns early, skipping ``load_config``), so this is the one
+    context where ``resolve_config_path``'s fail-loud contract would crash a
+    screen that's supposed to always render something actionable.
+    """
+    tj_config = os.environ.get("TJ_CONFIG")
+    if tj_config and Path(tj_config).expanduser().is_file():
+        return Path(tj_config).expanduser()
+    return None
+
+
 def _db_has_data() -> bool:
     """Cheaply detect a populated on-disk DB WITHOUT opening it.
 
@@ -28,10 +46,11 @@ def _db_has_data() -> bool:
     lock — so we treat the presence of a non-empty DB file as the signal.
 
     Resolves the DB path from an existing config's ``[storage] path`` when one
-    is discoverable, else from the default (``~/.tj/telemetry.duckdb``).
+    is discoverable (honoring ``TJ_CONFIG`` first, then search-path discovery),
+    else from the default (``~/.tj/telemetry.duckdb``).
     """
     db_path = StorageConfig.path
-    cfg_file = find_config_file()
+    cfg_file = _tj_config_env_path() or find_config_file()
     if cfg_file is not None:
         # Cheap TOML parse (no DB open) to honor a custom storage path.
         try:
@@ -106,37 +125,45 @@ def print_home() -> None:
     print_welcome_banner()
 
     if not _is_set_up():
-        console.print("[bold]Not set up yet.[/bold] Get started:")
+        console.print("[heading]Not set up yet.[/heading]")
         console.print()
-        console.print("  [bold]tj onboard[/bold]   "
-                      "[dim]interactive setup: asks how you use AI agents "
-                      "and wires the right path[/dim]")
+        # Get Started (#643): the three onboard paths, each with a
+        # "run this if..." line so a new user picks the right one without
+        # reading the help. Onboarding aggregates ALL Claude Code projects
+        # automatically (backfill walks ~/.claude/projects/** and derives a
+        # per-project agent_id from each session's cwd), so there is no
+        # "run it once per project" step for basic per-project grouping.
+        console.print("[label]Get Started:[/label]")
         console.print()
-        console.print(
-            "[dim]Run it once inside each project so sessions and "
-            "proposals group per project in the dashboard.[/dim]"
-        )
+        console.print("  [accent]tj onboard[/accent]")
+        console.print("    [muted]run this if you use more than one agent "
+                      "client (e.g. Claude Code and Codex)[/muted]")
+        console.print("  [accent]tj onboard --claude-code[/accent]")
+        console.print("    [muted]run this if you only use Claude Code[/muted]")
+        console.print("  [accent]tj onboard --codex[/accent]")
+        console.print("    [muted]run this if you only use Codex[/muted]")
         console.print()
-        console.print(
-            "[dim]Docs: https://github.com/Metabuilder-Labs/tokenjam[/dim]"
-        )
+        console.print("[label]Learn more:[/label]")
+        console.print()
+        console.print("  [accent]tj --help[/accent]   [muted]all commands[/muted]")
+        console.print("  [muted]Docs[/muted]        [url]https://tokenjam.dev/docs[/url]")
         return
 
-    console.print("[bold]You're set up.[/bold] Next best actions:")
+    console.print("[ok]\u2713 You're set up.[/ok] Next best actions:")
     console.print()
-    console.print("  [bold]tj status[/bold]      "
-                  "[dim]agent overview — what's running, recent cost[/dim]")
-    console.print("  [bold]tj tokenmaxx[/bold]   "
+    console.print("  [accent]tj status[/accent]      "
+                  "[muted]agent overview: what's running, recent cost[/muted]")
+    console.print("  [accent]tj tokenmaxx[/accent]   "
                   "[dim]your shareable efficiency tier[/dim]")
-    console.print("  [bold]tj optimize[/bold]    "
+    console.print("  [accent]tj optimize[/accent]    "
                   "[dim]cost-saving candidates from your usage[/dim]")
-    console.print("  [bold]tj serve[/bold]       "
-                  "[dim]open Lens (web UI) at http://127.0.0.1:7391/[/dim]")
+    console.print("  [accent]tj serve[/accent]       "
+                  "[muted]open Lens (web UI) at[/muted] [url]http://127.0.0.1:7391/[/url]")
     console.print()
     if _current_repo_unregistered():
         console.print(
-            "[dim]New repo? [/dim][bold]tj onboard --add-project[/bold]"
+            "[dim]New repo? [/dim][accent]tj onboard --add-project[/accent]"
             "[dim]   registers this one without repeating full setup[/dim]"
         )
         console.print()
-    console.print("[dim]Full command list:[/dim]  tj --help")
+    console.print("[muted]Full command list:[/muted]  [accent]tj --help[/accent]")

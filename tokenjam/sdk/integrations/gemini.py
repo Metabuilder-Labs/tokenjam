@@ -13,6 +13,7 @@ from typing import Any
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.attribution import stamp_span_attribution
 from tokenjam.sdk.integrations._request_capture import (
     extract_gemini_completion,
     record_completion_content,
@@ -68,6 +69,7 @@ class GeminiIntegration:
             )
             record_full_request_gemini(span, kwargs)
             record_prompt_content(span, _gemini_contents(args, kwargs))
+            stamp_span_attribution(span)
             try:
                 response = integration._original_generate(self_model, *args, **kwargs)
                 meta = getattr(response, "usage_metadata", None)
@@ -102,6 +104,7 @@ class GeminiIntegration:
                 )
                 record_full_request_gemini(span, kwargs)
                 record_prompt_content(span, _gemini_contents(args, kwargs))
+                stamp_span_attribution(span)
                 try:
                     response = await integration._original_generate_async(
                         self_model, *args, **kwargs,

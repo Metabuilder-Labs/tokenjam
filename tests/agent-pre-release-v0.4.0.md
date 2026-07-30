@@ -6,7 +6,7 @@ Focused on the delta since v0.3.5. The runner (`tests/agent-pre-release-runner.m
 - TokenJam Lens UI rebrand (Overview triage screen + Optimize tab + real charts)
 - Reuse — 5th analyzer + `tj report --reuse` artifact export
 - `core/framing.py` — single source of truth for plan-tier rendering
-- `estimated_recoverable_usd` contract on every savings analyzer
+- `past_overspend_usd` contract on every savings analyzer
 - `cache_write_tokens` surfaced through DB → API → CLI → UI
 - Security: `.tj/config.toml` untracked + CI guard
 - Onboard: plain `tj onboard --plan` honored; tool_inputs capture toggle added; stale URLs removed
@@ -231,11 +231,11 @@ curl -s "http://127.0.0.1:7391/api/v1/optimize?since=30d" | python3 -m json.tool
 **Expected:**
 - The response includes a top-level `framing` key with `pricing_mode`, `plan_tier`, `display_rule` fields
 - The `findings` object includes a `reuse` key
-- `downgrade` is either null or a typed object with `estimated_recoverable_usd`, `monthly_savings_usd`, and a non-empty caveat
+- `downgrade` is either null or a typed object with `past_overspend_usd`, `monthly_savings_usd`, and a non-empty caveat
 
 **Assertions:**
 ```bash
-curl -s "http://127.0.0.1:7391/api/v1/optimize?since=30d" | python3 -c "import json,sys;d=json.load(sys.stdin);assert 'framing' in d and 'pricing_mode' in d['framing'];assert 'reuse' in d['findings'];g=d.get('downgrade');assert g is None or g.get('estimated_recoverable_usd') is not None;print('ok: framing + reuse + downgrade contract')"
+curl -s "http://127.0.0.1:7391/api/v1/optimize?since=30d" | python3 -c "import json,sys;d=json.load(sys.stdin);assert 'framing' in d and 'pricing_mode' in d['framing'];assert 'reuse' in d['findings'];g=d.get('downgrade');assert g is None or g.get('past_overspend_usd') is not None;print('ok: framing + reuse + downgrade contract')"
 ```
 
 ---

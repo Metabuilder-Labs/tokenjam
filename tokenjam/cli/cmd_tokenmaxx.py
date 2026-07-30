@@ -82,7 +82,7 @@ def _classify(overhead_share: float) -> Tier:
 @click.pass_context
 def cmd_tokenmaxx(ctx: click.Context, agent: str | None, since: str,
                   weekly: bool, output_json_flag: bool) -> None:
-    """Your quota/efficiency card: how lean is your context? (screenshottable)"""
+    """Your shareable efficiency card."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
@@ -279,9 +279,9 @@ def _render(
         padding=(1, 2),
     ))
 
-    # Qualifier banner (plan-tier framing) + honesty caveat, below the panel.
-    if framing.qualifier_text:
-        console.print(f"  [dim]{framing.qualifier_text}[/dim]")
+    # Honesty caveat, below the panel. No billing-mode qualifier banner:
+    # product decision, no differentiated messaging between subscription and
+    # API users.
     console.print(f"  [dim]{diag.caveat}[/dim]")
 
     # Share prompt — outside the panel, teal, points at the brand handle.

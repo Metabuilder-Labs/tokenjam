@@ -20,7 +20,7 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 @click.pass_context
 def cmd_cost(ctx: click.Context, agent: str | None, since: str,
              group_by: str, compare: str | None, output_json_flag: bool) -> None:
-    """Show cost breakdown by agent, model, day, or tool."""
+    """Cost breakdown by agent, model, day or tool."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     try:
@@ -43,7 +43,7 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
             if output_json:
                 click.echo(json.dumps(_diff_to_dict(diff), default=str))
             else:
-                _render_diff(diff, _compare_framing(ctx, db, since_dt, until_dt, agent, diff))
+                _render_diff(diff)
             return
         # API-shim path: fetch the diff from tj serve. The endpoint
         # mirrors compute_cost_diff's output schema, so we can pass
@@ -87,22 +87,8 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
         console.print("[dim]No cost data found for the given filters.[/dim]")
         return
 
-    # Plan-tier framing for the COST column (#175). Same source the API and
-    # `tj optimize` / `tj cost --compare` use: subscription users get token-share
-    # framing instead of raw dollars they never paid, and a qualifier note is
-    # surfaced above the table. API users are byte-identical to before.
-    until_dt = utcnow()
-    framing = _cost_framing(ctx, db, since, since_dt, until_dt, agent,
-                            total, total_in + total_out)
-    note = _cost_note(framing)
-    # The tool table below has no COST column to explain (see the group_by ==
-    # "tool" branch) — the plan-tier qualifier would dangle with nothing to
-    # qualify, so it's skipped there.
-    if note and group_by != "tool":
-        console.print(f"[dim]{note}[/dim]")
-
     def _cost(value: float) -> str:
-        return _cost_cell(value, framing)
+        return _cost_cell(value)
 
     # CACHE R / CACHE W columns make cost reconcilable from the shown tokens —
     # cache-write is often the dominant driver and was previously invisible (#17).
@@ -162,6 +148,58 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
                       f"[bold]{sum(r.call_count for r in rows)}[/bold]")
 
     console.print(table)
+    _print_pricing_coverage(db, agent, since, since_dt)
+
+
+def _print_pricing_coverage(db, agent: str | None, since: str, since_dt) -> None:
+    """Name any model in this window priced at the flat default rate.
+
+    Without this the table's COST column reads identically whether a rate was
+    published for the model or guessed, which is how a model missing from
+    `models.toml` stays invisible while its dollar figure is badly wrong.
+
+    Direct-conn path measures locally; the API-shim path (daemon holds the DB
+    lock, the common real-world case) reuses the `pricing_coverage` block the
+    /api/v1/cost response already carries — the same direct-conn-else-refetch
+    shape as `_cost_framing`. Checking only `db.conn` meant the mode most users
+    run in printed no warning at all.
+
+    Three outcomes, kept distinct: unpriced models found → name them; measured
+    and everything resolved → say nothing, the table is trustworthy as printed;
+    could not measure → say THAT, because silence here is indistinguishable
+    from a clean bill and this is a screen that must not claim more than its
+    data supports.
+    """
+    from tokenjam.core.pricing_coverage import (
+        coverage_note,
+        summarize_pricing_coverage,
+    )
+
+    conn = getattr(db, "conn", None)
+    if conn is not None:
+        coverage = summarize_pricing_coverage(conn, agent, since_dt, None)
+        note, measured = coverage_note(coverage), coverage.measured
+    else:
+        block = None
+        if hasattr(db, "fetch_pricing_coverage"):
+            try:
+                block = db.fetch_pricing_coverage(since=since, agent_id=agent)
+            except Exception:
+                block = None
+        # A missing block, a failed call and an older daemon all mean the same
+        # thing to a reader: nobody checked. `.get` never defaults to True.
+        measured = bool(block and block.get("measured"))
+        note = block.get("note") if block else None
+
+    if note:
+        console.print()
+        console.print(f"[dim]{note}[/dim]")
+    elif not measured:
+        console.print()
+        console.print(
+            "[dim]Pricing coverage was not checked for this window, so any "
+            "model missing from the pricing table is not flagged above.[/dim]"
+        )
 
 
 def _cost_framing(ctx, db, since, since_dt, until_dt, agent, total_cost, total_tokens):
@@ -206,60 +244,14 @@ def _cost_framing(ctx, db, since, since_dt, until_dt, agent, total_cost, total_t
     return None
 
 
-def _cost_note(framing) -> str | None:
-    """The honesty note printed above the COST table (#175).
+def _cost_cell(value: float) -> str:
+    """Render one COST cell: always the raw dollar figure (#175).
 
-    Prefers the framing's own qualifier_text (set for unknown plan tier and
-    mixed subscription/API windows); otherwise emits a concise mode note for
-    pure subscription / local so the reframed COST column is never unexplained.
-    API → None (no note; byte-identical to the pre-framing output)."""
-    if framing is None:
-        return None
-    if framing.qualifier_text:
-        return framing.qualifier_text
-    if framing.pricing_mode == "subscription":
-        return ("Subscription plan — flat-fee billing; COST shown as share of "
-                "your monthly plan, not dollars spent.")
-    if framing.pricing_mode == "local":
-        return "Local inference — no marginal cost; dollar figures suppressed."
-    return None
-
-
-def _cost_cell(value: float, framing) -> str:
-    """Render one COST cell, plan-tier-aware (#175). API/unknown keep the
-    historical format_cost output byte-for-byte; subscription shows token-share
-    ("X% of cycle") and local suppresses to "—" via core/framing.render_dollar.
-    The qualifier note (surfaced above the table) carries the honesty caveat for
-    the subscription-with-API-mix and unknown cases."""
-    if framing is not None and framing.pricing_mode in ("subscription", "local"):
-        from tokenjam.core.framing import render_dollar
-        return render_dollar(value, framing)
+    Previously reframed to token-share ("X% of cycle") for subscription and
+    suppressed to "—" for local, via core/framing.render_dollar. Removed by
+    product decision: dollars are always legitimate and tj no longer
+    differentiates its rendering between subscription and API users."""
     return format_cost(value)
-
-
-def _compare_framing(ctx, db, since_dt, until_dt, agent, diff):
-    """Build the plan-tier Framing for the current comparison window from the
-    shared core/framing module (#120) — same source the API and tj optimize use.
-    Returns None if config/conn is unavailable (→ api-style rendering)."""
-    config = ctx.obj.get("config") if ctx.obj else None
-    conn = getattr(db, "conn", None)
-    if config is None or conn is None:
-        return None
-    from tokenjam.core.framing import (
-        WindowSummary,
-        compute_framing,
-        plan_determination_mix,
-    )
-    # Window-INDEPENDENT mix for the framing DECISION (#197) — same basis as the
-    # bare `tj cost` table and the API. The compare window's totals/deltas stay
-    # window-scoped; only the tokens-vs-dollars framing decision is plan-wide.
-    mix = plan_determination_mix(conn, agent)
-    return compute_framing(config, WindowSummary(
-        total_cost_usd=diff.current.total_cost_usd,
-        total_tokens=diff.current.total_tokens,
-        sessions=sum(mix.values()),
-        plan_tier_mix=mix,
-    ))
 
 
 def _arrow(delta: float) -> str:
@@ -277,47 +269,22 @@ def _pct_str(pct: float | None) -> str:
     return f"({sign}{pct:.1f}%)"
 
 
-# Plan-tier framing for the comparison view (#120). The mode decision comes from
-# core/framing.compute_framing — this only chooses which lines to render. In
-# subscription / local modes dollar deltas aren't marginal, so we suppress the
-# dollar lines and compare token usage; unknown keeps dollars with a qualifier;
-# api is byte-identical to the pre-framing output.
-def _suppresses_dollars(mode: str) -> bool:
-    return mode in ("subscription", "local")
-
-
-def _diff_note(mode: str, qualifier_text: str | None = None) -> str | None:
-    if mode == "subscription":
-        return ("Subscription plan — dollar deltas omitted (flat-fee billing); "
-                "comparing token usage.")
-    if mode == "local":
-        return "Local inference — no marginal cost; comparing token usage."
-    if mode == "unknown":
-        return qualifier_text or (
-            "Plan tier unknown — figures may overstate actual cost. "
-            "Run `tj onboard --claude-code --reconfigure` (or `--codex`)."
-        )
-    return None  # api → no note (byte-identical)
-
-
 def _render_diff(diff, framing=None) -> None:
     """
-    Human-readable diff renderer. Plan-tier-aware (#120): subscription/local
-    suppress dollar deltas and compare token usage; unknown adds a qualifier;
-    api output is unchanged. The mode comes from core/framing.compute_framing.
+    Human-readable diff renderer (#120). Always shows dollar deltas alongside
+    token deltas: the previous plan-tier-differentiated suppression
+    (subscription/local hid dollar deltas, comparing tokens only) was removed
+    by product decision — dollars are always legitimate, so tj no longer
+    differentiates its rendering between subscription and API users.
+    `framing` is accepted for call-site compatibility but no longer changes
+    the rendering.
     """
-    mode = getattr(framing, "pricing_mode", "api") if framing is not None else "api"
-    suppress = _suppresses_dollars(mode)
-    note = _diff_note(mode, getattr(framing, "qualifier_text", None))
-    if note:
-        console.print(f"[dim]{note}[/dim]")
-
     cur = diff.current
     prev = diff.previous
     cur_days = max((cur.until - cur.since).days, 1)
     prev_days = max((prev.until - prev.since).days, 1)
-    cur_cost = "" if suppress else f", {format_cost(cur.total_cost_usd)}"
-    prev_cost = "" if suppress else f", {format_cost(prev.total_cost_usd)}"
+    cur_cost = f", {format_cost(cur.total_cost_usd)}"
+    prev_cost = f", {format_cost(prev.total_cost_usd)}"
     console.print(
         f"\n[bold]Current  ({cur.since.date()} → {cur.until.date()}, "
         f"{cur_days}d):[/bold]  "
@@ -331,21 +298,27 @@ def _render_diff(diff, framing=None) -> None:
         f"{prev_cost}"
     )
     console.print()
-    if not suppress:
-        console.print(
-            f"  Cost delta:   {_arrow(diff.cost_delta_usd)} "
-            f"[bold]{format_cost(abs(diff.cost_delta_usd))}[/bold] "
-            f"{_pct_str(diff.cost_delta_pct)}"
-        )
+    console.print(
+        f"  Cost delta:   {_arrow(diff.cost_delta_usd)} "
+        f"[bold]{format_cost(abs(diff.cost_delta_usd))}[/bold] "
+        f"{_pct_str(diff.cost_delta_pct)}"
+    )
     console.print(
         f"  Token delta:  {_arrow(diff.tokens_delta)} "
         f"[bold]{format_tokens(abs(diff.tokens_delta))}[/bold] "
         f"{_pct_str(diff.tokens_delta_pct)}"
     )
 
-    # Per-agent / per-model shifts are dollar-denominated, so they're suppressed
-    # alongside the dollar deltas in flat-fee / local modes.
-    if not suppress and diff.by_agent:
+    # Per-agent / per-model shifts are dollar-denominated; the previous
+    # suppression by billing mode is gone (see the docstring above).
+    def _tokens_suffix(entry: dict) -> str:
+        delta = entry.get("tokens_delta")
+        if delta is None:
+            return ""
+        return f"  [dim]({format_tokens(entry.get('previous_tokens', 0))} → " \
+               f"{format_tokens(entry.get('current_tokens', 0))} tokens)[/dim]"
+
+    if diff.by_agent:
         console.print()
         console.print("  [bold]Top shifts by agent:[/bold]")
         for entry in diff.by_agent:
@@ -355,9 +328,10 @@ def _render_diff(diff, framing=None) -> None:
                 f"{format_cost(entry['current_cost'])}  "
                 f"[dim]({'+' if entry['delta'] >= 0 else ''}"
                 f"{format_cost(entry['delta'])})[/dim]"
+                f"{_tokens_suffix(entry)}"
             )
 
-    if not suppress and diff.by_model:
+    if diff.by_model:
         console.print()
         console.print("  [bold]Top shifts by model:[/bold]")
         for entry in diff.by_model:
@@ -367,6 +341,7 @@ def _render_diff(diff, framing=None) -> None:
                 f"{format_cost(entry['current_cost'])}  "
                 f"[dim]({'+' if entry['delta'] >= 0 else ''}"
                 f"{format_cost(entry['delta'])})[/dim]"
+                f"{_tokens_suffix(entry)}"
             )
 
     console.print()
@@ -424,16 +399,8 @@ def _render_diff_dict(d: dict) -> None:
     cur_days = max((cur_until - cur_since).days, 1) if (cur_since and cur_until) else 1
     prev_days = max((prev_until - prev_since).days, 1) if (prev_since and prev_until) else 1
 
-    # Plan-tier framing from the /api/v1/cost/compare response block (#120).
-    fr = d.get("framing") or {}
-    mode = fr.get("pricing_mode", "api")
-    suppress = _suppresses_dollars(mode)
-    note = _diff_note(mode, fr.get("qualifier_text"))
-    if note:
-        console.print(f"[dim]{note}[/dim]")
-
-    cur_cost = "" if suppress else f", {format_cost(float(cur.get('total_cost_usd', 0)))}"
-    prev_cost = "" if suppress else f", {format_cost(float(prev.get('total_cost_usd', 0)))}"
+    cur_cost = f", {format_cost(float(cur.get('total_cost_usd', 0)))}"
+    prev_cost = f", {format_cost(float(prev.get('total_cost_usd', 0)))}"
     console.print(
         f"\n[bold]Current  "
         f"({cur_since.date() if cur_since else '?'} → "
@@ -456,20 +423,19 @@ def _render_diff_dict(d: dict) -> None:
     tokens_delta = int(d.get("tokens_delta", 0))
     cost_pct = d.get("cost_delta_pct")
     tokens_pct = d.get("tokens_delta_pct")
-    if not suppress:
-        console.print(
-            f"  Cost delta:   {_arrow(cost_delta)} "
-            f"[bold]{format_cost(abs(cost_delta))}[/bold] "
-            f"{_pct_str(cost_pct)}"
-        )
+    console.print(
+        f"  Cost delta:   {_arrow(cost_delta)} "
+        f"[bold]{format_cost(abs(cost_delta))}[/bold] "
+        f"{_pct_str(cost_pct)}"
+    )
     console.print(
         f"  Token delta:  {_arrow(tokens_delta)} "
         f"[bold]{format_tokens(abs(tokens_delta))}[/bold] "
         f"{_pct_str(tokens_pct)}"
     )
 
-    by_agent = d.get("by_agent") or [] if not suppress else []
-    by_model = d.get("by_model") or [] if not suppress else []
+    by_agent = d.get("by_agent") or []
+    by_model = d.get("by_model") or []
     if by_agent:
         console.print("\n  [bold]Top shifts by agent:[/bold]")
         for entry in by_agent:

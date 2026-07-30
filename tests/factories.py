@@ -75,6 +75,13 @@ def make_llm_span(
     request_tools: dict | None = None,
     service_namespace: str | None = None,
     service_instance_id: str | None = None,
+    tenant_id: str | None = None,
+    feature: str | None = None,
+    environment: str | None = None,
+    service_version: str | None = None,
+    commit_sha: str | None = None,
+    prompt_template_id: str | None = None,
+    prompt_template_version: str | None = None,
 ) -> NormalizedSpan:
     """
     Create a NormalizedSpan representing a single LLM call.
@@ -86,6 +93,12 @@ def make_llm_span(
     `request_params` / `request_tools` default to None (capture off) so existing
     tests are unaffected (#209). Tests exercising full-request capture should
     pass them explicitly.
+
+    `tenant_id` / `feature` / `environment` / `service_version` / `commit_sha` /
+    `prompt_template_id` / `prompt_template_version` are the SDK cost-attribution
+    dimensions (#SDK dashboard shape); all default to None so existing tests are
+    unaffected. Tests exercising the multi-tenant cost breakdown should pass
+    them explicitly.
     """
     now = start_time or utcnow()
     end = now + timedelta(milliseconds=duration_ms)
@@ -118,6 +131,13 @@ def make_llm_span(
         request_tools=request_tools,
         service_namespace=service_namespace,
         service_instance_id=service_instance_id,
+        tenant_id=tenant_id,
+        feature=feature,
+        environment=environment,
+        service_version=service_version,
+        commit_sha=commit_sha,
+        prompt_template_id=prompt_template_id,
+        prompt_template_version=prompt_template_version,
     )
 
 

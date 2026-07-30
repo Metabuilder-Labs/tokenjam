@@ -8,7 +8,9 @@ divider. `prep` wraps a prompt's structure and emits it for you to rewrite (or `
 claude-p`/`--via api` to have a model do it in one shot); `check` verifies the rewrite
 preserved every structure block (a hard gate) and stages it; `apply`
 writes a staged result (taking a backup first), `undo` reverts — both default to a dry-run,
-`--go` writes. See DEC-020/021/024/025.
+`--go` writes. `calibrate` samples real rewrites so the savings estimate can use a MEASURED
+prose ratio instead of the unenforced target it is otherwise assuming; it too defaults to a
+dry-run, because every sample is a billed model call. See DEC-020/021/024/025.
 """
 from __future__ import annotations
 
@@ -21,9 +23,26 @@ from rich.markup import escape
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize.apply import apply_staged, undo
+from tokenjam.core.summarize.calibrate import (
+    DEFAULT_SAMPLES,
+    MAX_SAMPLES,
+    CalibrationReport,
+    run_calibration,
+)
 from tokenjam.core.summarize.candidates import list_candidates
 from tokenjam.core.summarize.delivery import Amortization, DeliveryError, summarize_via
-from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO
+from tokenjam.core.summarize.relocate import (
+    DEFAULT_TARGET,
+    apply_relocation,
+    plan_relocation,
+)
+from tokenjam.core.summarize.estimate import (
+    DEFAULT_TARGET_RATIO,
+    UNMEASURED_PRIOR_RANGE,
+    UNMEASURED_PRIOR_RATIO,
+    UNMEASURED_PRIOR_SAMPLES,
+    observed_prose_ratio,
+)
 from tokenjam.core.summarize.session import CheckVerdict, SummarizeRefused, check, prepare
 from tokenjam.utils.formatting import console, format_tokens
 
@@ -42,7 +61,7 @@ def _print_verdict(verdict: CheckVerdict) -> None:
     never surfaced to the user here.)"""
     if verdict.structure_ok:
         console.print(f"[green]✓[/green] {escape(verdict.path)} — structure preserved, "
-                      f"~{format_tokens(verdict.est_tokens_saved)} prompt tok/call "
+                      f"~{format_tokens(verdict.est_tokens_saved or 0)} prompt tok/call "
                       f"({verdict.words_before}→{verdict.words_after} words)")
     else:
         console.print(f"[red]✗[/red] {escape(verdict.path)} — {escape(verdict.reason)} (not staged)")
@@ -85,7 +104,7 @@ def _print_amortization(amort: Amortization) -> None:
 
 @click.group("summarize", invoke_without_command=False)
 def cmd_summarize() -> None:
-    """Structure-aware prompt summarization (advisory preview)."""
+    """Summarize prompts (structure-aware, advisory)."""
 
 
 @cmd_summarize.command("list")
@@ -120,14 +139,33 @@ def cmd_summarize_list(
     kwargs: dict = {}
     if min_prose is not None:
         kwargs["min_prose_words"] = min_prose
+    # Forecast on what rewrites have ACTUALLY delivered here when that is known,
+    # and on the measured prior otherwise — never on the target the rewriter is
+    # merely asked for. `list` forecasting at the ask is what let a file
+    # advertised at 286 tokens deliver 81.
+    measured_ratio, ratio_samples = observed_prose_ratio(config)
     result = list_candidates(
         path, config=config, recursive=recursive, repo=repo,
-        include_global=not no_global, extra_exts=extra_exts, **kwargs,
+        include_global=not no_global, extra_exts=extra_exts,
+        ratio=measured_ratio if measured_ratio is not None else UNMEASURED_PRIOR_RATIO,
+        **kwargs,
+    )
+    ratio_note = (
+        f"Reduction assumes prose compresses to {(measured_ratio or 0) * 100:.0f}% "
+        f"of its words, measured across {ratio_samples:,} verified rewrite(s) here."
+        if measured_ratio is not None else
+        f"Reduction assumes prose compresses to {UNMEASURED_PRIOR_RATIO * 100:.0f}% of "
+        f"its words — tokenjam's measurement on other machines, not yours "
+        f"({UNMEASURED_PRIOR_SAMPLES:,} rewrites spanning "
+        f"{UNMEASURED_PRIOR_RANGE[0]:.0%}-{UNMEASURED_PRIOR_RANGE[1]:.0%}). "
+        f"Run `tj summarize calibrate --via claude-p --go` to measure your own."
     )
 
     if output_json:
         payload = result.to_dict()
         payload["note"] = result.note or CANDIDATE_NOTE
+        payload["ratio_basis"] = ratio_note
+        payload["prose_ratio_observed"] = measured_ratio is not None
         click.echo(json.dumps(payload, indent=2))
         return
 
@@ -180,6 +218,7 @@ def cmd_summarize_list(
         console.print(t)
     console.print()
     console.print(f"[dim]{escape(CANDIDATE_NOTE)}[/dim]")
+    console.print(f"[dim]{escape(ratio_note)}[/dim]")
 
 
 @cmd_summarize.command("prep")
@@ -242,6 +281,8 @@ def cmd_summarize_prep(
     console.print(f"[dim]{escape(result.path)}[/dim] · prose {result.prose_words} → "
                   f"~{result.target_prose_words} words · "
                   f"{result.protected_blocks} block(s) kept verbatim")
+    if result.target_basis:                         # whose target this is, and why
+        console.print(f"[dim]{escape(result.target_basis)}[/dim]")
     console.print(f"hash: [bold]{result.source_sha256}[/bold]")
     # The manual/copy path: emit the actual payload so the user can rewrite in any model
     # without needing --json (a JSON form is still available via --json for tooling).
@@ -254,6 +295,75 @@ def cmd_summarize_prep(
     console.print()
     console.print("[dim]Save the rewrite to a file, then: tj summarize check "
                   f"{escape(result.path)} --summary <file> --prepped-hash {result.source_sha256}[/dim]")
+
+
+def _print_calibration(report: CalibrationReport) -> None:
+    """The calibration verdict: what was sampled, what it cost, what it showed."""
+    if report.dry_run:
+        for t in report.planned:
+            console.print(f"[dim]would sample[/dim] {escape(t.path)} "
+                          f"({t.prose_words:,} prose words)")
+        console.print(f"[yellow]{escape(report.note)}[/yellow]")
+        return
+
+    for s in report.samples:
+        if s.achieved_ratio is not None:
+            console.print(
+                f"[green]✓[/green] {escape(s.path)} — prose to "
+                f"{s.achieved_ratio * 100:.0f}% of its words "
+                f"({s.words_before}→{s.words_after} words)")
+        else:
+            console.print(f"[red]✗[/red] {escape(s.path)} — "
+                          f"{escape(s.error or 'no usable outcome')} (recorded, not staged)")
+    if not report.samples:
+        console.print("[dim]Nothing was sampled.[/dim]")
+        return
+    if report.rewrite_usd is not None:
+        console.print(f"[dim]{len(report.samples):,} rewrite(s) via {escape(report.via)}; "
+                      f"~${report.rewrite_usd:.4f} billed.[/dim]")
+    else:
+        # Not "free": claude-p spends the user's Claude Code quota, it just
+        # reports no per-token price. Saying $0.00 would be a quiet lie.
+        console.print(f"[dim]{len(report.samples):,} rewrite(s) via {escape(report.via)}; "
+                      f"per-token cost not reported on this path.[/dim]")
+    console.print(escape(report.note))
+
+
+@cmd_summarize.command("calibrate")
+@click.option("--via", "via", type=click.Choice(["claude-p", "api"]), required=True,
+              help="How to run the sample rewrites: 'claude-p' drives your local Claude Code "
+                   "(headless `claude -p`); 'api' calls Anthropic with your TJ_ANTHROPIC_API_KEY "
+                   "(needs [summarize] api_model).")
+@click.option("--limit", "limit", default=DEFAULT_SAMPLES, show_default=True, type=int,
+              help=f"How many files to sample (hard cap {MAX_SAMPLES}).")
+@click.option("--go", is_flag=True,
+              help="Actually run the rewrites (default is a dry-run that spends nothing).")
+@click.argument("path", required=False, default=None)
+@json_option
+@click.pass_context
+def cmd_summarize_calibrate(
+    ctx: click.Context, via: str, limit: int, go: bool, path: str | None,
+    output_json_flag: bool,
+) -> None:
+    """Measure what a rewrite actually delivers here, instead of assuming the target.
+
+    The savings estimate assumes prose compresses to the ratio the rewriter is
+    ASKED for, which nothing enforces. This samples the largest prompt files with
+    real rewrites and records what they achieved, so the estimate can use a
+    measured ratio. Each sample is a billed model call; default is a dry-run.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    on_progress = None if output_json else (lambda m: console.print(f"[dim]{escape(m)}…[/dim]"))
+    try:
+        report = run_calibration(
+            config, via=via, limit=limit, go=go, path=path, on_progress=on_progress)
+    except (DeliveryError, SummarizeRefused) as e:
+        raise click.ClickException(str(e)) from e
+    if output_json:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    _print_calibration(report)
 
 
 @cmd_summarize.command("check")
@@ -353,3 +463,86 @@ def cmd_summarize_undo(
         console.print(f"[dim]would restore {escape(result['path'])} from backup — re-run with --go.[/dim]")
     else:
         console.print(f"[green]✓[/green] restored {escape(result['path'])} from backup")
+
+
+@cmd_summarize.command("relocate")
+@click.argument("path")
+@click.option("--to", "target", default=None,
+              help=f"Where the reference material goes (default: {DEFAULT_TARGET} beside PATH).")
+@click.option("--section", "sections", multiple=True,
+              help="Only this section (repeatable). Still subject to the classifier.")
+@click.option("--go", is_flag=True,
+              help="Write the files (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@json_option
+@click.pass_context
+def cmd_summarize_relocate(
+    ctx: click.Context, path: str, target: str | None, sections: tuple[str, ...],
+    go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Move REFERENCE sections out of PATH into a linked file, leaving a pointer.
+
+    Nothing is rewritten and nothing is deleted: the text moves and a pointer
+    stays behind, so unlike a summary this cannot change what any surviving
+    instruction says. Only sections a classifier is confident describe what
+    EXISTS are moved; anything that might be an instruction is left alone and
+    the reason is printed. Default dry-run; --go writes.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    if dry_run and go:
+        raise click.UsageError("Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    source = Path(path).expanduser()
+    if source.is_dir():
+        raise click.UsageError("PATH is a directory; relocate takes one file.")
+    if not source.is_file():
+        raise click.UsageError(f"{path} is not a file.")
+
+    target_path = Path(target).expanduser() if target else source.parent / DEFAULT_TARGET
+    target_text = target_path.read_text(encoding="utf-8") if target_path.is_file() else ""
+    try:
+        plan = plan_relocation(
+            source_path=str(source), source_text=source.read_text(encoding="utf-8"),
+            target_path=str(target_path), target_text=target_text,
+            titles=list(sections) or None,
+        )
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e
+
+    if plan is None:
+        if output_json:
+            click.echo(json.dumps({"plan": None, "applied": False}, indent=2))
+            return
+        console.print(
+            f"[muted]No section of {escape(str(source))} is confidently reference "
+            f"material, so nothing is offered. Leaving a section in place costs a "
+            f"saving; moving an instruction out of an always-loaded file costs "
+            f"correctness, so the ambiguous cases stay put.[/muted]"
+        )
+        return
+
+    result = apply_relocation(config, plan, go=go)
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+
+    for s in plan.sections:
+        verb = "moved" if result["applied"] else "would move"
+        console.print(
+            f"[ok]✓[/ok] {verb} [accent]{escape(s.title)}[/accent] to "
+            f"[accent]{escape(str(target_path))}[/accent] "
+            f"(~{format_tokens(s.tokens_freed)} always-resident tok/read)"
+        )
+        console.print(f"  [muted]{escape(s.classification.reason)}[/muted]")
+    for title, verdict in plan.declined:
+        console.print(f"[muted]left in place: {escape(title)}; {escape(verdict.reason)}[/muted]")
+    for skip in result["skipped"]:
+        console.print(f"[warn]skip[/warn] {escape(skip['path'])}; {escape(skip['reason'])}")
+    if result["dry_run"]:
+        console.print("[muted]dry-run; nothing written. Re-run with --go to apply.[/muted]")
+    elif result["applied"]:
+        console.print(
+            f"[muted]Both files are backed up; `tj summarize undo {escape(str(source))} --go` "
+            f"restores the original.[/muted]"
+        )

@@ -17,7 +17,7 @@ from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
 from tokenjam.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 
 
 class _CollectingExporter(SpanExporter):
@@ -226,3 +226,82 @@ def test_agent_session_preserves_conversation_id(otel_exporter):
     assert len(spans) >= 1
     session = [s for s in spans if s.name == GenAIAttributes.SPAN_INVOKE_AGENT][0]
     assert session.attributes[GenAIAttributes.CONVERSATION_ID] == "my-conv-123"
+
+
+# ── SDK cost-attribution dimensions (#SDK dashboard shape) ─────────────────
+
+def test_watch_tenant_id_and_feature_stamped_on_session_span(otel_exporter):
+    """@watch(tenant_id=..., feature=...) attributes the whole session span."""
+
+    @watch(agent_id="tenant-agent", tenant_id="acme-corp", feature="support-triage")
+    def my_agent():
+        pass
+
+    my_agent()
+    session_spans = [
+        s for s in otel_exporter.get_finished_spans()
+        if s.name == GenAIAttributes.SPAN_INVOKE_AGENT
+    ]
+    assert len(session_spans) == 1
+    assert session_spans[0].attributes[TjAttributes.TENANT_ID] == "acme-corp"
+    assert session_spans[0].attributes[TjAttributes.FEATURE] == "support-triage"
+
+
+def test_watch_tenant_id_inherited_by_record_llm_call(otel_exporter):
+    """tenant_id/feature set once on @watch() reach every record_llm_call()
+    inside it with no per-call plumbing — the session-level default."""
+
+    @watch(agent_id="tenant-agent", tenant_id="acme-corp", feature="support-triage")
+    def my_agent():
+        record_llm_call("claude-haiku-4-5", "anthropic", 100, 20)
+
+    my_agent()
+    llm = [s for s in otel_exporter.get_finished_spans()
+           if s.name == GenAIAttributes.SPAN_LLM_CALL][0]
+    assert llm.attributes[TjAttributes.TENANT_ID] == "acme-corp"
+    assert llm.attributes[TjAttributes.FEATURE] == "support-triage"
+
+
+def test_record_llm_call_explicit_kwarg_overrides_inherited_session_value(otel_exporter):
+    """A per-call override (e.g. a different feature for one specific call)
+    takes precedence over the session-level default."""
+
+    @watch(agent_id="tenant-agent", tenant_id="acme-corp", feature="support-triage")
+    def my_agent():
+        record_llm_call(
+            "claude-haiku-4-5", "anthropic", 100, 20,
+            feature="billing-followup",
+            prompt_template_id="tmpl-1", prompt_template_version="2",
+        )
+
+    my_agent()
+    llm = [s for s in otel_exporter.get_finished_spans()
+           if s.name == GenAIAttributes.SPAN_LLM_CALL][0]
+    # tenant_id still inherited (no override given for it)...
+    assert llm.attributes[TjAttributes.TENANT_ID] == "acme-corp"
+    # ...but feature is the explicit per-call override, not the inherited one.
+    assert llm.attributes[TjAttributes.FEATURE] == "billing-followup"
+    assert llm.attributes[TjAttributes.PROMPT_TEMPLATE_ID] == "tmpl-1"
+    assert llm.attributes[TjAttributes.PROMPT_TEMPLATE_VERSION] == "2"
+
+
+def test_record_llm_call_without_watch_has_no_attribution(otel_exporter):
+    """No @watch() session, no explicit kwargs, no ambient context -> the
+    dimensions are simply absent (never a stamped empty string)."""
+    record_llm_call("claude-haiku-4-5", "anthropic", 100, 20)
+    llm = [s for s in otel_exporter.get_finished_spans()
+           if s.name == GenAIAttributes.SPAN_LLM_CALL][0]
+    assert TjAttributes.TENANT_ID not in llm.attributes
+    assert TjAttributes.FEATURE not in llm.attributes
+
+
+def test_record_tool_call_inherits_tenant_from_session(otel_exporter):
+
+    @watch(agent_id="tenant-agent", tenant_id="acme-corp")
+    def my_agent():
+        record_tool_call("send_email")
+
+    my_agent()
+    tool = [s for s in otel_exporter.get_finished_spans()
+            if s.name == GenAIAttributes.SPAN_TOOL_CALL][0]
+    assert tool.attributes[TjAttributes.TENANT_ID] == "acme-corp"

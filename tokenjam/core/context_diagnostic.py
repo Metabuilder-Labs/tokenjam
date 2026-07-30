@@ -81,7 +81,7 @@ from tokenjam.otel.semconv import GenAIAttributes
 
 # Honesty caveat surfaced verbatim next to the headline (CLAUDE.md Rule 14).
 CONTEXT_HONESTY_CAVEAT = (
-    "Re-read tokens are cache reads (billed at a reduced rate, not free) — real "
+    "Re-read tokens are cache reads (billed at a reduced rate, not free): real "
     "quota. Cache-miss tokens are cache writes (billed at a premium). Figures "
     "are measured shares and structural candidates, not guaranteed savings. "
     "Review before restructuring."
@@ -431,7 +431,7 @@ def _parse_attrs(raw: Any) -> dict:
         try:
             parsed = json.loads(raw)
             return parsed if isinstance(parsed, dict) else {}
-        except Exception:  # noqa: BLE001 — malformed JSON is non-fatal
+        except Exception:  # malformed JSON is non-fatal
             return {}
     return {}
 
@@ -445,7 +445,7 @@ def _coerce_input(tool_input: Any) -> dict | None:
     if isinstance(tool_input, str):
         try:
             tool_input = json.loads(tool_input)
-        except Exception:  # noqa: BLE001
+        except Exception:  # 1
             return None
     return tool_input if isinstance(tool_input, dict) else None
 

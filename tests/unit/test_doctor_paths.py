@@ -13,13 +13,31 @@ def test_config_path_message_collapses_home(monkeypatch, tmp_path):
     cfg.parent.mkdir(parents=True)
     cfg.write_text('version = "1"\n')
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("tokenjam.cli.cmd_doctor.find_config_file", lambda: cfg)
+    monkeypatch.setattr("tokenjam.cli.cmd_doctor.resolve_config_path", lambda *_a: cfg)
     monkeypatch.setattr("tokenjam.cli.cmd_doctor.load_config", lambda _p: None)
 
     check = _check_config()
     assert check["level"] == "ok"
     assert "~/.config/tj/config.toml" in check["message"]
     assert str(home) not in check["message"]
+
+
+def test_check_config_honors_tj_config(monkeypatch, tmp_path):
+    """`_check_config` must resolve the same file `load_config` reads —
+    otherwise doctor reports "No config file found" while every other check
+    (which reads `ctx.obj["config"]`, loaded via `load_config`/TJ_CONFIG) is
+    passing fine against a real, TJ_CONFIG-pointed config."""
+    cfg = tmp_path / "custom-location.toml"
+    cfg.write_text('version = "1"\n')
+    monkeypatch.setenv("TJ_CONFIG", str(cfg))
+    # No SEARCH_PATHS patching here — the point is that TJ_CONFIG alone,
+    # with nothing discoverable at the default search paths, is enough.
+    import tokenjam.core.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [])
+
+    check = _check_config()
+    assert check["level"] == "ok"
+    assert "custom-location.toml" in check["message"]
 
 
 def test_db_path_message_collapses_home(monkeypatch, tmp_path):

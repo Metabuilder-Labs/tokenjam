@@ -7,7 +7,9 @@ import duckdb
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
-from tokenjam.core.config import find_config_file, load_config
+from tokenjam.core.config import load_config, resolve_config_path
+from tokenjam.core.data_span import MIN_PLAUSIBLE_YEAR
+from tokenjam.core.db import SPANS_INDEXES
 from tokenjam.utils.formatting import console, display_path
 
 
@@ -22,13 +24,13 @@ from tokenjam.utils.formatting import console, display_path
 )
 @click.pass_context
 def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None:
-    """Run health checks on tj configuration and environment."""
+    """Health-check your tj setup."""
     output_json = resolve_output_json(ctx, output_json_flag)
     config = ctx.obj["config"]
     checks: list[dict] = []
 
     # 1. Config file found and valid
-    checks.append(_check_config())
+    checks.append(_check_config(ctx.obj.get("config_path_override")))
 
     # 2. DuckDB file writable
     checks.append(_check_db(config))
@@ -58,6 +60,10 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     spans_stats_check = _check_spans_stats(ctx.obj["db"])
     checks.append(spans_stats_check)
 
+    # 9b. Secondary-index integrity on spans — a fault the statistics check
+    #     above cannot see, and one that makes the retention DELETE unreliable.
+    checks.append(_check_spans_indexes(ctx.obj["db"]))
+
     # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
     checks.append(_check_span_staleness(ctx.obj["db"]))
 
@@ -75,6 +81,24 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # 15. Onboarded-but-silent — first-signal diagnosis (issue #80)
     checks.append(_check_onboarding_first_signal(config, ctx.obj["db"]))
+
+    # 16. Transcript ingest completeness — on-disk sessions never ingested,
+    #     still recoverable only until Claude Code prunes the transcript.
+    checks.append(_check_transcript_ingest_gap(config, ctx.obj["db"]))
+
+    # 17. Cost integrity — sessions.total_cost_usd vs SUM(spans.cost_usd)
+    checks.append(_check_cost_integrity(ctx.obj["db"]))
+
+    # 18. Duplicate call ingest — one LLM call stored twice, once per observer
+    checks.append(_check_duplicate_call_ingest(ctx.obj["db"]))
+
+    # 18b. Timestamp sentinels an older build wrote — a one-shot cleanup.
+    checks.append(_check_sentinel_timestamps(ctx.obj["db"]))
+
+    # 19. Retention — the analysis span, what it keeps, and what the last run
+    #     actually deleted. A delete of user history has to be readable after
+    #     the fact, not inferable by diffing two measurements days apart.
+    checks.append(_check_retention(config, ctx.obj["db"]))
 
     if output_json:
         click.echo(json.dumps(checks, default=str))
@@ -96,9 +120,16 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
         ctx.exit(0)
 
 
-def _check_config() -> dict:
+def _check_config(override: str | None = None) -> dict:
+    """Report which config file is live.
+
+    Takes the invocation's own `--config` value so `tj --config PATH doctor`
+    reports PATH: an explicit override never reaches the environment, so a
+    bare rediscovery here would name a different file while every other check
+    — which reads the config loaded from PATH — describes that one.
+    """
     try:
-        path = find_config_file()
+        path = resolve_config_path(override)
         if path is None:
             return {"name": "Config file", "level": "error",
                     "message": "No config file found. Run `tj onboard` to create one."}
@@ -155,7 +186,7 @@ def _check_ingest_secret(config: object) -> dict:
 def _check_prometheus(config: object) -> dict:
     if config.export.prometheus.enabled:
         return {"name": "Prometheus", "level": "ok",
-                "message": f"Enabled on port {config.export.prometheus.port}"}
+                "message": "Prometheus export enabled."}
     return {"name": "Prometheus", "level": "info",
             "message": "Prometheus export disabled."}
 
@@ -170,7 +201,7 @@ def _check_proxy_wiring(config: object) -> dict:
     from tokenjam.proxy.wiring import find_orphaned_wiring, proxy_base_url
     try:
         orphaned = find_orphaned_wiring(config)
-    except Exception:  # noqa: BLE001 — best-effort; never fail doctor on this
+    except Exception:  # best-effort; never fail doctor on this
         orphaned = []
     if orphaned:
         return {
@@ -316,6 +347,147 @@ def _check_spans_stats(db: object) -> dict:
             "message": "Column statistics are consistent."}
 
 
+def _check_spans_indexes(db: object) -> dict:
+    """Detect a missing or under-reporting secondary index on `spans`.
+
+    An ERROR, not a warning, and deliberately: the retention job's `DELETE FROM
+    spans WHERE start_time < ?` maintains every index inside its own
+    transaction, so a damaged one can abort the statement part-way and leave it
+    reporting fewer rows removed than it matched. A deletion of user history
+    whose extent nobody can state afterwards is not a degraded read path, it is
+    an unsafe write path, and the column-statistics check next door cannot see
+    it — that one asks only about `trace_id`'s row-group statistics and reports
+    OK on either fault below.
+    """
+    from tokenjam.core.db import check_spans_index_corruption
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Spans index integrity", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        faults = check_spans_index_corruption(conn)
+    except duckdb.Error as e:
+        return {"name": "Spans index integrity", "level": "info",
+                "message": f"Skipped — could not probe the indexes: {e}"}
+    if faults:
+        detail = "; ".join(f"{name} {reason}" for name, reason in faults)
+        return {
+            "name": "Spans index integrity",
+            "level": "error",
+            "message": f"Secondary index damage on the spans table — {detail}. "
+                       f"Queries served by these indexes return incomplete "
+                       f"results, and a DELETE (retention cleanup) can abort "
+                       f"part-way through. Run `tj doctor --repair` to rebuild "
+                       f"them from the table (no data is moved).",
+            "repair_action": "rebuild_spans_indexes",
+        }
+    return {"name": "Spans index integrity", "level": "ok",
+            "message": f"All {len(SPANS_INDEXES)} secondary indexes on spans "
+                       f"agree with the table."}
+
+
+def _check_retention(config: object, db: object) -> dict:
+    """Report the analysis span, the retention derived from it, and the last delete.
+
+    A deletion of the user's own history that leaves no account of itself is
+    discoverable only by measuring the store twice, days apart, and diffing —
+    which is how eight weeks of the oldest history went missing unnoticed. The
+    ledger makes it a fact on disk; this makes it a fact somebody sees.
+
+    Never an error: retention doing its job is not a fault. What would be a
+    fault is a config whose retention undercuts its own span, and that cannot
+    happen — `core/analysis_span.retention_days_for` raises it — so this reports
+    when the clamp fired rather than warning about a state that no longer exists.
+    """
+    from tokenjam.core.analysis_span import (
+        retention_days_for,
+        retention_was_raised_to_span,
+        span_label,
+    )
+
+    storage = getattr(config, "storage", None)
+    if storage is None:
+        return {"name": "Retention", "level": "info",
+                "message": "Skipped — no storage config."}
+
+    span = span_label(storage)
+    kept = retention_days_for(storage)
+    kept_text = (
+        "deletion is disabled" if kept is None else f"history is kept for {kept} days"
+    )
+    clamp = ""
+    if retention_was_raised_to_span(storage):
+        clamp = (
+            " Storage retention is set shorter than the span and has been raised "
+            "to match — nothing tj analyzes can be deleted underneath it."
+        )
+
+    conn = getattr(db, "conn", None)
+    last = ""
+    if conn is not None:
+        try:
+            row = conn.execute(
+                "SELECT ran_at, spans_deleted, sessions_deleted, oldest_kept "
+                "FROM retention_events ORDER BY ran_at DESC LIMIT 1"
+            ).fetchone()
+        except duckdb.Error:
+            row = None
+        if row is None:
+            last = " No retention run has been recorded yet."
+        else:
+            ran_at, spans_deleted, sessions_deleted, oldest_kept = row
+            last = (
+                f" Last run {ran_at:%Y-%m-%d %H:%M} UTC removed {spans_deleted} "
+                f"span(s) and {sessions_deleted} session(s)"
+            )
+            last += (
+                f"; oldest surviving span {oldest_kept:%Y-%m-%d}." if oldest_kept
+                else "; no dated spans remain."
+            )
+
+    return {"name": "Retention", "level": "ok",
+            "message": f"Analyzing {span}, so {kept_text}.{clamp}{last}"}
+
+
+def _check_sentinel_timestamps(db: object) -> dict:
+    """Find rows an older build stamped with an epoch sentinel instead of a time.
+
+    Ingest can no longer produce one — a record with no observed time is
+    rejected at the boundary — so this is a one-shot cleanup for corpora already
+    written, offered here rather than as a SQL snippet somebody has to be told
+    about. A warning, not an error: the rows are inert until something takes a
+    naive `MIN()` over them, at which point a single row reports a span decades
+    wide and crushes every derived rate to zero.
+    """
+    from tokenjam.core.db import count_sentinel_timestamp_rows
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Timestamp sentinels", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        found = count_sentinel_timestamp_rows(conn)
+    except duckdb.Error as e:
+        return {"name": "Timestamp sentinels", "level": "info",
+                "message": f"Skipped — could not scan for sentinels: {e}"}
+    if found:
+        detail = ", ".join(f"{count} in {table}" for table, count in sorted(found.items()))
+        return {
+            "name": "Timestamp sentinels",
+            "level": "warning",
+            "message": f"Rows dated before {MIN_PLAUSIBLE_YEAR} — {detail}. These "
+                       f"carry no real observed time and a single one makes a "
+                       f"naive MIN() report a span decades wide. Run `tj doctor "
+                       f"--repair` to delete them.",
+            "repair_action": "purge_timestamp_sentinels",
+        }
+    return {"name": "Timestamp sentinels", "level": "ok",
+            "message": "No rows carry a placeholder timestamp."}
+
+
 def _check_schema_integrity(db: object) -> dict:
     """Detect a recorded-but-unlanded migration (missing columns #55 / tables #382).
 
@@ -371,6 +543,101 @@ def _check_schema_integrity(db: object) -> dict:
         }
     return {"name": "Schema integrity", "level": "ok",
             "message": "All expected columns and tables present."}
+
+
+def _check_cost_integrity(db: object) -> dict:
+    """Flag sessions whose stored cost disagrees with their spans' sum.
+
+    ``sessions.total_cost_usd`` and ``SUM(spans.cost_usd)`` are two figures the
+    UI can show side by side — a session card next to a span-derived total — so
+    they have to agree, and ``recompute_session_totals_from_spans`` already
+    names the span sum as the source of truth. Historical rows can still hold a
+    stale total from a path that moved one side without the other; this surfaces
+    that instead of leaving the user to notice a 3.8% discrepancy between two
+    screens. The repair is the existing idempotent recompute, so no cost is
+    invented and no span is touched.
+    """
+    from tokenjam.core.db import session_cost_drift
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Cost integrity", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        count, total_drift, worst = session_cost_drift(conn)
+    except duckdb.Error as e:
+        return {"name": "Cost integrity", "level": "info",
+                "message": f"Skipped — could not inspect cost totals: {e}"}
+    if not count:
+        return {"name": "Cost integrity", "level": "ok",
+                "message": "Every session's stored cost matches the sum of its spans."}
+    biggest = ""
+    if worst:
+        session_id, stored, span_sum = worst[0]
+        biggest = (
+            f" Largest: session {session_id} stores ${stored:,.2f} against "
+            f"${span_sum:,.2f} of spans."
+        )
+    return {
+        "name": "Cost integrity",
+        "level": "warning",
+        "message": (
+            f"{count} session(s) store a total that disagrees with the sum of "
+            f"their spans, ${total_drift:,.2f} apart in all. Cost shown per "
+            f"session and cost derived from spans will not match."
+            f"{biggest} Run `tj doctor --repair` to reconcile each session to "
+            f"its spans (idempotent, spans untouched)."
+        ),
+        "repair_action": "heal_session_costs",
+    }
+
+
+def _check_duplicate_call_ingest(db: object) -> dict:
+    """Flag LLM calls stored once per observer instead of once.
+
+    A session that ran while `tj serve` was up is observed live AND again when
+    its transcript is backfilled. Each path mints its own span_id, so the
+    store's span_id-keyed idempotency never sees the overlap and every cost
+    figure prices the call twice. Both ingest paths suppress this at write time
+    now, so a DB filled by a current build reports nothing here; a DB filled by
+    an older one still carries the doubled rows and reports a cost that is
+    simply too high. The repair drops the redundant observations and
+    reconciles the affected sessions, both idempotent.
+    """
+    from tokenjam.core.db import duplicate_call_observations
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Duplicate call ingest", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        spans, redundant_usd, worst = duplicate_call_observations(conn)
+    except duckdb.Error as e:
+        return {"name": "Duplicate call ingest", "level": "info",
+                "message": f"Skipped — could not inspect span provenance: {e}"}
+    if not spans:
+        return {"name": "Duplicate call ingest", "level": "ok",
+                "message": "No LLM call is stored more than once."}
+    biggest = ""
+    if worst:
+        session_id, session_spans, session_usd = worst[0]
+        biggest = (
+            f" Largest: session {session_id} carries {session_spans} redundant "
+            f"span(s) worth ${session_usd:,.2f}."
+        )
+    return {
+        "name": "Duplicate call ingest",
+        "level": "warning",
+        "message": (
+            f"{spans} span(s) restate an LLM call another ingest path already "
+            f"recorded, inflating reported cost by ${redundant_usd:,.2f}."
+            f"{biggest} Run `tj doctor --repair` to drop the restatements and "
+            f"reconcile the affected sessions."
+        ),
+        "repair_action": "drop_duplicate_calls",
+    }
 
 
 # Spans older than this are treated as a stalled connection. Claude Code /
@@ -440,12 +707,78 @@ def _check_span_staleness(db: object) -> dict:
             "message": f"Most recent span is {age_hours:.1f}h old."}
 
 
+def _check_transcript_ingest_gap(config: object, db: object) -> dict:
+    """Surface on-disk Claude Code sessions that were never ingested.
+
+    The live OTLP path drops any session whose shell lacked the telemetry env
+    vars or that ran while `tj serve` was down/unreachable — Claude Code's
+    exporter has no retry and no buffer. The transcript survives on disk, but
+    only until Claude Code prunes it (~30 days), after which the session is
+    unrecoverable. `_check_span_staleness` above catches "nothing is arriving
+    right now"; this catches the subtler steady-state case where *most* sessions
+    arrive and a slice silently doesn't.
+
+    Scoped to a recent window so the check stays fast and only reports sessions
+    that are still recoverable — anything older than the rotation horizon is
+    gone regardless of what we say about it.
+    """
+    from datetime import timedelta
+
+    from tokenjam.core.transcript_sync import CLAUDE_CODE_ROTATION_DAYS
+    from tokenjam.utils.time_parse import utcnow
+
+    name = "Transcript ingest completeness"
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        from tokenjam.core.transcript_sync import reconcile_claude_code
+
+        since = utcnow() - timedelta(days=CLAUDE_CODE_ROTATION_DAYS)
+        report = reconcile_claude_code(db, since=since)
+    except Exception as e:  # never let a health check crash `tj doctor`
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not compare transcripts: {e}"}
+
+    if not report.root.exists():
+        return {"name": name, "level": "info",
+                "message": f"No Claude Code transcripts found at {report.root}."}
+    if report.missing_count == 0:
+        return {"name": name, "level": "ok",
+                "message": (f"All {report.disk_sessions} on-disk session(s) in the last "
+                            f"{CLAUDE_CODE_ROTATION_DAYS}d are ingested.")}
+
+    days_left = report.days_until_rotation()
+    horizon = (f" Oldest is ~{days_left:.0f} day(s) from being pruned."
+               if days_left is not None else "")
+    auto = getattr(getattr(config, "ingest", None), "auto_catch_up", False)
+    remedy = (" `tj serve` will catch up automatically; run `tj backfill claude-code` "
+              "to close it now." if auto else
+              " Automatic catch-up is off ([ingest] auto_catch_up) — run "
+              "`tj backfill claude-code`.")
+    return {
+        "name": name,
+        "level": "warning",
+        "message": (
+            f"{report.missing_count} on-disk session(s) are not ingested."
+            f"{horizon}{remedy}"
+        ),
+    }
+
+
 def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
     """Run repair actions for any check that flagged one."""
     from tokenjam.core.db import (
+        SESSION_COST_DRIFT_TOLERANCE_USD,
+        check_spans_index_corruption,
         ensure_expected_columns,
         ensure_expected_tables,
+        purge_sentinel_timestamp_rows,
+        repair_spans_indexes,
         repair_spans_stats,
+        session_cost_drift,
     )
 
     conn = getattr(db, "conn", None)
@@ -478,6 +811,146 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                 console.print(
                     f"  [green]Schema reconciled — added {summary}.[/green]"
                 )
+            continue
+        if action == "heal_session_costs":
+            recompute = getattr(db, "recompute_session_totals_from_spans", None)
+            if conn is None or recompute is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                # Re-read the drifted set here rather than trusting the check's
+                # truncated `worst` list, which is capped for display.
+                count, _total, _worst = session_cost_drift(conn)
+                drifted = [
+                    str(row[0])
+                    for row in conn.execute(
+                        """
+                        SELECT s.session_id
+                        FROM sessions AS s
+                        LEFT JOIN (
+                            SELECT session_id, SUM(cost_usd) AS span_cost
+                            FROM spans WHERE session_id IS NOT NULL
+                            GROUP BY session_id
+                        ) AS agg ON agg.session_id = s.session_id
+                        WHERE ABS(COALESCE(agg.span_cost, 0.0)
+                                  - COALESCE(s.total_cost_usd, 0.0)) > $1
+                        """,
+                        [SESSION_COST_DRIFT_TOLERANCE_USD],
+                    ).fetchall()
+                ]
+                recompute(drifted)
+                after, _after_total, _ = session_cost_drift(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Cost repair failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                console.print(
+                    f"  [green]Session costs reconciled — {count - after} of "
+                    f"{count} session(s) now match their spans.[/green]"
+                )
+            continue
+        if action == "drop_duplicate_calls":
+            from tokenjam.core.db import purge_duplicate_call_observations
+
+            recompute = getattr(db, "recompute_session_totals_from_spans", None)
+            if conn is None or recompute is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                deleted, sessions = purge_duplicate_call_observations(conn)
+                # The delete moved SUM(spans) under rows nobody rewrote, so the
+                # affected sessions have to be reconciled or this repair simply
+                # trades one disagreement for another.
+                if sessions:
+                    recompute(sessions)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Duplicate-call repair failed — {e}. If the "
+                        f"database is locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                console.print(
+                    f"  [green]Dropped {deleted} restated observation(s) across "
+                    f"{len(sessions)} session(s); their totals were "
+                    f"reconciled.[/green]"
+                )
+            continue
+        if action == "purge_timestamp_sentinels":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                removed = purge_sentinel_timestamp_rows(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Sentinel purge failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                detail = ", ".join(
+                    f"{count} from {table}" for table, count in sorted(removed.items())
+                ) or "nothing"
+                console.print(f"  [green]Deleted {detail}.[/green]")
+            continue
+        if action == "rebuild_spans_indexes":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                repair_spans_indexes(conn)
+                remaining = check_spans_index_corruption(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Index rebuild failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                if remaining:
+                    # Rebuilding from the table cannot leave an index disagreeing
+                    # with it, so anything still failing is a fault one layer
+                    # down — say so rather than reporting a repair that did not
+                    # take.
+                    console.print(
+                        f"  [red]Rebuilt, but {len(remaining)} index(es) still "
+                        f"disagree with the table — the damage is below the "
+                        f"index layer. Run `tj doctor --repair` again to rebuild "
+                        f"the table itself.[/red]"
+                    )
+                else:
+                    console.print(
+                        f"  [green]Rebuilt {len(SPANS_INDEXES)} secondary "
+                        f"index(es) on spans; no rows were moved.[/green]"
+                    )
             continue
         if action == "rebuild_spans":
             if conn is None:
@@ -721,11 +1194,11 @@ def _detect_onboarded_persona(config: object) -> str:
     """
     agent_ids = list(getattr(config, "agents", {}) or {})
     if any(a.startswith("claude-code-") for a in agent_ids):
-        return "claude_code"
+        return "claude-code"
     if "codex_exec" in agent_ids:
         return "codex"
     if _tj_statusline_wired():
-        return "claude_code"
+        return "claude-code"
     return "sdk"
 
 

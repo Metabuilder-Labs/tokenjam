@@ -13,10 +13,79 @@
 # `_strip_context_tag`), so `claude-opus-4-8[1m]` resolves to the base
 # `claude-opus-4-8` rates. Source:
 # https://platform.claude.com/docs/en/about-claude/pricing → "Long context pricing".
+#
+# ─── Rate history (the time axis) ──────────────────────────────────────────
+# A `[provider.model]` table with rate keys directly on it is one rate that has
+# always applied — the form every row below uses, and the only form that ever
+# existed. A model whose price CHANGES on a date adds dated rows instead of
+# being edited in place:
+#
+#   [anthropic.claude-sonnet-5]          # the rate before the change
+#   input_per_mtok = 2.00
+#
+#   [[anthropic.claude-sonnet-5.rates]]  # the rate from that date onward
+#   valid_from = 2026-09-01
+#   input_per_mtok = 3.00
+#
+# Lookup picks the row whose window contains the span's start_time, so a span
+# recorded before the change keeps pricing at the rate that actually billed it
+# while a later one picks up the new rate. Editing a rate in place instead makes
+# past and future figures silently incomparable. Fields a dated row omits are
+# inherited from the rate it supersedes.
+#
+# ─── Variants (the variant axis) ───────────────────────────────────────────
+# A variant is a different way of buying the SAME model id. Two forms:
+#   * per-model, when the rate is specific to that model — a `[[...rates]]` row
+#     carrying `variant = "fast"`;
+#   * model-independent, under `[variants.<name>]`, where each field is either
+#     an absolute per-MTok rate or `{ multiplier = X }` (X times the model's own
+#     standard rate for that field) / `{ multiplier = X, of = "<field>" }` for a
+#     multiple of a DIFFERENT standard field.
+# Fields a variant doesn't name keep the model's standard rate.
+
+# The Batch API bills a flat half of standard prices, on every model that
+# offers it. See https://platform.claude.com/docs/en/build-with-claude/batch-processing.
+[variants.batch]
+input_per_mtok       = { multiplier = 0.50 }
+output_per_mtok      = { multiplier = 0.50 }
+cache_read_per_mtok  = { multiplier = 0.50 }
+cache_write_per_mtok = { multiplier = 0.50 }
+
+# A 1-hour-TTL cache write bills at 2x the model's INPUT rate, against 1.25x for
+# the default 5-minute write that `cache_write_per_mtok` carries. Expressed as a
+# multiple of the input rate rather than of the 5-minute write rate because that
+# is how the provider defines it — see the "1h cache write" row in
+# https://platform.claude.com/docs/en/build-with-claude/prompt-caching.
+[variants.cache-1h]
+cache_write_per_mtok = { multiplier = 2.0, of = "input_per_mtok" }
 
 # Claude Fable 5 — Anthropic's most capable widely released model.
 # See https://platform.claude.com/docs/en/pricing (cache_write = 5-minute write).
 [anthropic.claude-fable-5]
+input_per_mtok = 10.00
+output_per_mtok = 50.00
+cache_read_per_mtok = 1.00
+cache_write_per_mtok = 12.50
+
+# Claude Mythos 5 — same published rates as Fable 5.
+[anthropic.claude-mythos-5]
+input_per_mtok = 10.00
+output_per_mtok = 50.00
+cache_read_per_mtok = 1.00
+cache_write_per_mtok = 12.50
+
+# Claude Opus 5. Fast mode (`speed: "fast"`, beta `fast-mode-2026-02-01`) runs
+# the same model id at premium rates, so it is a variant row rather than a
+# separate model — see
+# https://platform.claude.com/docs/en/about-claude/pricing.
+[anthropic.claude-opus-5]
+input_per_mtok = 5.00
+output_per_mtok = 25.00
+cache_read_per_mtok = 0.50
+cache_write_per_mtok = 6.25
+
+[[anthropic.claude-opus-5.rates]]
+variant = "fast"
 input_per_mtok = 10.00
 output_per_mtok = 50.00
 cache_read_per_mtok = 1.00
@@ -27,6 +96,14 @@ input_per_mtok = 5.00
 output_per_mtok = 25.00
 cache_read_per_mtok = 0.50
 cache_write_per_mtok = 6.25
+
+# Opus 4.8 also offers fast mode, at the same premium as Opus 5.
+[[anthropic.claude-opus-4-8.rates]]
+variant = "fast"
+input_per_mtok = 10.00
+output_per_mtok = 50.00
+cache_read_per_mtok = 1.00
+cache_write_per_mtok = 12.50
 
 [anthropic.claude-opus-4-7]
 input_per_mtok = 5.00
@@ -48,13 +125,21 @@ cache_write_per_mtok = 6.25
 
 # Claude Sonnet 5 — introductory pricing in effect through 2026-08-31 (see
 # https://platform.claude.com/docs/en/about-claude/pricing#claude-sonnet-5-introductory-pricing);
-# standard pricing ($3/$15 input/output) takes over 2026-09-01 — update this
-# row then. cache_write = 5-minute write.
+# standard pricing takes over 2026-09-01 and is the dated row below, so spans
+# recorded on either side of the boundary each price at the rate that billed
+# them. cache_write = 5-minute write.
 [anthropic.claude-sonnet-5]
 input_per_mtok = 2.00
 output_per_mtok = 10.00
 cache_read_per_mtok = 0.20
 cache_write_per_mtok = 2.50
+
+[[anthropic.claude-sonnet-5.rates]]
+valid_from = 2026-09-01
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+cache_read_per_mtok = 0.30
+cache_write_per_mtok = 3.75
 
 [anthropic.claude-sonnet-4-6]
 input_per_mtok = 3.00
@@ -107,6 +192,28 @@ output_per_mtok = 75.00
 cache_read_per_mtok = 1.50
 cache_write_per_mtok = 18.75
 
+# Claude 3.7 Sonnet. Still the dominant model in archived agent traces, which
+# arrive as `claude-3-7-sonnet-20250219` (date-stripped to this row) or
+# `anthropic/claude-3.7-sonnet` from a gateway.
+#
+# SOURCING — UNVERIFIED, and deliberately left flagged rather than given a
+# citation that would not survive a click. Retired 2026-02-19 (deprecated
+# 2025-10-28) per
+# https://platform.claude.com/docs/en/about-claude/model-deprecations, and
+# retirement removed it from https://platform.claude.com/docs/en/docs/about-claude/pricing,
+# which today lists no Claude 3.x Sonnet row at all. Checked 2026-07-27: absent
+# from that page, from https://aws.amazon.com/bedrock/pricing/ and from
+# https://cloud.google.com/vertex-ai/generative-ai/pricing; web.archive.org is
+# unreachable from this environment. The rates below are the widely-reported
+# last-published ones, carried forward for historical spans, but NO first-party
+# published page could be reached to confirm them. Re-verify against an
+# Anthropic-published archive before treating these four numbers as audited.
+[anthropic.claude-3-7-sonnet]
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+cache_read_per_mtok = 0.30
+cache_write_per_mtok = 3.75
+
 # Claude Haiku 3.5 (retired except on Bedrock and Vertex)
 [anthropic.claude-haiku-3-5]
 input_per_mtok = 0.80
@@ -153,6 +260,16 @@ output_per_mtok = 180.00
 # ─── OpenAI (superseded, kept for historical spans) ─────────────────────────
 # gpt-4o / gpt-4o-mini / o3 / o4-mini are no longer on OpenAI's current pricing
 # page but still appear in older telemetry; rates retained as last-published.
+# GPT-4.1. Rates verified 2026-07-27 against OpenAI's own model page,
+# https://developers.openai.com/api/docs/models/gpt-4.1 — $2.00 input,
+# $0.50 cached input, $8.00 output per million tokens. (It is no longer on the
+# top-level https://developers.openai.com/api/docs/pricing table; the per-model
+# page still carries it.)
+[openai."gpt-4.1"]
+input_per_mtok = 2.00
+output_per_mtok = 8.00
+cache_read_per_mtok = 0.50
+
 [openai.gpt-4o]
 input_per_mtok = 2.50
 output_per_mtok = 10.00
@@ -168,6 +285,21 @@ output_per_mtok = 40.00
 [openai.o4-mini]
 input_per_mtok = 1.10
 output_per_mtok = 4.40
+
+# Gemini 2.0 Flash (shut down 2026-06-01, kept for historical spans). Arrives
+# as the dotted `gemini-2.0-flash`, resolved to this key by the version-dash
+# fallback in `get_rates`.
+#
+# SOURCING — rates captured 2026-07-27 from Google's own Gemini API pricing
+# page, https://ai.google.dev/gemini-api/docs/pricing, which still carries the
+# model under a deprecation warning: $0.10 per 1M input tokens (text/image/
+# video) and $0.40 per 1M output tokens. Note this is the Gemini API rate, NOT
+# Vertex AI's, which prices the same model differently
+# ($0.15/$0.60 at https://cloud.google.com/vertex-ai/generative-ai/pricing);
+# the corpus these rates were reconciled against is Gemini-API-sourced.
+[google.gemini-2-0-flash]
+input_per_mtok = 0.10
+output_per_mtok = 0.40
 
 [google.gemini-2-5-pro]
 input_per_mtok = 1.25

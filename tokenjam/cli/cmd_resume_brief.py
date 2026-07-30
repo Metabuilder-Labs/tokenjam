@@ -68,7 +68,7 @@ def _safe(fn, session_id: str, projects_root: Path):
     """Call a Story builder, degrading any failure to None (fail-soft)."""
     try:
         return fn(session_id, projects_root=projects_root)
-    except Exception:  # noqa: BLE001 - a brief must never break a session
+    except Exception:  # a brief must never break a session
         return None
 
 
@@ -87,7 +87,7 @@ def _load_for_session(
     snapshot = None
     try:
         snapshot = load_session_method(db, session_id) if db is not None else None
-    except Exception:  # noqa: BLE001 - fail-soft
+    except Exception:  # fail-soft
         snapshot = None
     if isinstance(snapshot, dict) and (snapshot.get("story") or snapshot.get("asks")):
         return snapshot.get("story"), snapshot.get("asks"), records
@@ -153,7 +153,7 @@ def _latest_snapshot_session(db: Any) -> str | None:
             "SELECT session_id FROM session_story "
             "ORDER BY captured_at DESC LIMIT 1"
         ).fetchone()
-    except Exception:  # noqa: BLE001 - fail-soft (table absent / api mode)
+    except Exception:  # fail-soft (table absent / api mode)
         return None
     return row[0] if row and row[0] else None
 
@@ -176,7 +176,7 @@ def cmd_resume_brief(
     transcript_path: str | None,
     from_hook: bool,
 ) -> None:
-    """Emit a compact resume brief for a session (out-of-band, fail-soft)."""
+    """Recap where a session left off."""
     if not (session_id or last or transcript_path or from_hook):
         raise click.UsageError(
             "Provide --session <id>, --last, --transcript <path>, or --from-hook."
@@ -217,7 +217,7 @@ def cmd_resume_brief(
                 story, asks, records = _load_for_session(db, sid, projects_root)
 
         brief = build_resume_brief(story, asks, session_id=sid, records=records)
-    except Exception as exc:  # noqa: BLE001 - never break the caller / a session
+    except Exception as exc:  # never break the caller / a session
         if verbose:
             click.echo(f"resume-brief: skipped ({exc})", err=True)
         return
@@ -241,7 +241,7 @@ def _top_driver_hint() -> str:
     try:
         from tokenjam.core.attribution_cache import format_driver_label
         label = format_driver_label()
-    except Exception:  # noqa: BLE001 - a brief must never break a session
+    except Exception:  # a brief must never break a session
         return ""
     if not label:
         return ""

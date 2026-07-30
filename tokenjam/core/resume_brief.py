@@ -398,7 +398,7 @@ def build_resume_brief(
 
     try:
         spine = build_method_spine(scoped)
-    except Exception:  # noqa: BLE001 - fail-soft: a brief must never break a session
+    except Exception:  # fail-soft: a brief must never break a session
         spine = []
 
     steps = scoped.get("steps") or []
