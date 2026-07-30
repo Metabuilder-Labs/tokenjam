@@ -1,16 +1,16 @@
-"""Static-grep regression guards for the Lens web-UI polish batch (#654–#657).
+"""Static-grep regression guards for Lens web-UI fixes.
 
-There is no JS test runner in the Python CI ``test`` job, so behaviour that is
-pure state logic is guarded by extracting the relevant pure function and running
-it under node (see ``test_lens_select_all_behaviour.py`` /
-``test_lens_dashboard_states.py``). The fixes in this module are copy/markup and
-default-value changes with no branching logic of their own, so a source
-assertion is the right guard: it fails if a rewrite silently reverts the
-behaviour these issues fixed.
+There is no JS test runner in the Python CI ``test`` job, so UI behaviour is
+guarded here by asserting the buggy pattern is gone and the fix's markers are
+present (the approach documented in CLAUDE.md → Web UI → "Testing the UI"), or by
+extracting a pure function and running it under node (see
+``test_lens_select_all_behaviour.py`` / ``test_lens_dashboard_states.py``).
 
-Each assertion is anchored on the specific string the fix introduced (or the
-buggy string it removed), not on incidental wording, so harmless copy tweaks
-around it do not break the test.
+Each assertion is anchored on the specific string a fix introduced or removed,
+not on incidental wording, so harmless copy tweaks around it don't break it.
+
+Guards the polish batch (#654–#657) and the trace-detail fix (#653 plus its #659
+follow-ups: opt-in light payload, lazy per-span attributes, capped/pinned rows).
 """
 from __future__ import annotations
 
@@ -154,3 +154,64 @@ def test_drift_empty_state_has_scannable_headline(html: str) -> None:
     assert (
         "Drift needs live SDK agents with 10+ completed sessions" in html
     ), "Drift empty-state must lead with the one-line headline"
+
+
+# --------------------------------------------------------------------------- #
+# #653 — large-trace detail must not hang; payload is capped + lazy-attrs
+# --------------------------------------------------------------------------- #
+def test_trace_detail_has_load_error_state(html: str) -> None:
+    """The skeleton must be able to clear into an error state, never spin forever."""
+    assert "loadState" in html
+    # An explicit error branch with a retry affordance.
+    assert "loadState === 'error'" in html
+    assert "Retry" in html
+
+
+def test_trace_detail_has_fetch_timeout(html: str) -> None:
+    """The trace-detail fetch is raced against a timeout so it can't hang."""
+    assert "Promise.race" in html
+    assert "TIMEOUT_MS" in html
+
+
+def test_trace_detail_handles_truncation(html: str) -> None:
+    """A capped large trace must disclose 'showing N of M spans' (no silent drop)."""
+    assert "truncated" in html
+    assert "Showing " in html and "of " in html and "spans" in html
+
+
+def test_trace_detail_fetches_attributes_lazily(html: str) -> None:
+    """Captured content is fetched per-span on expand, not shipped for all spans."""
+    # The lazy per-span endpoint is called from the detail view.
+    assert "/spans/" in html
+    assert "selAttrs" in html
+    # The old bug: rendering sel.attributes straight from the waterfall payload.
+    assert "JSON.stringify(sel.attributes" not in html
+
+
+def test_trace_detail_caps_rendered_rows(html: str) -> None:
+    """Thousands of DOM rows freeze the tab; the render is capped + disclosed."""
+    assert "RENDER_ROW_CAP" in html
+
+
+# --------------------------------------------------------------------------- #
+# #659 P1-1 — the Lens waterfall must request the OPT-IN light payload so the
+# default (full-attributes) response is left intact for exports / the API shim.
+# --------------------------------------------------------------------------- #
+def test_waterfall_fetch_uses_light_payload_param(html: str) -> None:
+    """The waterfall fetch passes ?attributes=false; the default full payload is
+    reserved for complete-span consumers (ApiBackend.get_trace_spans)."""
+    assert "'/traces/' + traceId + '?attributes=false'" in html
+
+
+# --------------------------------------------------------------------------- #
+# #659 P1-3 — costliest "jump" badges must never target a row hidden by the
+# render cap. Beyond-cap costliest spans are pinned into the rendered set, and
+# the badge gates on the rendered-row id set so no badge is a dead link.
+# --------------------------------------------------------------------------- #
+def test_jump_badges_only_target_rendered_rows(html: str) -> None:
+    """A jump badge must only render when its target row is actually rendered."""
+    # The rendered-row id set exists and the badge gates on it.
+    assert "renderedRowIds" in html
+    assert "!renderedRowIds.has(sid)" in html
+    # Beyond-cap costliest spans are pinned into the rendered set.
+    assert "pinnedRows" in html

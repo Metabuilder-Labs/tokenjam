@@ -95,6 +95,7 @@ class StorageBackend(Protocol):
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
     def count_traces(self, filters: TraceFilters) -> int: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
+    def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None: ...
     def get_trace_cost_stats(self, filters: TraceFilters) -> TraceCostStats: ...
     def get_session_id_for_trace(self, trace_id: str) -> str | None: ...
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]: ...
@@ -2670,6 +2671,24 @@ class DuckDBBackend:
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         return [_row_to_span(r, cols) for r in rows]
+
+    def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None:
+        """Targeted single-span fetch (#653).
+
+        A WHERE span_id=? lookup so the span-detail lazy-load reads ONE row
+        instead of scanning + deserializing the whole trace's attributes on
+        every expand. `trace_id` is part of the predicate so the route's
+        404-on-unknown behavior stays scoped to the trace the user is viewing.
+        """
+        cur = self.conn.execute(
+            "SELECT * FROM spans WHERE trace_id = $1 AND span_id = $2 LIMIT 1",
+            [trace_id, span_id],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in cur.description]
+        return _row_to_span(row, cols)
 
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]:
         # SDK cost-attribution dimensions (tenant/feature/environment/prompt
