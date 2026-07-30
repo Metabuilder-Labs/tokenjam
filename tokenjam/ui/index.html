@@ -7352,18 +7352,18 @@ function BudgetView({ params }) {
 // cache-recommend / budget-projection are intentionally absent from the savings
 // band (no past_overspend_usd); they surface elsewhere.
 const ANALYZER_META = {
-  downsize:   { title: 'Downsize',   hint: 'A premium model drove sessions a cheaper same-family tier could run' },
-  cache:      { title: 'Cache',      hint: 'Cacheable context re-read at full price instead of the cache rate' },
-  script:     { title: 'Script',     hint: 'A deterministic tool pattern the model paid to run each time' },
-  trim:       { title: 'Trim',       hint: 'Low-significance tokens carried in the prompt on every call' },
-  reuse:      { title: 'Reuse',      hint: 'The same plan re-derived from scratch across sessions' },
-  subagent:   { title: 'Subagent',   hint: 'Subagents ran on the premium tier while doing light work' },
-  relearn:    { title: 'Relearn',    hint: 'The same mistakes repeated across sessions, paid for each time' },
-  verbosity:  { title: 'Verbosity',  hint: 'Output ran long versus comparable tasks' },
-  deadweight: { title: 'Deadweight', hint: 'MCP tool schemas loaded into every session but never called' },
-  resend:     { title: 'Context resend', hint: 'Context re-sent on every turn after it was first sent' },
-  placement:  { title: 'Batch placement', hint: 'Unattended, cadence-regular workloads that fit the Batch API\'s flat-rate discount' },
-  summarize:  { title: 'Summarize', hint: 'Oversized prompt files re-sent in full on every call' },
+  downsize:   { title: 'Downsize',   hint: 'Use a cheaper model on these sessions' },
+  cache:      { title: 'Cache',      hint: 'Cache the context you re-read' },
+  script:     { title: 'Script',     hint: 'Replace the pattern with a script' },
+  trim:       { title: 'Trim',       hint: 'Trim low-value tokens from prompts' },
+  reuse:      { title: 'Reuse',      hint: 'Reuse the plan instead of re-planning' },
+  subagent:   { title: 'Subagent',   hint: 'Use a smaller model for subagents' },
+  relearn:    { title: 'Relearn',    hint: 'Turn recurring mistakes into a rule' },
+  verbosity:  { title: 'Verbosity',  hint: 'Rein in over-long outputs' },
+  deadweight: { title: 'Deadweight', hint: 'Remove MCP servers you never call' },
+  resend:     { title: 'Context resend', hint: 'Offload context instead of re-sending it' },
+  placement:  { title: 'Batch placement', hint: 'Move batch-friendly work to the Batch API' },
+  summarize:  { title: 'Summarize', hint: 'Compress oversized prompt files' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
@@ -7561,7 +7561,7 @@ function classifyFinding(name, fd, skipped) {
     return { state: 'actionable', usd, tokens, basis: (windowScoped ? fd.window_scoped_basis : fd.estimate_basis) || '' };
   }
   if (windowScoped && usd == null) {
-    return { state: 'not_ready', hint: 'The same mistakes repeated across sessions; rescan to price this window.' };
+    return { state: 'not_ready', hint: 'Rescan to surface recurring mistakes.' };
   }
   // Ran, nothing to recover. For cache, distinguish "already at the ceiling"
   // (positive) from "nothing here" so we never tell a user to raise efficacy
@@ -12979,7 +12979,7 @@ function DashboardView({ params, persona }) {
                       windows are one seam now (core/optimize/report_window.py)
                       and each surface still names it, because a figure whose
                       window the reader cannot see is not auditable. */ ''}
-                <div class="band-label">Past overspend${scan.windowDays ? html`<span class="band-window">· over the last ${scan.windowDays} days</span>` : null}</div>
+                <div class="band-label">Opportunities to optimize token efficiency${scan.windowDays ? html`<span class="band-window">· over the last ${scan.windowDays} days</span>` : null}</div>
                 ${/* recoverableBandState() decided which of the six states this
                       is; the branches below only render. The ONE branch allowed
                       to say there is nothing recoverable is 'none', which
@@ -12998,7 +12998,7 @@ function DashboardView({ params, persona }) {
                         <div class="shimmer" style="height:10px;width:78%;margin-top:4px"></div>
                       </div>`)}
                   </div>
-                  <div class="band-note">Scanning your history for past overspend. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
+                  <div class="band-note">Scanning your history for optimization opportunities. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
                 ${bandState === 'cold' ? html`
                   <div class="band-msg">
                     <b>No scan has run yet.</b>
@@ -13014,7 +13014,7 @@ function DashboardView({ params, persona }) {
                   </div>` : null}
                 ${bandState === 'failed' ? html`
                   <div class="band-msg err">
-                    <b>Couldn't scan for past overspend.</b>
+                    <b>Couldn't scan for optimization opportunities.</b>
                     <p>${optState.error || 'The request failed.'}</p>
                     <p>Until this succeeds there is no basis for saying whether overspend exists here, so no figure is shown.</p>
                     <button class="btn" onClick=${retryOptimize}>Try again</button>

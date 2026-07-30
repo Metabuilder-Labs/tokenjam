@@ -252,7 +252,7 @@ def test_the_timeout_state_says_it_timed_out_and_offers_a_way_forward(html):
 
 
 def test_the_failure_state_says_it_failed_and_offers_a_retry(html):
-    assert "Couldn't scan for past overspend." in html
+    assert "Couldn't scan for optimization opportunities." in html
     assert "Try again" in html
 
 
@@ -378,11 +378,11 @@ def test_the_past_overspend_heading_has_no_estimated_badge(html):
     # The heading text is followed by the band's own window statement
     # ("· over the last N days"), so anchor on the text rather than on a
     # closing bracket that no longer sits immediately after it.
-    idx = html.index(">Past overspend")
+    idx = html.index(">Opportunities to optimize token efficiency")
     heading = html[idx - 400:idx + 400]
     assert "band-label" in heading
     assert "estimated-tag" not in heading
-    assert 'Past overspend <span class="estimated-tag"' not in html
+    assert 'Opportunities to optimize token efficiency <span class="estimated-tag"' not in html
     assert "estimated-tag" in html  # still used elsewhere (Optimize/Summarize)
 
 
