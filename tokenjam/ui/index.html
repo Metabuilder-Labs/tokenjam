@@ -12906,9 +12906,8 @@ function DashboardView({ params, persona }) {
   // all), the dollar figure (via fmtFramedDollar, fmtDashUsd's 2dp) for
   // api/subscription/unknown. Requires `projection`, which requires
   // `costData`, so this caption cannot be built from an unanswered read.
-  const kpiCaption = (projection && projection !== '—')
-    ? ('At this pace, ~' + projection + ' by ' + cyc.label + '; linear run-rate, not a forecast')
-    : null;
+  // Run-rate caption removed from the Dashboard (founder review, 2026-07-30).
+  const kpiCaption = null;
 
   return html`
     <div class="ov-head">
@@ -13084,7 +13083,7 @@ function DashboardView({ params, persona }) {
 
         <!-- The HERO: the embedded Analytics pivot explorer. Spend lives here
              once (Spend KPI tile + chart); the run-rate projection is the caption. -->
-        <div id="dash-explore" class="band-label" style="margin-top:18px">Explore <span class="band-window">· metric × dimension × chart, the full pivot</span></div>
+        <div id="dash-explore" class="band-label" style="margin-top:28px;padding-top:22px;border-top:1px solid var(--border)">Spend exploration <span class="band-window">· slice and dice by model, agent, tool, provider and more</span></div>
         <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />`}
   `;
 }
