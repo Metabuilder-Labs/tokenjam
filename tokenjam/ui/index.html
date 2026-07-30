@@ -6197,9 +6197,9 @@ function spendTileDisplay(spendUsd, framing) {
   const unknown = spendUsd == null;
   if (mode === 'subscription') {
     if (!framing.plan_monthly_usd) return null;          // no fee → no multiplier
-    if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };
+    if (unknown) return { label: 'Implied plan value', value: UNKNOWN_FIGURE };
     const mult = spendUsd / framing.plan_monthly_usd;    // == (% of cycle) / 100
-    return { label: 'Implied value', value: mult.toFixed(1) + '× plan value' };
+    return { label: 'Implied plan value', value: mult.toFixed(1) + '×' };
   }
   if (mode === 'local') return null;                     // no plan fee to multiply against
   // api / unknown → dollars, at most 2dp (Dashboard's own precision rule --
