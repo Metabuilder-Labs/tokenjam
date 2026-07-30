@@ -12856,11 +12856,6 @@ function DashboardView({ params, persona }) {
   const driftRead = useTriageRead(() => api('/drift', { since }), [since]);
   const tracesRead = useTriageRead(() => api('/traces', { since, limit: 6 }), [since]);
   const relearnRead = useTriageRead(() => api('/relearn/proposals', { since }), [since]);
-  // The open recommended CHANGES (the ACTIONS band at the bottom of the page):
-  // each cost proposal's imperative fix title, linking into the analyzer's own
-  // detail page where the fix is now applied. Window-independent — proposals come
-  // from the background scan's own window, like the Opportunities tiles.
-  const costPropsRead = useTriageRead(() => api('/relearn/cost-proposals'), []);
 
   // ---- The recoverable-waste read, on its own state machine ---------------- //
   // GET /optimize runs the analyzer sweep server-side. Measured against a real
@@ -13040,21 +13035,6 @@ function DashboardView({ params, persona }) {
   const optData = optState.data;
   const tiles = optData ? recoverableTiles(optData) : [];
   const bandState = recoverableBandState(optState.phase, optData, tiles.length);
-  // The ACTIONS band: open recommended CHANGES, distinct from the Opportunities
-  // tiles (which show WHERE the waste is). Each proposal's imperative fix title
-  // links into its analyzer's own detail page, where the fix is now applied.
-  // `relearn` is a rollup participant (not a per-analyzer card); locally-dismissed
-  // fixes and the sub-$5 noise floor drop here too, matching the detail pages.
-  const dismissedActions = loadDismissedRelearns();
-  const actionItems = ((costPropsRead.data && costPropsRead.data.proposals) || [])
-    .filter(p => p.analyzer !== 'relearn' && !dismissedActions.has(p.signature) && !belowInboxFloor(p))
-    .map(p => ({
-      key: p.signature,
-      title: p.title,
-      where: (ANALYZER_META[p.analyzer] && ANALYZER_META[p.analyzer].title) || capitalize(p.analyzer),
-      href: p.analyzer === 'summarize' ? '#/optimize/summarize' : ('#/optimize/' + p.analyzer),
-    }));
-  const actionsKnown = costPropsRead.data != null;
   // The compute-layer view of the SAME payload the phase machine above tracks.
   // One read, one stored artifact, so the recoverable band and the budgets tile
   // below cannot disagree about how fresh their figures are or whether anything
@@ -13283,25 +13263,7 @@ function DashboardView({ params, persona }) {
              once (Spend KPI tile + chart); the run-rate projection is the caption. -->
         <div id="dash-explore" class="band-label" style="margin-top:28px;padding-top:22px;border-top:1px solid var(--border)">Spend exploration <span class="band-window">· slice and dice by model, agent, tool, provider and more</span></div>
         <div style="display:flex;align-items:center;gap:8px;margin:10px 0 2px"><span class="persona-bar-label">Window</span><div class="filters" style="margin:0">${winPicker}</div></div>
-        <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />
-
-        ${/* ACTIONS band — the recommended CHANGES to make, distinct from the
-              Opportunities tiles above (which show where the waste is). Each row
-              links into the analyzer's own Optimize detail page, where the fix is
-              reviewed and applied. Hidden entirely when there are no open actions
-              (never a "nothing to do" row). This replaced the Review-actions
-              submenu, whose apply lifecycle moved onto the detail pages. */ ''}
-        ${actionsKnown && actionItems.length ? html`
-          <div class="band-label" style="margin-top:28px;padding-top:22px;border-top:1px solid var(--border)">Actions <span class="band-window">· recommendations for changes to make</span></div>
-          <div class="opt-act-list" style="margin-top:10px">
-            ${actionItems.map(a => html`
-              <div class="opt-act-row" key=${a.key}>
-                <span class="opt-act-name">${a.where}</span>
-                <span class="opt-act-hint">${a.title}</span>
-                <span class="opt-act-fig dim"></span>
-                <span class="opt-act-btncell"><a class="opt-review-btn" href=${a.href}>Review →</a></span>
-              </div>`)}
-          </div>` : null}`}
+        <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />`}
   `;
 }
 
