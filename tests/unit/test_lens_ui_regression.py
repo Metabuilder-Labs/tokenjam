@@ -298,3 +298,68 @@ def test_sdk_sidebar_is_identical_to_claude_code(html: str) -> None:
     # The lens is forced to 'improve' for both personas so the flat nav renders
     # regardless of stale lens state.
     assert "(persona === 'claude-code' || persona === 'sdk')" in html
+
+
+# --------------------------------------------------------------------------- #
+# Optimize IA redesign (PR #665) — summary landing + per-analyzer detail
+# sub-pages, wired to the submenu and the Dashboard tiles.
+# --------------------------------------------------------------------------- #
+def test_optimize_submenu_has_no_new_badges(html: str) -> None:
+    # The "NEW" badge is removed from the Summarize and Rules nav-children.
+    for child in ("summarize", "rules"):
+        # Grab the anchor line for the child and assert no nav-badge on it.
+        marker = f'data-param="{child}" data-optimize-static="1"'
+        assert marker in html, f"{child} nav-child must be tagged data-optimize-static"
+    # No nav-badge "new" anywhere in the Optimize children.
+    assert '<span class="nav-badge">new</span>' not in html, (
+        "the NEW badge must be removed from the Optimize nav-children"
+    )
+
+
+def test_optimize_analyzer_children_are_injected_dynamically(html: str) -> None:
+    # The submenu is populated from the findings, not a hardcoded per-analyzer
+    # list of static anchors. The injector reads optimizeDetailAnalyzers off the
+    # stored /optimize artifact and inserts one nav-child per finding before the
+    # static Summarize/Rules children.
+    assert "function optimizeDetailAnalyzers(opt)" in html
+    assert 'a.nav-child[data-optimize-dyn]' in html, "dynamic children must be tagged for reconciliation"
+    assert "setOptimizeChildren(optimizeDetailAnalyzers(d))" in html
+    assert "a.dataset.optimizeDyn = '1'" in html
+    # Rules stays a submenu item (cross-cutting rule-write surface).
+    assert 'href="#/optimize/rules"' in html
+
+
+def test_optimize_detail_route_renders_a_single_analyzer(html: str) -> None:
+    # OptimizeView takes navParam (the path segment after #/optimize/) and, when
+    # present, renders only that analyzer's OptimizeFinding detail card plus a
+    # back link — not the whole stacked page.
+    assert "function OptimizeView({ params, navParam })" in html
+    assert "const detailName = navParam || null;" in html
+    assert "if (detailName) {" in html
+    assert "← Back to Optimize" in html
+    # App threads the active path param into the view.
+    assert "const navParam = isActive ? route.param : null;" in html
+    assert "navParam=${navParam}" in html
+
+
+def test_optimize_summary_no_longer_stacks_every_finding(html: str) -> None:
+    # The old long page mapped OptimizeFinding over every analyzer on the summary.
+    # That stacked render is gone; the summary is a ranked linked list instead.
+    assert "${order.map(n => html`<${OptimizeFinding}" not in html, (
+        "summary landing must not stack every analyzer's full detail section"
+    )
+    assert 'id="opt-findings"' in html
+    assert "class=\"opt-find-row link\"" in html or "opt-find-row link" in html
+
+
+def test_dashboard_empty_tiles_are_not_clickable(html: str) -> None:
+    # Only a tile with a real finding is an <a> to its detail page; empty-state /
+    # at-ceiling tiles render as a non-clickable <div> (.static).
+    assert "const hasPage = t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name);" in html
+    assert "const href = '#/optimize/' + t.name;" in html
+    assert "? html`<a class=${cls} href=${href}>${inner}</a>`" in html
+    assert "html`<div class=${cls}>${inner}</div>`" in html
+    # The .static class strips the clickable affordance (no hover border, default
+    # cursor) so an empty tile cannot read as a dead link.
+    assert ".rec-tile.static { cursor: default; }" in html
+    assert ".rec-tile.static:hover { border-color: var(--border); }" in html

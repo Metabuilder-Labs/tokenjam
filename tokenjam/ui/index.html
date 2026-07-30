@@ -1025,6 +1025,28 @@ a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 .waste-none .check { font-weight: 700; }
 /* Optional dominant-component note when one token component is ~all the spend. */
 .waste-split { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
+/* Ranked findings list on the Optimize summary landing. Each row links to the
+   analyzer's own detail sub-page (#/optimize/<name>); ran-found-nothing rows are
+   listed but not clickable (no .link, so no hover/pointer affordance). */
+.opt-find-list { display: flex; flex-direction: column; }
+.opt-find-row {
+  display: grid; grid-template-columns: minmax(120px, 180px) minmax(90px, auto) 1fr;
+  align-items: baseline; gap: 12px; padding: 8px 6px; font-size: 13px;
+  border-top: 1px solid var(--border); color: inherit; text-decoration: none;
+  border-radius: 6px;
+}
+.opt-find-list > .opt-find-row:first-child { border-top: none; }
+a.opt-find-row.link { cursor: pointer; }
+a.opt-find-row.link:hover { background: var(--surface2); }
+.opt-find-name { font-weight: 600; }
+a.opt-find-row.link .opt-find-name { color: var(--accent); }
+.opt-find-fig { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); white-space: nowrap; }
+.opt-find-fig.dim { color: var(--text-dim); font-weight: 400; }
+.opt-find-hint { font-size: 12px; }
+@media (max-width: 640px) {
+  .opt-find-row { grid-template-columns: 1fr auto; }
+  .opt-find-hint { grid-column: 1 / -1; }
+}
 /* uPlot hover tooltip (#128). Positioned at the cursor; offset above-centered. */
 .u-tip {
   position: absolute; pointer-events: none; z-index: 5;
@@ -1095,6 +1117,11 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 }
 .rec-tile:hover { border-color: var(--accent); }
 .rec-tile.muted { opacity: 0.7; }
+/* An empty-state / at-ceiling tile is rendered as a <div>, not an <a>: no detail
+   page exists for it (Option B). .static strips every clickable affordance so it
+   cannot read as a dead link — no pointer, no hover border, default cursor. */
+.rec-tile.static { cursor: default; }
+.rec-tile.static:hover { border-color: var(--border); }
 .rec-name { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .rec-amount { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 700; color: var(--accent); margin: 8px 0 6px; }
 .rec-amount.dim { color: var(--text-faint); font-size: 14px; font-weight: 500; }
@@ -1983,8 +2010,13 @@ code.md-code {
        child in a different group than its parent is orphaned. All three stay
        above Sessions and well above the FAQ, which is pinned last here. -->
   <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="improve"><span class="icon">&#9889;</span> Optimize</a>
-  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-lens="improve"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
-  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-lens="improve"><span class="icon">&#8627;</span> Rules <span class="nav-badge">new</span></a>
+  <!-- Analyzer nav-children (#/optimize/<name>) are injected right here by App()
+       — one per analyzer that has a real finding, in rank order — before the
+       static Summarize and Rules children below. See the nav-child injection
+       effect in App(). The two static children carry data-optimize-static so the
+       injector can find them and always insert BEFORE Summarize. -->
+  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Summarize</a>
+  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Rules</a>
   <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <!-- TOP-LEVEL, never a nav-child. A nav-child is display:none unless its
        parent section is the active view (see App()'s route effect), so as a
@@ -7388,19 +7420,21 @@ function fmtCadence(seconds) {
   return '~' + Math.round(seconds) + 's';
 }
 
-// Deep-link a recoverable-waste tile straight to its own analyzer detail card
-// on the Optimize screen (#229) — not an Analytics chart slice. The
-// `finding` param drives OptimizeView's scroll-into-view + highlight of
-// #opt-<name> (see the focus effect below). `since` is passed through so the
-// destination shows the same window the tile was computed from.
+// Deep-link straight to an analyzer's OWN Optimize detail sub-page
+// (#/optimize/<name>), where the full evidence + fix card lives. The Optimize
+// page split from one long stacked page into a summary landing + one detail
+// sub-page per analyzer-with-a-finding, so a deep link now opens that page
+// directly rather than scrolling to an anchor on the stacked page. `since` is
+// carried as a query param so the destination shows the same window the source
+// figure was computed from.
 function optimizeFindingHref(name, since) {
   const sp = new URLSearchParams();
   // Omit `since` only at the shared DEFAULT_SINCE (the value Optimize resolves
   // to on a bare href) — read it from the constant rather than a literal so a
   // future default move can't silently drop a real window (issue #655).
   if (since && since !== DEFAULT_SINCE) sp.set('since', since);
-  sp.set('finding', name);
-  return '#/optimize?' + sp.toString();
+  const q = sp.toString();
+  return '#/optimize/' + name + (q ? '?' + q : '');
 }
 
 // Reverse hop: deep-link a detail card's evidence into the Review inbox's
@@ -7861,6 +7895,26 @@ function recoverableTiles(opt) {
   return rankTiles(out, opt.finding_rank);
 }
 
+// The analyzers that earn their OWN Optimize detail sub-page (#/optimize/<name>)
+// and a left-submenu entry: exactly the tiles that carry a real finding
+// (`state === 'actionable'`), in the same biggest-waste-first order the tiles
+// and the summary list use. This is the ONE predicate that decides has-data vs
+// empty across all three surfaces — the submenu, the per-analyzer routes, and
+// which Dashboard tiles are clickable — so they can never disagree about which
+// analyzers have a page. `summarize` is handled separately (it has its own
+// SummarizeView + finding shape); this covers the analyzer detail cards
+// rendered by OptimizeFinding.
+const DETAIL_ANALYZER_NAMES = new Set([
+  'downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim',
+  'reuse', 'subagent', 'verbosity', 'deadweight', 'placement',
+]);
+function optimizeDetailAnalyzers(opt) {
+  if (!opt || opt.report_available === false) return [];
+  return recoverableTiles(opt)
+    .filter(t => t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name))
+    .map(t => t.name);
+}
+
 // Order recoverable tiles biggest-waste-first, mirroring the CLI's ranking
 // (cmd_optimize.py's `_rank_findings`) instead of Object.keys() insertion
 // order (#229) — the server ships that same ranking as
@@ -8289,7 +8343,12 @@ function RecommendationsPanel({ rec }) {
     </section>`;
 }
 
-function OptimizeView({ params }) {
+function OptimizeView({ params, navParam }) {
+  // `navParam` is the path segment after `#/optimize/` (e.g. `downsize`).
+  // summarize/rules/guide route to their OWN primary views (see primaryKeyFor),
+  // so any navParam that reaches here is an ANALYZER name and means "render only
+  // that analyzer's detail sub-page". Null → the summary landing.
+  const detailName = navParam || null;
   const DEFAULTS = { since: DEFAULT_SINCE, agent_id: '', compare: '', finding: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
@@ -8385,6 +8444,42 @@ function OptimizeView({ params }) {
   const sfTotal = sfApplied + sfTok;
   const sfPctApplied = sfTotal > 0 ? Math.round(sfApplied / sfTotal * 100) : 0;
 
+  // Which analyzers have their OWN detail sub-page (a real finding), in rank
+  // order. Drives the summary landing's ranked link list AND validates a
+  // `#/optimize/<name>` deep link — an analyzer with no finding gets no page.
+  const detailNames = st.opt ? optimizeDetailAnalyzers(st.opt) : [];
+  const detailSet = new Set(detailNames);
+
+  // DETAIL SUB-PAGE (`#/optimize/<analyzer>`): render THAT analyzer's section
+  // alone, reusing the exact OptimizeFinding card the summary used to stack. A
+  // name with no finding this window (stale link, or scanned-away) falls through
+  // to a small "back to Optimize" notice rather than a blank page.
+  if (detailName) {
+    const meta = ANALYZER_META[detailName] || { title: capitalize(detailName) };
+    const backLink = html`<div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Back to Optimize</a></div>`;
+    if (st.loading && !st.opt) {
+      return html`${backLink}<div class="shimmer" style="height:200px"></div>`;
+    }
+    if (st.error) {
+      return html`${backLink}<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load: ${st.error}</div><button class="btn" onClick=${load}>Retry</button></div>`;
+    }
+    const hasCard = st.opt && (detailName === 'downsize'
+      ? true
+      : detailName === 'placement'
+        ? true
+        : !!(st.opt.findings || {})[detailName]);
+    return html`
+      ${backLink}
+      <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px">
+        ${meta.title} <${PlanBadge} framing=${framing} />
+      </div>
+      ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px;margin-bottom:12px">Computed over the last ${scan.windowDays} days by the background scan.</div>` : null}
+      ${hasCard
+        ? html`<${OptimizeFinding} name=${detailName} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(detailName)} />`
+        : html`<div class="chart-card"><div class="opt-line dim">No <b>${meta.title}</b> finding in the latest scan. It may have been resolved, or this window has no candidates. <a class="sz-link" href="#/optimize">Back to Optimize →</a></div></div>`}
+    `;
+  }
+
   return html`
     ${/* The contextual "What do these checks mean?" link that used to sit
           beside this title is gone. The FAQ is still a top-level Improve entry
@@ -8454,7 +8549,9 @@ function OptimizeView({ params }) {
                 <div class="waste-row">
                   <span class="waste-name">${r.title === 'Summarize'
                     ? html`<a class="sz-link" href="#/optimize/summarize">${r.title}</a>`
-                    : r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
+                    : detailSet.has(r.analyzer)
+                      ? html`<a class="sz-link" href=${'#/optimize/' + r.analyzer}>${r.title}</a>`
+                      : r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
                   <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)}${ov ? html` <span class=${ov.tagClass} title=${r.caveat || r.basis}>${ov.tagText}</span>` : null}${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
                 </div>
                 ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
@@ -8511,7 +8608,35 @@ function OptimizeView({ params }) {
       ${st.rec && st.rec.rows && st.rec.rows.length ? html`<${RecommendationsPanel} rec=${st.rec} />` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
-      ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(n)} />`)}
+      ${/* Ranked analyzer list — the summary landing no longer stacks every
+            analyzer's full detail section (heaviest-sessions tables, fix
+            snippets, caveats). Each row links to that analyzer's own detail
+            sub-page (#/optimize/<name>) where the full card lives. Rows with a
+            real finding (a detail page) are links; ran-found-nothing / not-ready
+            rows stay listed for transparency but are not clickable — the same
+            has-data-vs-empty split the Dashboard tiles use (optimizeDetailAnalyzers).
+            Ordered biggest-waste-first via recoverableTiles' finding_rank. */ ''}
+      <section class="opt-section" id="opt-findings">
+        <div class="opt-title"><span>Findings <span class="dim" style="font-weight:400;font-size:12px">· open one for its evidence and fix</span></span></div>
+        <div class="opt-find-list">
+          ${recoverableTiles(st.opt).filter(t => order.indexOf(t.name) !== -1).map(t => {
+            const m = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
+            const hasPage = t.state === 'actionable' && detailSet.has(t.name);
+            const fig = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing)
+              : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
+              : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
+            const figCls = t.state === 'actionable' ? 'opt-find-fig' : 'opt-find-fig dim';
+            const hint = t.state === 'not_ready' && t.hint ? t.hint : m.hint;
+            const inner = html`
+              <span class="opt-find-name">${m.title}</span>
+              <span class=${figCls}>${fig}</span>
+              ${hint ? html`<span class="opt-find-hint dim">${hint}</span>` : null}`;
+            return hasPage
+              ? html`<a class="opt-find-row link" href=${'#/optimize/' + t.name}>${inner}</a>`
+              : html`<div class="opt-find-row">${inner}</div>`;
+          })}
+        </div>
+      </section>
       ${(st.opt.budgets || []).length ? html`<section class="opt-section" id="opt-budget-projection">
         <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling, not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
         ${st.opt.budgets.map(b => html`<div class="opt-line">
@@ -13028,26 +13153,35 @@ function DashboardView({ params, persona }) {
                   ${tiles.length === 0 ? html`<div class="empty">No overspend found.</div>`
                     : tiles.map(t => {
                       const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
-                      // Route straight to the analyzer's own detail card on
-                      // the Optimize screen — not an Analytics chart slice
-                      // (#229). The recoverable number's evidence
-                      // and next step live there, not in a chart.
-                      const href = optimizeFindingHref(t.name, since);
+                      // ONLY a tile with a real finding is clickable (Option B,
+                      // founder-approved): it routes straight to that analyzer's
+                      // own detail sub-page (#/optimize/<name>), where the
+                      // number's evidence and fix live. Empty-state tiles
+                      // ("No candidates" / "Not ready") and the positive
+                      // at-ceiling tile stay rendered for transparency but are
+                      // NOT links — no href, no pointer, no hover — because there
+                      // is no detail page for them to open. Has-data is decided by
+                      // the SAME predicate the submenu + summary list use
+                      // (state === 'actionable' + a known detail analyzer).
+                      const hasPage = t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name);
+                      const href = '#/optimize/' + t.name;
                       const amount = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing, fmtDashUsd)
                         : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
                         : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
-                      const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok' : 'rec-tile muted');
+                      const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok static' : 'rec-tile muted static');
                       const amtCls = t.state === 'actionable' ? 'rec-amount' : (t.state === 'at_ceiling' ? 'rec-amount ok' : 'rec-amount dim');
                       // Brief context so the tile says what the number means,
                       // not just how big it is — the specific
                       // not-ready reason when there is one, else what the
                       // analyzer measures.
                       const explain = t.state === 'not_ready' && t.hint ? t.hint : meta.hint;
-                      return html`<a class=${cls} href=${href}>
+                      const inner = html`
                         <div class="rec-name">${meta.title}</div>
                         <div class=${amtCls}>${amount}</div>
-                        ${explain ? html`<div class="rec-hint">${explain}</div>` : null}
-                      </a>`;
+                        ${explain ? html`<div class="rec-hint">${explain}</div>` : null}`;
+                      return hasPage
+                        ? html`<a class=${cls} href=${href}>${inner}</a>`
+                        : html`<div class=${cls}>${inner}</div>`;
                     })}
                 </div>` : null}
               </div>
@@ -13260,6 +13394,35 @@ function PersonaBar() {
   return html`<div class="persona-bar"><${PersonaPicker} /></div>`;
 }
 
+// Reconcile the sidebar to the current route + persona: active-highlight, reveal
+// the active section's nav-children, and keep the lens pill in sync. Module-level
+// so both the route-sync effect and the nav-child injection effect (which adds
+// Optimize children mid-session) can re-apply the same rules to the DOM as it
+// stands right now. Pure DOM work — reads no React state beyond its args.
+function syncNavState(view, param, persona) {
+  const sidebar = document.querySelector('.sidebar');
+  const lens = (persona === 'claude-code' || persona === 'sdk')
+    ? 'improve'
+    : (VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve');
+  if (sidebar) sidebar.dataset.persona = persona;
+  document.body.dataset.persona = persona;
+  if (sidebar) sidebar.dataset.lens = lens;
+  document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
+  document.querySelectorAll('.nav-link').forEach(el => {
+    const v = el.dataset.view || '';
+    if (el.classList.contains('nav-child')) {
+      // "Click Optimize → expand": show a child only while its section is active.
+      el.style.display = (v === view) ? 'flex' : 'none';
+      el.classList.toggle('active', v === view && (el.dataset.param || '') === param);
+    } else {
+      // A parent yields the highlight to a child that matches the current param.
+      const childActive = v === view && param !== '' &&
+        !!document.querySelector('.nav-child[data-view="' + v + '"][data-param="' + param + '"]');
+      el.classList.toggle('active', v === view && !childActive);
+    }
+  });
+}
+
 function App() {
   const [route, setRoute] = useState(getRoute());
 
@@ -13279,6 +13442,58 @@ function App() {
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
+
+  // Analyzer names that have a real finding → one Optimize nav-child each
+  // (#/optimize/<name>), in rank order. Read from the SAME stored /optimize
+  // artifact every other surface reads (fast=true skips the heavy Trim pass —
+  // the nav only needs which analyzers have a finding, not the full report), so
+  // the submenu, the summary landing, and the Dashboard tiles cannot disagree
+  // about which analyzers have a page. Best-effort: a failed read leaves the
+  // submenu with just Summarize + Rules, never an error.
+  const [optimizeChildren, setOptimizeChildren] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    api('/optimize', { fast: 'true' })
+      .then(d => { if (!cancelled && d) setOptimizeChildren(optimizeDetailAnalyzers(d)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Inject/refresh the analyzer nav-children in the sidebar (before the static
+  // Summarize/Rules children). The sidebar is server-rendered static HTML, so we
+  // reconcile it imperatively here rather than owning the whole nav in Preact:
+  // create one <a class="nav-link nav-child"> per finding, tagged
+  // data-optimize-dyn so a re-run can clear its own previous set without
+  // touching the two static children. The route-sync effect below then handles
+  // active-highlight + show/hide exactly as it does for any nav-child.
+  useEffect(() => {
+    const sidebar = document.querySelector('.sidebar');
+    if (!sidebar) return;
+    sidebar.querySelectorAll('a.nav-child[data-optimize-dyn]').forEach(el => el.remove());
+    const anchorBefore = sidebar.querySelector('a.nav-child[data-optimize-static="1"]');
+    if (!anchorBefore) return;
+    optimizeChildren.forEach(name => {
+      const meta = ANALYZER_META[name] || { title: capitalize(name) };
+      const a = document.createElement('a');
+      a.href = '#/optimize/' + name;
+      a.className = 'nav-link nav-child';
+      a.dataset.view = 'optimize';
+      a.dataset.param = name;
+      a.dataset.lens = 'improve';
+      a.dataset.optimizeDyn = '1';
+      const icon = document.createElement('span');
+      icon.className = 'icon';
+      icon.innerHTML = '&#8627;';
+      a.appendChild(icon);
+      a.appendChild(document.createTextNode(' ' + meta.title));
+      sidebar.insertBefore(a, anchorBefore);
+    });
+    // Re-apply active-highlight + show/hide to the freshly-injected children,
+    // which the route-sync effect below computes but only over the DOM as it was
+    // when it last ran. Cheap and idempotent; keeps a newly-injected child from
+    // flashing in the wrong state until the next route change.
+    syncNavState(route.view, route.param || '', persona);
+  }, [optimizeChildren]);
 
   useEffect(() => {
     const handler = () => setRoute(getRoute());
@@ -13333,49 +13548,14 @@ function App() {
   // keep the Improve/Observe lens pill in sync with the current route (self-
   // improve-loop SPEC.md §12 — two lenses, one router; a direct link or
   // back-nav into the other lens's view must flip the pill, not just the page).
+  // Active-highlight + reveal the active section's children + lens pill sync.
+  // The rules live in module-level syncNavState so the nav-child injection effect
+  // can re-apply them to newly-added Optimize children. `persona` is a dependency
+  // because syncNavState writes `data-persona` (which drives CSS nav gating);
+  // without it the attribute would only refresh on a ROUTE change, leaving the
+  // sidebar on the previous persona's pages after a persona switch alone.
   useEffect(() => {
-    const view = route.view, param = route.param || '';
-    const sidebar = document.querySelector('.sidebar');
-    // A view maps to a lens, EXCEPT the lens-neutral ones (Dashboard, #654):
-    // those are absent from VIEW_LENS and must PRESERVE the active lens so an
-    // Observe user opening the Dashboard stays in Observe (Greptile P1). Fall
-    // back to the sidebar's current lens for a neutral view, then 'improve' only
-    // on the very first paint before any lens has been set.
-    // Neither the claude-code nor the sdk persona has Observe pages or a
-    // lens-switch, so both are ALWAYS 'improve' — the two personas share one
-    // flat Improve nav and differ only in page data / empty-state. Deriving the
-    // lens from a lens-neutral view's fallback would preserve a stale 'observe'
-    // left by a prior session, which then hides every Improve nav link (leaving
-    // only Dashboard) until a reload — the persona-toggle collapse bug.
-    const lens = (persona === 'claude-code' || persona === 'sdk')
-      ? 'improve'
-      : (VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve');
-    // `data-persona` drives the nav gating in CSS, alongside `data-lens`.
-    // Written in this same pass so the two can never disagree for a frame;
-    // `persona` is therefore in this effect's dependency list. It is also
-    // mirrored onto <body>, because persona gates content INSIDE views too
-    // (the Dashboard's health band), which the sidebar attribute cannot reach.
-    if (sidebar) sidebar.dataset.persona = persona;
-    document.body.dataset.persona = persona;
-    if (sidebar) sidebar.dataset.lens = lens;
-    document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
-    document.querySelectorAll('.nav-link').forEach(el => {
-      const v = el.dataset.view || '';
-      if (el.classList.contains('nav-child')) {
-        // "Click Optimize → expand": show a child only while its section is active.
-        el.style.display = (v === view) ? 'flex' : 'none';
-        el.classList.toggle('active', v === view && (el.dataset.param || '') === param);
-      } else {
-        // A parent yields the highlight to a child that matches the current param.
-        const childActive = v === view && param !== '' &&
-          !!document.querySelector('.nav-child[data-view="' + v + '"][data-param="' + param + '"]');
-        el.classList.toggle('active', v === view && !childActive);
-      }
-    });
-    // `persona` is a dependency because this effect writes `data-persona`, which
-    // drives the nav gating. Without it the attribute is only refreshed when the
-    // ROUTE changes, so switching persona while standing still leaves the
-    // sidebar showing the previous persona's pages.
+    syncNavState(route.view, route.param || '', persona);
   }, [route.view, route.param, persona]);
 
   const primaryKey = primaryKeyFor(route);
@@ -13451,9 +13631,14 @@ function App() {
       // it, and the rule applies uniformly to every page, not just Dashboard.
       // On the common path (data present, or read unanswered) the gate is a
       // no-op and the view renders exactly as before.
+      // The path param (`#/optimize/<name>`) is threaded to the ACTIVE view only,
+      // so a kept-alive hidden view never sees a param meant for another. It
+      // drives OptimizeView's summary-vs-single-analyzer-detail split; other
+      // views ignore it.
+      const navParam = isActive ? route.param : null;
       return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}>
         <${PersonaEmptyGate} persona=${persona} header=${html`<${PersonaEmptyHeader} viewKey=${key} />`}>
-          <${Comp} params=${vp} persona=${persona} />
+          <${Comp} params=${vp} persona=${persona} navParam=${navParam} />
         <//>
       </div>`;
     })}
