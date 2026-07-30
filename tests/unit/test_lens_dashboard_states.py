@@ -291,7 +291,7 @@ def test_an_unreported_spend_field_does_not_become_a_zero_spend_tile(html):
     spend = html[html.index("function spendTileDisplay"):]
     spend = spend[:spend.index("function PlanBadge")]
     assert "const unknown = spendUsd == null;" in spend
-    assert "if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };" in spend
+    assert "if (unknown) return { label: 'Implied plan value', value: UNKNOWN_FIGURE };" in spend
     assert "value: unknown ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd)" in spend
 
 
@@ -615,7 +615,7 @@ def test_spend_tile_display_is_deliberately_not_deduplicated():
     api = _run_dedup_js("spendTileDisplay(500, %s)" % _API_FRAMING)
     assert api == {"label": "Spend", "value": "$500.00"}
     sub = _run_dedup_js("spendTileDisplay(500, %s)" % _SUB_FRAMING)
-    assert sub == {"label": "Implied value", "value": "2.5× plan value"}
+    assert sub == {"label": "Implied plan value", "value": "2.5×"}
     assert _run_dedup_js("spendTileDisplay(500, %s)" % _LOCAL_FRAMING) is None
 
 
