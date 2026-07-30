@@ -5841,6 +5841,16 @@ function dedup(traces) {
 // Trace Detail + Waterfall
 // ============================
 function TraceDetailView({ traceId }) {
+  // Back navigation with a deterministic in-app fallback. A bare history.back()
+  // dead-ends on a direct deep-link entry (a fresh tab opened straight on
+  // #/traces/<id> has nothing to go back to and leaves the app). Prefer in-app
+  // history when there is some, else land on the Traces list — the trace's
+  // natural parent, mirroring the session-detail back buttons' fixed-hash
+  // pattern (Greptile).
+  const goBack = () => {
+    if (window.history.length > 1) history.back();
+    else location.hash = '#/traces';
+  };
   const [spans, setSpans] = useState([]);
   const [selected, setSelected] = useState(null);
   // Load lifecycle (#653): a large trace used to hang the skeleton forever
@@ -5925,7 +5935,7 @@ function TraceDetailView({ traceId }) {
   // timed-out load, show a clear message + retry instead of the shimmer.
   if (loadState === 'error') return html`
     <div>
-      <button class="btn btn-back" onClick=${() => history.back()}>← Back</button>
+      <button class="btn btn-back" onClick=${goBack}>← Back</button>
       <div class="empty-state" style="padding:32px 0">
         <div style="font-size:14px;margin-bottom:8px">${loadErr || 'Could not load this trace.'}</div>
         <div class="meta" style="margin-bottom:16px">The trace may be very large, or the server may be busy.</div>
@@ -6028,7 +6038,7 @@ function TraceDetailView({ traceId }) {
   const agentName = rootSpan ? (rootSpan.agent_id || traceId.slice(0, 12)) : traceId.slice(0, 12);
 
   return html`
-    <button class="btn btn-back" onClick=${() => history.back()}>\u2190 Back</button>
+    <button class="btn btn-back" onClick=${goBack}>\u2190 Back</button>
     <div class="page-title">Trace details for ${agentName}</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
     <div class="wf-summary">
