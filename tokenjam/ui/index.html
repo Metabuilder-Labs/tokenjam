@@ -7352,18 +7352,18 @@ function BudgetView({ params }) {
 // cache-recommend / budget-projection are intentionally absent from the savings
 // band (no past_overspend_usd); they surface elsewhere.
 const ANALYZER_META = {
-  downsize:   { title: 'Downsize',   hint: 'Route candidate sessions to a cheaper model' },
-  cache:      { title: 'Cache',      hint: 'Raise cache-read efficacy toward the 80% ceiling' },
-  script:     { title: 'Script',     hint: 'Replace a deterministic call-pattern with a script' },
-  trim:       { title: 'Trim',       hint: 'Trim low-significance tokens from prompt templates' },
-  reuse:      { title: 'Reuse',      hint: 'Reuse a repeated planning skeleton instead of re-planning' },
-  subagent:   { title: 'Subagent',   hint: 'Right-size an over-powered subagent to a cheaper same-family model' },
-  relearn:    { title: 'Relearn',    hint: 'Recurring failure clusters the self-improve loop tracks' },
-  verbosity:  { title: 'Verbosity',  hint: 'Sessions whose output runs high vs the per-task-shape median' },
-  deadweight: { title: 'Deadweight', hint: 'Configured MCP servers whose schemas are injected but never called' },
-  resend:     { title: 'Context resend', hint: 'How much of each turn re-sends context already sent in an earlier turn' },
+  downsize:   { title: 'Downsize',   hint: 'A premium model drove sessions a cheaper same-family tier could run' },
+  cache:      { title: 'Cache',      hint: 'Cacheable context re-read at full price instead of the cache rate' },
+  script:     { title: 'Script',     hint: 'A deterministic tool pattern the model paid to run each time' },
+  trim:       { title: 'Trim',       hint: 'Low-significance tokens carried in the prompt on every call' },
+  reuse:      { title: 'Reuse',      hint: 'The same plan re-derived from scratch across sessions' },
+  subagent:   { title: 'Subagent',   hint: 'Subagents ran on the premium tier while doing light work' },
+  relearn:    { title: 'Relearn',    hint: 'The same mistakes repeated across sessions, paid for each time' },
+  verbosity:  { title: 'Verbosity',  hint: 'Output ran long versus comparable tasks' },
+  deadweight: { title: 'Deadweight', hint: 'MCP tool schemas loaded into every session but never called' },
+  resend:     { title: 'Context resend', hint: 'Context re-sent on every turn after it was first sent' },
   placement:  { title: 'Batch placement', hint: 'Unattended, cadence-regular workloads that fit the Batch API\'s flat-rate discount' },
-  summarize:  { title: 'Summarize', hint: 'Oversized catalog prompt files; review a compression in the curate/diff surface' },
+  summarize:  { title: 'Summarize', hint: 'Oversized prompt files re-sent in full on every call' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
@@ -7561,7 +7561,7 @@ function classifyFinding(name, fd, skipped) {
     return { state: 'actionable', usd, tokens, basis: (windowScoped ? fd.window_scoped_basis : fd.estimate_basis) || '' };
   }
   if (windowScoped && usd == null) {
-    return { state: 'not_ready', hint: 'No figure on this window’s basis yet; rescan to fold it in.' };
+    return { state: 'not_ready', hint: 'The same mistakes repeated across sessions; rescan to price this window.' };
   }
   // Ran, nothing to recover. For cache, distinguish "already at the ceiling"
   // (positive) from "nothing here" so we never tell a user to raise efficacy
