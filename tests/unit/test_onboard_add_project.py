@@ -153,7 +153,7 @@ class TestAddProjectRegistersAgent:
             "tokenjam.cli.cmd_onboard._resolve_backfill_scope", _boom, raising=False,
         )
         monkeypatch.setattr(
-            "tokenjam.cli.cmd_onboard._print_review_inbox_pointer", _boom, raising=False,
+            "tokenjam.cli.cmd_onboard._print_next_steps_nudge", _boom, raising=False,
         )
         monkeypatch.setattr(
             "tokenjam.cli.cmd_onboard._install_claude_wrapper", _boom, raising=False,

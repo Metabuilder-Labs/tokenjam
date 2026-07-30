@@ -60,19 +60,21 @@ def test_nudge_with_data_but_unknown_days_avoids_bogus_count(capsys):
 
 
 def test_nudge_claude_code_persona_is_exactly_two_entries(capsys):
-    """The CC list is the web dashboard plus tokenmaxx, in that order. The
-    per-command diagnosis rows (`tj context`, `tj quota-audit`) are gone: the
-    dashboard is where that diagnosis is read. tjb is an SDK workflow and must
-    not appear here either."""
+    """The CC list is exactly two action rows (founder review, demo trim):
+    "View the Web UI (Lens)" then "View your Token Efficiency Card". The
+    per-command diagnosis rows (`tj context`, `tj quota-audit`), `tj optimize`,
+    and the `tjb` SDK workflow must not appear here."""
     _print_next_steps_nudge(
         has_data=True, days=30, persona="claude-code", daemon_running=True,
     )
     out = capsys.readouterr().out
-    assert "web dashboard" in out
+    assert "View the Web UI (Lens)" in out
+    assert "View your Token Efficiency Card" in out
     assert "tj tokenmaxx" in out
-    assert out.index("web dashboard") < out.index("tj tokenmaxx")
+    assert out.index("View the Web UI (Lens)") < out.index("View your Token Efficiency Card")
     assert "tj context" not in out
     assert "tj quota-audit" not in out
+    assert "tj optimize" not in out
     assert "tjb" not in out
     assert "tokenjam-bench" not in out
     # Exactly two command rows: the indented block that follows the
@@ -90,37 +92,32 @@ def test_nudge_claude_code_persona_is_exactly_two_entries(capsys):
     assert len(rows) == 2, rows
 
 
-def test_nudge_claude_code_never_says_lens(capsys):
-    """The web UI entry is named "web dashboard" on this list, not "Lens"."""
-    _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude-code", daemon_running=True,
-    )
-    assert "Lens" not in capsys.readouterr().out
-    _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude-code", daemon_running=False,
-    )
-    assert "Lens" not in capsys.readouterr().out
-
-
-def test_nudge_daemon_running_never_suggests_tj_serve(capsys):
-    """Onboarding just installed the daemon — the dashboard is already up;
-    suggesting `tj serve` invites a port conflict."""
+def test_nudge_claude_code_header_is_plain(capsys):
+    """The CC "Next steps" header is bare — no trailing "already loaded /
+    these work right now" muted text (founder review, demo trim)."""
     _print_next_steps_nudge(
         has_data=True, days=30, persona="claude-code", daemon_running=True,
     )
     out = capsys.readouterr().out
-    assert "tj serve" not in out
-    assert "already running" in out
-    assert "http://127.0.0.1:7391/" in out
+    assert "Next steps" in out
+    assert "already loaded" not in out
+    assert "these work right now" not in out
 
 
-def test_nudge_no_daemon_still_points_at_tj_serve(capsys):
-    _print_next_steps_nudge(
-        has_data=False, persona="claude-code", daemon_running=False,
-    )
-    out = capsys.readouterr().out
-    assert "tj serve" in out
-    assert "already running" not in out
+def test_nudge_claude_code_points_at_dashboard_url(capsys):
+    """The CC list names the dashboard URL as a concrete instruction and runs
+    `tj tokenmaxx` — regardless of daemon state (no daemon branch on this
+    list anymore)."""
+    for daemon in (True, False):
+        _print_next_steps_nudge(
+            has_data=True, days=30, persona="claude-code", daemon_running=daemon,
+        )
+        out = capsys.readouterr().out
+        assert "http://127.0.0.1:7391/" in out
+        assert "tj tokenmaxx" in out
+        # No `tj serve` / "already running" churn on this trimmed list.
+        assert "tj serve" not in out
+        assert "already running" not in out
 
 
 # --- Bare `tj` home screen --------------------------------------------------
@@ -333,9 +330,10 @@ def test_claude_code_restart_panel_is_why_first_and_consolidated(
     assert "Open a new terminal" not in out
     assert "After restarting, run:" not in out
     assert "tj status --agent" not in out
-    # Folded into one dim footnote instead.
-    assert "own dashboard tile" in flat
-    assert "claude --as <name>" in flat
+    # The "Each relaunched terminal ... own dashboard tile" footnote was
+    # removed for the demo (founder review, demo trim).
+    assert "own dashboard tile" not in flat
+    assert "claude --as <name>" not in flat
 
 
 def test_claude_code_restart_panel_states_honest_resume_semantics(

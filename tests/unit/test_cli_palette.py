@@ -87,8 +87,8 @@ def test_prose_carries_no_incidental_styling(prose):
 def test_accent_is_the_only_hue_in_the_next_steps_list(capsys):
     _print_next_steps_nudge(has_data=False, persona="claude-code", port=7391)
     out = capsys.readouterr().out
-    # commands and the URL are the actionable content of this screen
-    assert "tj serve" in out
+    # The typeable command and the clickable URL are the actionable content of
+    # this screen (the trimmed two-row CC list — founder review, demo trim).
     assert "tj tokenmaxx" in out
     assert "http://127.0.0.1:7391/" in out
     # no em dash in user-facing copy

@@ -19,11 +19,11 @@ import pytest
 from click.testing import CliRunner
 
 import tokenjam.core.backfill as backfill_mod
-from tokenjam.cli.cmd_onboard import DEFAULT_BACKFILL_DAYS, cmd_onboard
+from tokenjam.cli.cmd_onboard import cmd_onboard
 
 # `sess-recent` must stay well inside the default 30-day backfill window no
 # matter when the suite runs. A hardcoded absolute timestamp is a time bomb:
-# once wall-clock time passes `<that date> + DEFAULT_BACKFILL_DAYS`, the
+# once wall-clock time passes `<that date> + DEFAULT_BACKFILL_DAYS` (30), the
 # session falls out of scope and every assertion below starts failing with
 # no code change involved. Anchor it relative to "now" instead.
 _RECENT_SESSION_TS = (
@@ -148,7 +148,10 @@ def test_all_span_backfills_everything_uncapped(
     assert res.exit_code == 0, res.output
     flat = _flat(res.output)
     assert "Backfill your Claude Code history:" not in flat
-    assert "Backfilling all available Claude Code history" in flat
+    # The "Backfilling all available Claude Code history" preamble line was
+    # removed (founder review, demo trim) — the honest sessionId-deduped
+    # count on the result line below is what the user sees instead.
+    assert "Backfilling all available Claude Code history" not in flat
     # Both sessions (recent + old) should be backfilled with no window.
     assert "2 total session" in flat
 
@@ -189,21 +192,19 @@ def test_backfill_days_must_be_positive(_isolated_claude_code_with_history, tmp_
     assert "--backfill-days must be > 0" in _flat(res.output)
 
 
-# --- Big-scope heads-up --------------------------------------------------------
+# --- Big-scope heads-up (removed) ---------------------------------------------
+# The "~N sessions in scope — this may take a few minutes" heads-up was removed
+# (founder review, demo trim). It counted transcript FILES, which over-reports
+# the true sessionId-deduped session count (Critical Rule 34) — printing e.g.
+# ~1,298 when only 27 sessions actually backfilled. The honest post-backfill
+# "N total sessions" result line is the only session count the user sees now.
 
 
-def test_headsup_printed_when_scope_exceeds_threshold(
-    _isolated_claude_code_with_history, tmp_path, monkeypatch,
+def test_no_sessions_in_scope_headsup_is_ever_printed(
+    _isolated_claude_code_with_history, tmp_path,
 ):
-    monkeypatch.setattr("tokenjam.cli.cmd_onboard._BACKFILL_HEADSUP_THRESHOLD", 1)
-    res = _run_claude_code(tmp_path, "--backfill-all")
-    assert res.exit_code == 0, res.output
-    flat = _flat(res.output)
-    assert "sessions in scope" in flat
-    assert "this may take a few minutes" in flat
-
-
-def test_no_headsup_below_threshold(_isolated_claude_code_with_history, tmp_path):
+    """The transcript-FILE-count heads-up line must never appear (Critical
+    Rule 34: a file count over-reports the true session count)."""
     res = _run_claude_code(tmp_path, "--backfill-all")
     assert res.exit_code == 0, res.output
     assert "sessions in scope" not in _flat(res.output)
