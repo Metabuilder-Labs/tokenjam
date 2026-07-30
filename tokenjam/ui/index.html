@@ -2031,7 +2031,6 @@ code.md-code {
     <button type="button" class="lens-btn active" data-lens="improve">Improve</button>
     <button type="button" class="lens-btn" data-lens="observe">Observe</button>
   </div>
-  <a href="#/review" class="nav-link" data-view="review" data-lens="improve"><span class="icon">&#9745;</span> Review actions</a>
   <!-- One Sessions entry, not two. The old "Status" link (#/status) and this
        one rendered the SAME StatusView for their bare route, so the sidebar
        advertised two items that were one page. This #/sessions link is the one
@@ -8142,7 +8141,7 @@ function HealthTile({ label, value, attention, href, sub, status = 'ready' }) {
 }
 
 // ---- Optimize detail screen ----
-function OptimizeFinding({ name, opt, framing, hasProposal }) {
+function OptimizeFinding({ name, opt, framing, proposal, onProposalChanged, onProposalDismiss, onProposalMark }) {
   const meta = ANALYZER_META[name] || { title: capitalize(name) };
   let body = null;
   if (name === 'downsize') {
@@ -8339,7 +8338,16 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       ${rec ? html`<span class="opt-rec" title=${(fd && fd.estimate_basis) || ''}>${rec}</span>` : null}
     </div>
     ${body}
-    ${hasProposal ? html`<div class="opt-line" style="margin-top:10px"><a class="sz-link" href=${reviewProposalHref(name)}>A fix for this is ready. Review it in Review actions →</a></div>` : null}
+    ${/* The applyable fix now lives HERE, inline under the evidence, rather than
+          on a separate Review-actions page. `embedded` drops the card's own
+          title/figure (this section already shows them) and keeps the "what to
+          do": the fix snippet + the apply control + Mark applied / Dismiss. */ ''}
+    ${proposal ? html`
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+        <div class="opt-sub" style="margin-bottom:6px">Recommended change</div>
+        <${CostProposalCard} prop=${proposal} embedded=${true} busy=${false}
+          onMark=${onProposalMark} onDismiss=${onProposalDismiss} onChanged=${onProposalChanged} />
+      </div>` : null}
   </section>`;
 }
 
@@ -8392,7 +8400,11 @@ function OptimizeView({ params, navParam }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null, proposalAnalyzers: new Set() });
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null, proposalAnalyzers: new Set(), proposals: [] });
+  // Locally-dismissed proposal signatures (same lock-free browser store the old
+  // Review-actions page used). A dismissed fix withdraws its OFFER only; the
+  // analyzer's figure is untouched (Critical Rule 32).
+  const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
@@ -8408,16 +8420,35 @@ function OptimizeView({ params, navParam }) {
       // Recommendation-outcome ledger: measured-recovered vs estimated-recoverable.
       // Best-effort — must not blank the Optimize screen.
       const rec = await api('/recommendations').catch(() => null);
-      // Which analyzers currently have an open Review-inbox proposal — drives
-      // the card → Review-inbox link below. Best-effort: a failed or empty
-      // fetch just means no card offers the link, never an error state.
+      // The open cost proposals — the applyable fix for each analyzer, now
+      // rendered inline on the analyzer's own detail page (the retired
+      // Review-actions page's job moved here). Best-effort: a failed or empty
+      // fetch just means a detail page shows no fix, never an error state.
       const cp = await api('/relearn/cost-proposals').catch(() => null);
-      const proposalAnalyzers = new Set((cp && cp.proposals || []).map(p => p.analyzer));
-      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers });
+      const proposals = (cp && cp.proposals) || [];
+      const proposalAnalyzers = new Set(proposals.map(p => p.analyzer));
+      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers, proposals });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [since, agentId, compare]);
 
   useEffect(() => { load(); }, [load]);
+
+  // The open, non-dismissed cost proposal for one analyzer — the fix rendered
+  // inline on that analyzer's detail page. `relearn` is excluded (it is a rollup
+  // participant, not a per-analyzer card — see cost_proposals).
+  const proposalFor = useCallback((name) => (st.proposals || []).find(
+    p => p.analyzer === name && p.analyzer !== 'relearn' && !dismissed.has(p.signature)
+  ) || null, [st.proposals, dismissed]);
+  const dismissProposal = useCallback((sig) => {
+    const next = new Set([...dismissed, sig]);
+    setDismissed(next); saveDismissedRelearns(next);
+  }, [dismissed]);
+  const markProposal = useCallback(async (prop) => {
+    try {
+      await apiPostOrDetail('/relearn/cost-proposals/apply', { proposal_id: prop.proposal_id });
+      await load();
+    } catch (e) { /* surfaced on next refresh; keep the card in place */ }
+  }, [load]);
 
   // Same stored artifact the Dashboard band reads, so the two screens state one
   // computed-at and cannot disagree about whether anything has been scanned.
@@ -8544,7 +8575,7 @@ function OptimizeView({ params, navParam }) {
       </div>
       ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px;margin-bottom:12px">Computed over the last ${scan.windowDays} days by the background scan.</div>` : null}
       ${hasCard
-        ? html`<${OptimizeFinding} name=${detailName} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(detailName)} />`
+        ? html`<${OptimizeFinding} name=${detailName} opt=${st.opt} framing=${framing} proposal=${proposalFor(detailName)} onProposalChanged=${load} onProposalDismiss=${dismissProposal} onProposalMark=${markProposal} />`
         : html`<div class="chart-card"><div class="opt-line dim">No <b>${meta.title}</b> finding in the latest scan. It may have been resolved, or this window has no candidates. <a class="sz-link" href="#/optimize">Back to Optimize →</a></div></div>`}
     `;
   }
@@ -11486,7 +11517,7 @@ const APPLY_KIND_COPY = {
   mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; takes effect on the next run, not live — confirm the target first", button: 'Remove entry' },
 };
 
-function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, onChanged, suppressed }) {
+function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, onChanged, suppressed, embedded }) {
   // Headline figure is the card's own PAST OVERSPEND: what this behaviour
   // already cost over the analyzed window, read straight off the payload
   // (`past_overspend_usd`/`_tokens`, stamped server-side by
@@ -11632,8 +11663,14 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
   // paragraph, the fix (snippet or apply control), the estimate, and the
   // Mark applied / Dismiss actions. The fix modality is legible from the
   // fix block itself, so it no longer gets its own sub-label.
-  return html`
-    <div class=${'opt-section inbox-row' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} key=${prop.signature}>
+  // EMBEDDED mode: rendered underneath an Optimize detail page's evidence (which
+  // already shows the analyzer title + its recoverable figure), so the card drops
+  // its own bordered box, title/badge row and figure — those would duplicate the
+  // page. What survives is the "what to do": description, coverage, fix snippet,
+  // apply control, and Mark applied / Dismiss. This is how the fix lifecycle moved
+  // out of the retired Review-actions page and onto each analyzer's own page.
+  const inner = html`
+      ${embedded ? null : html`
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
@@ -11648,7 +11685,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         <span style="margin-left:auto;text-align:right">
           <span class="po-amount" title=${prop.past_overspend_basis || ''}>${est.big}</span>
         </span>
-      </div>
+      </div>`}
       ${/* THE DESCRIPTION BLOCK. Every prose line the card carries lives inside
             one clamp, so the collapsed row is the same height as every other row
             and one "Show more" reveals all of it. Clamping only the first
@@ -11849,12 +11886,14 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         <div style="margin-top:12px">
           ${!blockedReason && !description ? html`<div class="sz-note" style="font-size:12px">There is no ready-made change to apply here yet. What this cost is measured; the fix is not something tokenjam can hand over.</div>` : null}
           <div style="display:flex;gap:12px;align-items:center;justify-content:flex-end">
-            <a class="sz-link" href=${optimizeFindingHref(prop.analyzer)}>See the full analysis →</a>
+            ${embedded ? null : html`<a class="sz-link" href=${optimizeFindingHref(prop.analyzer)}>See the full analysis →</a>`}
             <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
           </div>
         </div>
-      `}
-    </div>`;
+      `}`;
+  return embedded
+    ? html`<div class="cost-fix-embed" data-analyzer=${prop.analyzer}>${inner}</div>`
+    : html`<div class=${'opt-section inbox-row' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} key=${prop.signature}>${inner}</div>`;
 }
 
 // The headline band + the FIXES APPLIED tile.
@@ -12753,7 +12792,7 @@ function PersonaEmptyGate({ persona, header, children }) {
 // SDK-empty page looks like a normal page with an empty body rather than a
 // bare banner. Titles keyed by primary-view key.
 const VIEW_TITLES = {
-  dashboard: 'Dashboard', review: 'Review actions', optimize: 'Optimize',
+  dashboard: 'Dashboard', optimize: 'Optimize',
   summarize: 'Summarize', rules: 'Rules', traces: 'Traces', cost: 'Cost',
   alerts: 'Alerts', drift: 'Drift', budget: 'Budget', faq: 'FAQ',
 };
@@ -12810,6 +12849,11 @@ function DashboardView({ params, persona }) {
   const driftRead = useTriageRead(() => api('/drift', { since }), [since]);
   const tracesRead = useTriageRead(() => api('/traces', { since, limit: 6 }), [since]);
   const relearnRead = useTriageRead(() => api('/relearn/proposals', { since }), [since]);
+  // The open recommended CHANGES (the ACTIONS band at the bottom of the page):
+  // each cost proposal's imperative fix title, linking into the analyzer's own
+  // detail page where the fix is now applied. Window-independent — proposals come
+  // from the background scan's own window, like the Opportunities tiles.
+  const costPropsRead = useTriageRead(() => api('/relearn/cost-proposals'), []);
 
   // ---- The recoverable-waste read, on its own state machine ---------------- //
   // GET /optimize runs the analyzer sweep server-side. Measured against a real
@@ -12989,6 +13033,21 @@ function DashboardView({ params, persona }) {
   const optData = optState.data;
   const tiles = optData ? recoverableTiles(optData) : [];
   const bandState = recoverableBandState(optState.phase, optData, tiles.length);
+  // The ACTIONS band: open recommended CHANGES, distinct from the Opportunities
+  // tiles (which show WHERE the waste is). Each proposal's imperative fix title
+  // links into its analyzer's own detail page, where the fix is now applied.
+  // `relearn` is a rollup participant (not a per-analyzer card); locally-dismissed
+  // fixes and the sub-$5 noise floor drop here too, matching the detail pages.
+  const dismissedActions = loadDismissedRelearns();
+  const actionItems = ((costPropsRead.data && costPropsRead.data.proposals) || [])
+    .filter(p => p.analyzer !== 'relearn' && !dismissedActions.has(p.signature) && !belowInboxFloor(p))
+    .map(p => ({
+      key: p.signature,
+      title: p.title,
+      where: (ANALYZER_META[p.analyzer] && ANALYZER_META[p.analyzer].title) || capitalize(p.analyzer),
+      href: p.analyzer === 'summarize' ? '#/optimize/summarize' : ('#/optimize/' + p.analyzer),
+    }));
+  const actionsKnown = costPropsRead.data != null;
   // The compute-layer view of the SAME payload the phase machine above tracks.
   // One read, one stored artifact, so the recoverable band and the budgets tile
   // below cannot disagree about how fresh their figures are or whether anything
@@ -13197,8 +13256,8 @@ function DashboardView({ params, persona }) {
                       is also why the tiles no longer appear together: each one
                       paints when its own endpoint answers. */ ''}
                 <div class="tile-grid compact">
-                  <${HealthTile} label="Pending fixes" value=${relearnClusters.length} attention=${relearnClusters.length > 0} href="#/review"
-                    status=${readStatus(relearnRead)} sub="the loop, review inbox" />
+                  <${HealthTile} label="Pending fixes" value=${relearnClusters.length} attention=${relearnClusters.length > 0} href="#/optimize/rules"
+                    status=${readStatus(relearnRead)} sub="recurring mistakes → rules" />
                   <${HealthTile} label="Unread alerts" value=${alertList.length} attention=${alertList.length > 0}
                     status=${readStatus(alertsRead)}
                     href="#/alerts?unread=true" sub=${alertList.length ? alertList[0].severity : 'all clear'} />
@@ -13217,7 +13276,25 @@ function DashboardView({ params, persona }) {
              once (Spend KPI tile + chart); the run-rate projection is the caption. -->
         <div id="dash-explore" class="band-label" style="margin-top:28px;padding-top:22px;border-top:1px solid var(--border)">Spend exploration <span class="band-window">· slice and dice by model, agent, tool, provider and more</span></div>
         <div style="display:flex;align-items:center;gap:8px;margin:10px 0 2px"><span class="persona-bar-label">Window</span><div class="filters" style="margin:0">${winPicker}</div></div>
-        <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />`}
+        <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />
+
+        ${/* ACTIONS band — the recommended CHANGES to make, distinct from the
+              Opportunities tiles above (which show where the waste is). Each row
+              links into the analyzer's own Optimize detail page, where the fix is
+              reviewed and applied. Hidden entirely when there are no open actions
+              (never a "nothing to do" row). This replaced the Review-actions
+              submenu, whose apply lifecycle moved onto the detail pages. */ ''}
+        ${actionsKnown && actionItems.length ? html`
+          <div class="band-label" style="margin-top:28px;padding-top:22px;border-top:1px solid var(--border)">Actions <span class="band-window">· recommendations for changes to make</span></div>
+          <div class="opt-act-list" style="margin-top:10px">
+            ${actionItems.map(a => html`
+              <div class="opt-act-row" key=${a.key}>
+                <span class="opt-act-name">${a.where}</span>
+                <span class="opt-act-hint">${a.title}</span>
+                <span class="opt-act-fig dim"></span>
+                <span class="opt-act-btncell"><a class="opt-review-btn" href=${a.href}>Review →</a></span>
+              </div>`)}
+          </div>` : null}`}
   `;
 }
 
@@ -13237,7 +13314,7 @@ function DashboardView({ params, persona }) {
 // route-sync effect, which then PRESERVES whatever lens is active rather than
 // forcing a switch.
 const VIEW_LENS = {
-  review: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
+  status: 'improve', sessions: 'improve', runs: 'improve',
   faq: 'improve', optimize: 'improve',
   traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
   budget: 'observe',
@@ -13256,7 +13333,6 @@ const VIEW_LENS = {
 // expected and fine).
 const PRIMARY_VIEWS = [
   ['dashboard', DashboardView],
-  ['review',    ReviewInboxView],
   ['sessions',  StatusView],
   ['traces',    TracesListView],
   ['cost',      CostView],
@@ -13286,7 +13362,10 @@ const WARM_STAGGER_MS = 120;   // gap between mounting each warmed-on-boot view
 // Anything else is its own view key.
 function primaryKeyFor(route) {
   const v = route.view;
-  if (v === 'overview' || v === 'analytics') return 'dashboard';
+  // The Review-actions page was retired (its apply lifecycle moved onto the
+  // Optimize detail pages, its summary onto the Dashboard ACTIONS band). A stale
+  // #/review deep-link aliases to the Dashboard rather than 404ing.
+  if (v === 'overview' || v === 'analytics' || v === 'review') return 'dashboard';
   if (v === 'status' || v === 'runs') return 'sessions';
   if (v === 'optimize' && route.param === 'summarize') return 'summarize';
   if (v === 'optimize' && route.param === 'rules') return 'rules';
@@ -13689,13 +13768,13 @@ fetch('/api/v1/version')
   // which lens is actually shown — it re-syncs the pill + nav-link visibility
   // on every hashchange, so this handler only needs to navigate.
   (function () {
-    var LENS_HOME = { improve: '#/review', observe: '#/traces' };
+    var LENS_HOME = { improve: '#/dashboard', observe: '#/traces' };
     document.querySelectorAll('.lens-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var lens = btn.dataset.lens;
         var sidebar = document.querySelector('.sidebar');
         if (sidebar && sidebar.dataset.lens === lens) return;
-        location.hash = LENS_HOME[lens] || '#/review';
+        location.hash = LENS_HOME[lens] || '#/dashboard';
       });
     });
   })();
