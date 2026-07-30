@@ -191,6 +191,26 @@ code, .mono {
 .sidebar[data-persona="claude-code"] a.nav-link[data-lens="observe"] { display: none !important; }
 .sidebar[data-persona="claude-code"] .lens-switch { display: none; }
 .sidebar[data-persona="sdk"] a.nav-link[data-view="sessions"] { display: none !important; }
+/* SDK persona: same clean FLAT list the coding-agent persona shows — no
+   Improve/Observe toggle, and the Observe pages (Traces/Cost/Alerts/Drift/
+   Budget) rendered as flat entries rather than hidden behind a lens. The
+   `data-lens="improve"|"observe"` hide rules above are lens-scoped, so they
+   only bite while the sidebar carries `data-lens`; these rules force every
+   nav-link visible for SDK regardless of the sidebar's current lens, and hide
+   the switcher itself so there is no control that toggles nothing. Review-inbox
+   is CC-only (its relearn writes have no SDK lever), so it stays hidden too.
+   `!important` beats the route effect's inline `display` on nav-children and
+   the lens hide rules alike. */
+.sidebar[data-persona="sdk"] .lens-switch { display: none; }
+.sidebar[data-persona="sdk"] a.nav-link[data-lens="improve"],
+.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: flex !important; }
+.sidebar[data-persona="sdk"] a.nav-link[data-view="review"] { display: none !important; }
+/* A nav-child (Summarize / Rules under Optimize) still collapses when its
+   section is inactive — the flat-list rule above must not force those open, or
+   they'd always show. Restore the route effect's per-child display by letting
+   its inline style win: a child whose section is inactive is display:none. */
+.sidebar[data-persona="sdk"] a.nav-link.nav-child[style*="display:none"],
+.sidebar[data-persona="sdk"] a.nav-link.nav-child[style*="display: none"] { display: none !important; }
 /* The Dashboard's health band is Observe-shaped: unread alerts, agents
    drifting, budgets at risk. A coding-agent user has no Observe lens, so the
    band summarises pages they cannot open. Hidden for that persona rather than
@@ -1187,6 +1207,15 @@ a.health-tile.attn { border-color: var(--warn); }
 }
 .band-msg.warn { border-left: 3px solid var(--warn); }
 .band-msg.err { border-left: 3px solid var(--error); }
+/* An inline text button that reads as a link inside prose (the "Switch back to
+   Claude Code" affordance in the persona-empty banner). A button, not an <a>,
+   because it triggers a state change (persona toggle), not navigation — so it
+   has no href to reload and is keyboard-focusable by default. */
+.link-inline {
+  background: none; border: none; padding: 0; font: inherit; cursor: pointer;
+  color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
+.link-inline:hover { color: var(--text); }
 .band-msg b {
   display: block; color: var(--text); font-family: 'Geist Mono', monospace;
   font-size: 12.5px; font-weight: 600; margin-bottom: 5px;
@@ -12558,26 +12587,87 @@ function windowOptionsWithCurrent(availableDays, since) {
  * zero; an unanswered or failed read says nothing at all, because a zero we do
  * not have is not a measurement.
  */
+// True once the persona read has ANSWERED and reports a hard zero for this
+// persona. `null` means "not answered / failed" (a zero we do not have is not a
+// measurement), so callers gate on `=== true`, never on falsiness. Reads the
+// context App() already populates from its single `/persona` fetch rather than
+// issuing its own — so the gate and the switcher can never disagree, and there
+// is one request, not one per view.
+function usePersonaHasNoData(persona) {
+  const ctx = useContext(PersonaCtx);
+  if (!ctx || !ctx.known || !ctx.counts) return null;
+  return (ctx.counts[persona] || 0) === 0;
+}
+
+// The banner shown IN PLACE OF a page's body when the reader has switched to a
+// persona this machine has no data for. It carries no header of its own — the
+// shared gate (`PersonaEmptyGate`) renders the page's normal header above it,
+// so this sits in the content region, never above the header.
+//
+// The distinction this exists to protect: "you have no SDK workflows here" and
+// "your SDK workflows cost nothing" are different statements, and every tile a
+// page would otherwise render states the second while the truth is the first.
 function PersonaNoDataNotice({ persona }) {
-  const [info, setInfo] = useState(null);
-  useEffect(() => {
-    let cancelled = false;
-    api('/persona').then(d => { if (!cancelled) setInfo(d); }).catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
-  if (!info || !info.known || !info.counts) return null;
-  if ((info.counts[persona] || 0) > 0) return null;
+  const ctx = useContext(PersonaCtx);
   const label = persona === 'sdk' ? 'SDK workflows' : 'Claude Code sessions';
   const other = persona === 'sdk' ? 'Claude Code' : 'SDK workflows';
+  const otherKey = persona === 'sdk' ? 'claude-code' : 'sdk';
+  // "Switch back to <other>" is a real control: it makes the SAME persona state
+  // change the "Viewing as" <select> does (App()'s setPersona, threaded through
+  // context), never a page reload. A button styled inline as a link so it reads
+  // as prose but is keyboard-focusable and does the state change.
+  const switchBack = html`<button type="button" class="link-inline"
+      onClick=${() => ctx && ctx.onChange && ctx.onChange(otherKey)}>Switch back to ${other}</button>`;
   return html`
     <div class="band-msg" style="margin:0 0 18px">
       <b>No ${label} on this machine.</b>
       <p>
-        Nothing has been ingested for this persona, so the figures below are not
-        small: they are empty. Switch back to ${other} to see what this machine
+        Nothing has been ingested for this persona, so the figures on this page
+        are not small: they are empty. ${switchBack} to see what this machine
         actually has, or point an SDK workload at the collector and it will show
         up here.
       </p>
+    </div>`;
+}
+
+// The shared empty-state gate every primary view honors (issue: SDK persona on
+// a Claude-Code-only machine). Renders the page's normal HEADER above, then —
+// when this persona has no data — the banner IN PLACE OF the page's body, so a
+// page shows its normal header then the banner instead of its overspend tiles /
+// chart / analyzer cards. When data exists (or the read is unanswered) it
+// renders the children untouched, so the gate is a no-op on the common path.
+//
+// One place, not per-page copy: App() wraps the active view in this, passing a
+// header node the gate always shows and the view's own body as children. A view
+// that already renders its own header inside its body passes an empty header
+// here and keeps rendering it as before on the non-empty path — the gate only
+// SUPPRESSES the body, it never has to reproduce a page's header.
+function PersonaEmptyGate({ persona, header, children }) {
+  const noData = usePersonaHasNoData(persona);
+  if (noData !== true) return children;
+  return html`
+    ${header || null}
+    <${PersonaNoDataNotice} persona=${persona} />`;
+}
+
+// The standard header the gate renders above the banner: page title + the
+// persona switcher, in the same `.ov-head` row the Dashboard uses, so an
+// SDK-empty page looks like a normal page with an empty body rather than a
+// bare banner. Titles keyed by primary-view key.
+const VIEW_TITLES = {
+  dashboard: 'Dashboard', review: 'Review inbox', optimize: 'Optimize',
+  summarize: 'Summarize', rules: 'Rules', traces: 'Traces', cost: 'Cost',
+  alerts: 'Alerts', drift: 'Drift', budget: 'Budget', faq: 'FAQ',
+};
+function PersonaEmptyHeader({ viewKey }) {
+  return html`
+    <div class="ov-head">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="page-title" style="margin:0">${VIEW_TITLES[viewKey] || ''}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <${PersonaPicker} />
+      </div>
     </div>`;
 }
 
@@ -12849,7 +12939,6 @@ function DashboardView({ params, persona }) {
     : null;
 
   return html`
-    <${PersonaNoDataNotice} persona=${persona} />
     <div class="ov-head">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div class="page-title" style="margin:0">Dashboard</div>
@@ -13383,7 +13472,18 @@ function App() {
       // it today: a view needs the SELECTED persona (not the detected one) to
       // say anything honest about a persona with no data, and re-fetching it
       // per view would let two surfaces disagree mid-render.
-      return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}><${Comp} params=${vp} persona=${persona} /></div>`;
+      // Every primary view is wrapped in the shared empty-state gate: on a
+      // persona this machine has no data for, it renders a normal header for
+      // the page (title + persona switcher) then the banner IN PLACE OF the
+      // view's body — so the header is never mangled by a banner rendered above
+      // it, and the rule applies uniformly to every page, not just Dashboard.
+      // On the common path (data present, or read unanswered) the gate is a
+      // no-op and the view renders exactly as before.
+      return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}>
+        <${PersonaEmptyGate} persona=${persona} header=${html`<${PersonaEmptyHeader} viewKey=${key} />`}>
+          <${Comp} params=${vp} persona=${persona} />
+        <//>
+      </div>`;
     })}
     ${detail ? html`<div key=${'detail:' + route.view + ':' + route.param} class="view-pane">${detail}</div>` : null}
     ${!detail && !PRIMARY_KEYS.has(primaryKey) ? html`<div class="empty">Page not found.</div>` : null}

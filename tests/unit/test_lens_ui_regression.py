@@ -235,3 +235,57 @@ def test_jump_badges_only_target_rendered_rows(html: str) -> None:
     assert "!renderedRowIds.has(sid)" in html
     # Beyond-cap costliest spans are pinned into the rendered set.
     assert "pinnedRows" in html
+
+
+# --------------------------------------------------------------------------- #
+# SDK-persona UX batch — the persona-empty banner renders in the CONTENT region
+# below each page's header (never above it), the "switch back" copy is a real
+# control that calls the persona setter, and the SDK sidebar is a clean flat
+# list with no Improve/Observe lens toggle.
+# --------------------------------------------------------------------------- #
+def test_persona_empty_gate_renders_banner_below_the_header(html: str) -> None:
+    """One shared gate wraps every primary view: it renders the page header
+    THEN the banner in place of the body, so the banner never sits above (and
+    mangles) the header. The gate must exist and be applied in App()'s view
+    loop, and the old unconditional 'banner above the Dashboard header' render
+    must be gone."""
+    # The shared gate + its header component exist.
+    assert "function PersonaEmptyGate(" in html
+    assert "function PersonaEmptyHeader(" in html
+    # App() wraps each mounted primary view in the gate, feeding it the header.
+    assert "<${PersonaEmptyGate} persona=${persona} header=${html`<${PersonaEmptyHeader}" in html
+    # The gate renders the header BEFORE the banner (content region below header).
+    gate = html[html.index("function PersonaEmptyGate("):]
+    gate = gate[: gate.index("function PersonaEmptyHeader(")]
+    hdr = gate.index("${header")
+    banner = gate.index("PersonaNoDataNotice")
+    assert hdr < banner, "gate must render the header above the banner"
+    # The old placement — banner rendered as the FIRST child of DashboardView's
+    # own return, above its .ov-head header — must be gone.
+    assert "<${PersonaNoDataNotice} persona=${persona} />\n    <div class=\"ov-head\">" not in html
+
+
+def test_switch_back_is_a_clickable_control_calling_the_persona_setter(html: str) -> None:
+    """'Switch back to <other>' is a button that calls the SAME persona setter
+    the <select> uses (ctx.onChange), toggling to the other persona — not a
+    page reload."""
+    notice = html[html.index("function PersonaNoDataNotice("):]
+    notice = notice[: notice.index("function PersonaEmptyGate(")]
+    assert 'class="link-inline"' in notice
+    assert "ctx.onChange && ctx.onChange(otherKey)" in notice
+    assert "Switch back to ${other}" in notice
+    # No reload / navigation to accomplish the switch.
+    assert "location.reload" not in notice
+
+
+def test_sdk_sidebar_is_flat_with_no_lens_toggle(html: str) -> None:
+    """The SDK persona hides the lens switcher and shows the observe pages as
+    flat entries (same clean structure the claude-code persona shows), so there
+    is no Improve/Observe toggle for SDK."""
+    assert '.sidebar[data-persona="sdk"] .lens-switch { display: none; }' in html
+    # Observe + improve links are forced flat/visible for SDK regardless of the
+    # sidebar's current lens.
+    assert '.sidebar[data-persona="sdk"] a.nav-link[data-lens="improve"],' in html
+    assert '.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: flex !important; }' in html
+    # Review inbox is CC-only, hidden for SDK.
+    assert '.sidebar[data-persona="sdk"] a.nav-link[data-view="review"] { display: none !important; }' in html
