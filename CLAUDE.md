@@ -476,8 +476,9 @@ The packaged table stays the zero-config default — the override is a *layer*, 
 ## CI
 
 GitHub Actions workflow at `.github/workflows/ci.yml` runs on push/PR to `main`:
-- **`test`** job: Python 3.10/3.11/3.12 matrix — `ruff check` and `mypy` (continue-on-error), then `pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/` (blocking)
-- **`test-ts`** job: Node 20 — `npm install && npm test` in `sdk-ts/`
+- **`lint`** job: Python 3.12 — `ruff check tokenjam/` and `mypy tokenjam/`
+- **`test`** job: Python 3.10/3.11/3.12 matrix — `pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/`
+- **`test-ts`** job: Node 22 — `npm install && npm test` in `sdk-ts/`
 
 All steps are blocking — lint, typecheck, and tests must pass for CI to go green.
 

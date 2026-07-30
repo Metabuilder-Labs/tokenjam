@@ -26,6 +26,26 @@ from tokenjam.core.optimize import relearn_apply as pa
 from tests.factories import make_session
 
 
+@pytest.fixture(autouse=True)
+def _quiescent_relearn_computing_flag():
+    """Isolate each test from the process-global ``relearn`` compute flag.
+
+    ``report_store.is_computing()`` reads a module-level ``threading.Event``
+    (``_COMPUTING``). An earlier test that triggers a background recompute sets
+    it and does not join the worker thread, so whether the event is still set
+    when a later test runs depends on thread scheduling — which is exactly why
+    ``test_relearn_proposals_carries_persona_when_never_run`` flaked on one
+    matrix leg (``computing``) while the others saw ``never_run``. Clear it
+    around every test so each starts from a quiescent store. Test-isolation
+    only; it changes no production behavior.
+    """
+    from tokenjam.core.optimize.report_store import _COMPUTING
+
+    _COMPUTING.clear()
+    yield
+    _COMPUTING.clear()
+
+
 @pytest.fixture
 def db():
     backend = InMemoryBackend()
