@@ -9994,24 +9994,11 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
       const activeSub = ((metric === 'events' || metric === 'sessions')
         && breakdownTotal > 0 && breakdownTotal < (kpis[metric] || 0))
         ? { value: fmtCount(breakdownTotal), label: `by ${breakdownDim}` } : null;
-      // Founder request: the Tokens card leads with its dollar value, token
-      // count secondary. Computed independently of `spend` (card 1) rather
-      // than reused from it: card 1 renders an implied-value MULTIPLIER for
-      // SUBSCRIPTION, a different metric entirely, not a dollar figure --
-      // reusing spend.value there would put "43.5× plan value" on the Tokens
-      // card too. LOCAL is the only case with no marginal cost to price at
-      // all; every other pricing mode (api / subscription / unknown) shows
-      // the real dollar amount here. Never fabricated for an unreported
-      // spend field -- falls back to the plain token headline, unchanged,
-      // with no secondary line.
-      const spendMode = framing && framing.pricing_mode;
-      const tokensDollar = (kpis.spend != null && spendMode !== 'local') ? fmtDashUsd(kpis.spend) : null;
-      // `dim: true` is this call site's own request for a dimmer sub-line
-      // (the founder's "subtitle-scale, dimmer" spec); the #318 breakdown
-      // sub (activeSub above) keeps its normal-brightness look unchanged --
-      // .kpi-sub-dim is a separate, additive modifier class, not a change to
-      // the shared .kpi-sub-val/.kpi-sub-lab rules.
-      const tokensSub = tokensDollar ? { value: kpiFigure(kpis.tokens, fmtTokens), label: 'tokens', dim: true } : null;
+      // Founder request (2026-07-30): the Tokens card leads with the TOKEN
+      // count, no dollar figure. On a subscription plan a raw $ spend is not a
+      // figure the user actually pays (Rule 22 framing), and the card is
+      // labelled "Tokens" -- so it shows the count, plain: no dollar headline,
+      // no secondary line.
       const tiles = [];
       if (spend) {
         tiles.push({ key: 'spend', label: spend.label, cost: true, value: spend.value,
@@ -10019,8 +10006,8 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
       }
       // kpiFigure, not the bare formatter: a field the payload omitted renders as
       // unknown rather than as fmtCount(null)'s "0" or fmtTokens(null)'s dash.
-      tiles.push({ key: 'tokens', label: 'Tokens', cost: !!tokensDollar,
-        value: tokensDollar || kpiFigure(kpis.tokens, fmtTokens), sub: tokensSub,
+      tiles.push({ key: 'tokens', label: 'Tokens', cost: false,
+        value: kpiFigure(kpis.tokens, fmtTokens),
         series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens });
       tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: kpiFigure(kpis.sessions, fmtCount),
         series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions });
