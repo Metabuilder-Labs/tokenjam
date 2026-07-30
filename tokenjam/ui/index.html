@@ -13047,10 +13047,6 @@ function DashboardView({ params, persona }) {
         <${PlanBadge} framing=${framing} />
       </div>
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="persona-bar-label">Viewing</span>
-          <div class="filters" style="margin:0">${winPicker}</div>
-        </div>
         <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
       </div>
     </div>
@@ -13111,7 +13107,7 @@ function DashboardView({ params, persona }) {
                       windows are one seam now (core/optimize/report_window.py)
                       and each surface still names it, because a figure whose
                       window the reader cannot see is not auditable. */ ''}
-                <div class="band-label">Opportunities to optimize token efficiency<span class="band-window">· click tiles with data to view details</span></div>
+                <div class="band-label">Opportunities to optimize token efficiency${scan.windowDays ? html`<span class="band-window">· over the last ${scan.windowDays}d</span>` : null}</div>
                 ${/* recoverableBandState() decided which of the six states this
                       is; the branches below only render. The ONE branch allowed
                       to say there is nothing recoverable is 'none', which
@@ -13226,6 +13222,7 @@ function DashboardView({ params, persona }) {
         <!-- The HERO: the embedded Analytics pivot explorer. Spend lives here
              once (Spend KPI tile + chart); the run-rate projection is the caption. -->
         <div id="dash-explore" class="band-label" style="margin-top:28px;padding-top:22px;border-top:1px solid var(--border)">Spend exploration <span class="band-window">· slice and dice by model, agent, tool, provider and more</span></div>
+        <div style="display:flex;align-items:center;gap:8px;margin:10px 0 2px"><span class="persona-bar-label">Window</span><div class="filters" style="margin:0">${winPicker}</div></div>
         <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />`}
   `;
 }
