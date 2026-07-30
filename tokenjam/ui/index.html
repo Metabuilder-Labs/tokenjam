@@ -1070,6 +1070,10 @@ a.opt-find-row.link .opt-find-name { color: var(--accent); }
   white-space: nowrap; text-decoration: none; display: inline-block;
 }
 .opt-review-btn:hover { background: rgba(var(--accent-rgb), 0.12); }
+/* Multiple embedded fix cards under one analyzer's evidence (e.g. downsize's
+   driver-role + per-project cards) get a light divider so they read as distinct
+   recommendations rather than one run-on block. */
+.cost-fix-embed + .cost-fix-embed { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); }
 @media (max-width: 640px) {
   .opt-act-row { grid-template-columns: 1fr auto; }
   .opt-act-hint { grid-column: 1 / -1; }
@@ -8141,7 +8145,7 @@ function HealthTile({ label, value, attention, href, sub, status = 'ready' }) {
 }
 
 // ---- Optimize detail screen ----
-function OptimizeFinding({ name, opt, framing, proposal, onProposalChanged, onProposalDismiss, onProposalMark }) {
+function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onProposalDismiss, onProposalMark }) {
   const meta = ANALYZER_META[name] || { title: capitalize(name) };
   let body = null;
   if (name === 'downsize') {
@@ -8342,11 +8346,11 @@ function OptimizeFinding({ name, opt, framing, proposal, onProposalChanged, onPr
           on a separate Review-actions page. `embedded` drops the card's own
           title/figure (this section already shows them) and keeps the "what to
           do": the fix snippet + the apply control + Mark applied / Dismiss. */ ''}
-    ${proposal ? html`
+    ${(proposals && proposals.length) ? html`
       <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
-        <div class="opt-sub" style="margin-bottom:6px">Recommended change</div>
-        <${CostProposalCard} prop=${proposal} embedded=${true} busy=${false}
-          onMark=${onProposalMark} onDismiss=${onProposalDismiss} onChanged=${onProposalChanged} />
+        <div class="opt-sub" style="margin-bottom:6px">Recommended change${proposals.length > 1 ? 's' : ''}</div>
+        ${proposals.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} embedded=${true} busy=${false}
+          onMark=${onProposalMark} onDismiss=${onProposalDismiss} onChanged=${onProposalChanged} />`)}
       </div>` : null}
   </section>`;
 }
@@ -8433,12 +8437,15 @@ function OptimizeView({ params, navParam }) {
 
   useEffect(() => { load(); }, [load]);
 
-  // The open, non-dismissed cost proposal for one analyzer — the fix rendered
-  // inline on that analyzer's detail page. `relearn` is excluded (it is a rollup
-  // participant, not a per-analyzer card — see cost_proposals).
-  const proposalFor = useCallback((name) => (st.proposals || []).find(
+  // The open, non-dismissed cost proposals for one analyzer — the fixes rendered
+  // inline on that analyzer's detail page. An analyzer can carry more than one
+  // (downsize commonly has a driver-role card plus a per-project model-oversizing
+  // card each), so this returns ALL of them, not just the first. `relearn` is
+  // excluded (it is a rollup participant, not a per-analyzer card — see
+  // cost_proposals).
+  const proposalsFor = useCallback((name) => (st.proposals || []).filter(
     p => p.analyzer === name && p.analyzer !== 'relearn' && !dismissed.has(p.signature)
-  ) || null, [st.proposals, dismissed]);
+  ), [st.proposals, dismissed]);
   const dismissProposal = useCallback((sig) => {
     const next = new Set([...dismissed, sig]);
     setDismissed(next); saveDismissedRelearns(next);
@@ -8575,7 +8582,7 @@ function OptimizeView({ params, navParam }) {
       </div>
       ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px;margin-bottom:12px">Computed over the last ${scan.windowDays} days by the background scan.</div>` : null}
       ${hasCard
-        ? html`<${OptimizeFinding} name=${detailName} opt=${st.opt} framing=${framing} proposal=${proposalFor(detailName)} onProposalChanged=${load} onProposalDismiss=${dismissProposal} onProposalMark=${markProposal} />`
+        ? html`<${OptimizeFinding} name=${detailName} opt=${st.opt} framing=${framing} proposals=${proposalsFor(detailName)} onProposalChanged=${load} onProposalDismiss=${dismissProposal} onProposalMark=${markProposal} />`
         : html`<div class="chart-card"><div class="opt-line dim">No <b>${meta.title}</b> finding in the latest scan. It may have been resolved, or this window has no candidates. <a class="sz-link" href="#/optimize">Back to Optimize →</a></div></div>`}
     `;
   }
