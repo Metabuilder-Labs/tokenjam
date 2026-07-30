@@ -160,7 +160,7 @@ def test_bulk_select_only_shows_when_more_than_one_appliable(html: str) -> None:
 def test_apply_wording_says_next_run_not_enforcement(html: str) -> None:
     # The Approve note and the per-kind hints must make clear the write is
     # effective on the next run and is NOT live enforcement (honesty Rule 14).
-    assert "effective on the next run — not live enforcement" in html
+    assert "it takes effect on the next run, not as live enforcement" in html
     assert "takes effect on the next run, not live" in html
     # The old ambiguous single-word "Apply change" button must be gone.
     assert "button: 'Apply change'" not in html
@@ -344,12 +344,19 @@ def test_optimize_detail_route_renders_a_single_analyzer(html: str) -> None:
 
 def test_optimize_summary_no_longer_stacks_every_finding(html: str) -> None:
     # The old long page mapped OptimizeFinding over every analyzer on the summary.
-    # That stacked render is gone; the summary is a ranked linked list instead.
+    # That stacked render is gone; the summary is now ONE unified "Recommended
+    # actions" list (each row a hint + figure + Review button), which replaced the
+    # duplicated waste-list + separate Rules/Summarize/Findings sections.
     assert "${order.map(n => html`<${OptimizeFinding}" not in html, (
         "summary landing must not stack every analyzer's full detail section"
     )
-    assert 'id="opt-findings"' in html
-    assert "class=\"opt-find-row link\"" in html or "opt-find-row link" in html
+    assert 'id="opt-actions"' in html
+    assert 'class="opt-act-list"' in html
+    # Each actionable row carries a Review button that opens its detail page.
+    assert "class=\"opt-review-btn\"" in html
+    # The old three-surface duplication is gone.
+    assert 'id="opt-findings"' not in html
+    assert 'id="opt-rules"' not in html
 
 
 def test_dashboard_empty_tiles_are_not_clickable(html: str) -> None:

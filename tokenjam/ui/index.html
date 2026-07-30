@@ -1047,6 +1047,35 @@ a.opt-find-row.link .opt-find-name { color: var(--accent); }
   .opt-find-row { grid-template-columns: 1fr auto; }
   .opt-find-hint { grid-column: 1 / -1; }
 }
+/* Unified "Recommended actions" list on the Optimize summary landing. One row
+   per analyzer/action (money analyzers, Rules, Summarize), each with a compact
+   hint, its figure, and a Review button when there's a detail page to act on —
+   replacing the old duplicated waste-list + separate Rules/Summarize/Findings
+   sections. */
+.opt-act-list { display: flex; flex-direction: column; }
+.opt-act-row {
+  display: grid; grid-template-columns: minmax(120px, 170px) 1fr minmax(84px, auto) 84px;
+  align-items: center; gap: 14px; padding: 11px 6px; font-size: 13px;
+  border-top: 1px solid var(--border);
+}
+.opt-act-list > .opt-act-row:first-child { border-top: none; }
+.opt-act-name { font-weight: 600; }
+.opt-act-hint { font-size: 12px; color: var(--text-dim); }
+.opt-act-fig { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); white-space: nowrap; text-align: right; }
+.opt-act-fig.dim { color: var(--text-dim); font-weight: 400; }
+.opt-act-btncell { text-align: right; }
+.opt-review-btn {
+  font-family: 'Geist', sans-serif; font-size: 12px; font-weight: 600; color: var(--accent);
+  border: 1px solid rgba(var(--accent-rgb), 0.4); border-radius: 6px; padding: 3px 11px;
+  white-space: nowrap; text-decoration: none; display: inline-block;
+}
+.opt-review-btn:hover { background: rgba(var(--accent-rgb), 0.12); }
+@media (max-width: 640px) {
+  .opt-act-row { grid-template-columns: 1fr auto; }
+  .opt-act-hint { grid-column: 1 / -1; }
+  .opt-act-fig { text-align: left; }
+  .opt-act-btncell { grid-column: 1 / -1; text-align: left; }
+}
 /* uPlot hover tooltip (#128). Positioned at the cursor; offset above-centered. */
 .u-tip {
   position: absolute; pointer-events: none; z-index: 5;
@@ -2002,7 +2031,7 @@ code.md-code {
     <button type="button" class="lens-btn active" data-lens="improve">Improve</button>
     <button type="button" class="lens-btn" data-lens="observe">Observe</button>
   </div>
-  <a href="#/review" class="nav-link" data-view="review" data-lens="improve"><span class="icon">&#9745;</span> Review inbox</a>
+  <a href="#/review" class="nav-link" data-view="review" data-lens="improve"><span class="icon">&#9745;</span> Review actions</a>
   <!-- One Sessions entry, not two. The old "Status" link (#/status) and this
        one rendered the SAME StatusView for their bare route, so the sidebar
        advertised two items that were one page. This #/sessions link is the one
@@ -8310,7 +8339,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       ${rec ? html`<span class="opt-rec" title=${(fd && fd.estimate_basis) || ''}>${rec}</span>` : null}
     </div>
     ${body}
-    ${hasProposal ? html`<div class="opt-line" style="margin-top:10px"><a class="sz-link" href=${reviewProposalHref(name)}>A fix for this is ready. Review it in the Review inbox →</a></div>` : null}
+    ${hasProposal ? html`<div class="opt-line" style="margin-top:10px"><a class="sz-link" href=${reviewProposalHref(name)}>A fix for this is ready. Review it in Review actions →</a></div>` : null}
   </section>`;
 }
 
@@ -8457,6 +8486,39 @@ function OptimizeView({ params, navParam }) {
   const detailNames = st.opt ? optimizeDetailAnalyzers(st.opt) : [];
   const detailSet = new Set(detailNames);
 
+  // Unified "Recommended actions" rows — one digestible section that replaces the
+  // chart's per-analyzer waste-list, the standalone Rules and Summarize boxes, and
+  // the old Findings list (three surfaces that listed the same analyzers). One row
+  // per analyzer/action: a short hint, its figure, and a Review button when there
+  // is a detail page to act on. Money analyzers first (biggest-waste-first via
+  // recoverableTiles' finding_rank), then Summarize and Rules — the two file-write
+  // actions that carry no per-window dollar of their own.
+  const actRows = recoverableTiles(st.opt)
+    .filter(t => order.indexOf(t.name) !== -1)
+    .map(t => {
+      const m = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
+      const actionable = t.state === 'actionable';
+      const fig = actionable ? fmtFramedSavings(t.usd, t.tokens, framing)
+        : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
+        : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
+      return {
+        key: t.name, title: m.title,
+        hint: (t.state === 'not_ready' && t.hint) ? t.hint : m.hint,
+        fig, figDim: !actionable,
+        href: (actionable && detailSet.has(t.name)) ? ('#/optimize/' + t.name) : null,
+      };
+    });
+  if (sf && sf.files > 0) actRows.push({
+    key: 'summarize', title: 'Summarize', hint: 'Compress oversized prompt files',
+    fig: '~' + fmtTokens(sfTok) + ' tok/call', figDim: false, href: '#/optimize/summarize',
+  });
+  // Rules always offers its own surface (the per-project write review); it carries
+  // no per-window dollar of its own, so it shows a plain Review affordance.
+  actRows.push({
+    key: 'rules', title: 'Rules', hint: 'Turn repeated findings into permanent CLAUDE.md rules',
+    fig: '', figDim: true, href: '#/optimize/rules',
+  });
+
   // DETAIL SUB-PAGE (`#/optimize/<analyzer>`): render THAT analyzer's section
   // alone, reusing the exact OptimizeFinding card the summary used to stack. A
   // name with no finding this window (stale link, or scanned-away) falls through
@@ -8548,102 +8610,34 @@ function OptimizeView({ params, navParam }) {
           <div class="chart-foot" style="margin-top:2px">
             <span class="dim">Biggest single cause: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.</span>
           </div>` : null}
-          ${waste.recSegs.length ? html`
-            <div class="waste-list">
-              ${waste.recSegs.map(r => {
-                const ov = WASTE_LEGEND_OVERRIDE[r.analyzer];
-                return html`
-                <div class="waste-row">
-                  <span class="waste-name">${r.title === 'Summarize'
-                    ? html`<a class="sz-link" href="#/optimize/summarize">${r.title}</a>`
-                    : detailSet.has(r.analyzer)
-                      ? html`<a class="sz-link" href=${'#/optimize/' + r.analyzer}>${r.title}</a>`
-                      : r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
-                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)}${ov ? html` <span class=${ov.tagClass} title=${r.caveat || r.basis}>${ov.tagText}</span>` : null}${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
-                </div>
-                ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
-              `;})}
-            </div>` : html`<div class="waste-none"><span class="check">✓</span> No overspend found in this window by any analyzer.</div>`}
-          ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
+          ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window. The per-analyzer breakdown is in <b>Recommended actions</b> below.</div>` : null}
         </div>` : null}
 
-      <section class="opt-section" id="opt-rules">
-        <div class="opt-title">
-          <span>Rules <span class="dim" style="font-weight:400;font-size:12px">· permanent CLAUDE.md rules, and which projects they land in</span></span>
-          <a class="sz-link" href="#/optimize/rules" style="font-size:13px">Review →</a>
-        </div>
-        <div class="opt-line dim">
-          Four analyzers end in the same fix: a rule written into a CLAUDE.md.
-          The Rules screen shows each one with the project files it would be
-          written into, one diff per file, applied selectively.
+      ${/* ONE unified action list. Each analyzer/action is a compact row —
+            title, one-line hint, its figure, and a Review button that opens the
+            full evidence + fix on the analyzer's own detail page. Money analyzers
+            rank biggest-waste-first (recoverableTiles' finding_rank); Summarize
+            and Rules follow as the two file-write actions with no per-window
+            dollar of their own. Rows without an actionable finding stay listed
+            for transparency (cache at ceiling, ran-found-nothing) but carry no
+            Review button. Replaces the old waste-list + Rules/Summarize/Findings
+            sections, which listed the same analyzers three times. */ ''}
+      <section class="opt-section" id="opt-actions">
+        <div class="opt-title"><span>Recommended actions <span class="dim" style="font-weight:400;font-size:12px">· open one to see its evidence and apply the fix</span></span></div>
+        <div class="opt-act-list">
+          ${actRows.map(r => html`
+            <div class="opt-act-row" key=${r.key}>
+              <span class="opt-act-name">${r.title}</span>
+              <span class="opt-act-hint">${r.hint}</span>
+              <span class=${r.figDim ? 'opt-act-fig dim' : 'opt-act-fig'}>${r.fig}</span>
+              <span class="opt-act-btncell">${r.href ? html`<a class="opt-review-btn" href=${r.href}>Review →</a>` : null}</span>
+            </div>`)}
         </div>
       </section>
-
-      ${sf ? html`
-        <section class="opt-section" id="opt-summarize">
-          <div class="opt-title">
-            <span>Summarize <span class="dim" style="font-weight:400;font-size:12px">· structure-aware prompt summaries</span></span>
-            <a class="sz-link" href="#/optimize/summarize" style="font-size:13px">Review →</a>
-          </div>
-          ${sf.files > 0 ? html`
-            <div class="sz-tiles">
-              <div class="sz-tile"><div class="sz-tile-v">${sf.files}</div><div class="sz-tile-l">summarizable file${sf.files === 1 ? '' : 's'}</div></div>
-              <div class="sz-tile"><div class="sz-tile-v">~${fmtTokens(sfTok)}</div><div class="sz-tile-l">est. tokens recoverable / call</div></div>
-              <div class="sz-tile"><div class="sz-tile-v">${sfAvgPct}%</div><div class="sz-tile-l">avg prose reduction</div></div>
-            </div>
-            ${sfApplied > 0 ? html`<div style="margin:14px 0 2px">
-              <div class="sz-prog" style="height:10px"><div style=${'width:' + sfPctApplied + '%;background:var(--success)'}></div></div>
-              <div class="sz-note" style="font-size:12px;margin-top:6px"><b>${sfPctApplied}% applied</b>: ~${fmtTokens(sfApplied)} tok/call recovered across ${sfAppliedN} file(s); ~${fmtTokens(sfTok)} still recoverable here. <span class="dim">Applied counts every run; still-recoverable is this scan.</span></div>
-            </div>` : null}
-            <table class="opt-table" style="margin-top:12px">
-              <thead><tr><th>File</th><th>Scope</th><th>Loads</th><th style="text-align:right">~tok/call</th><th style="text-align:right">reduction</th></tr></thead>
-              <tbody>
-                ${sfCands.slice(0, 6).map((c, i) => html`<tr key=${i}>
-                  <td class="mono" title=${c.path}>${c.path.split('/').slice(-2).join('/')}</td>
-                  <td class="dim" style="font-size:11px">${c.scope}</td>
-                  <td class="dim" style="font-size:11px" title=${(c.load_class && c.load_class !== 'always') ? 'Frontmatter is always in context; the body arrives only when this ' + c.load_class + ' is invoked' + (c.invocations != null ? ' (' + c.invocations + ' observed this window)' : '')  : 'Re-sent at the head of every session that loads it'}>${(!c.load_class || c.load_class === 'always') ? 'always-on' : 'on demand'}</td>
-                  <td class="mono" style="text-align:right;color:var(--accent)">~${c.est_tokens_saved}</td>
-                  <td class="mono" style="text-align:right">${c.reduction_pct != null ? c.reduction_pct : 0}%</td>
-                </tr>`)}
-                ${sfCands.length > 6 ? html`<tr><td colspan="5" class="dim" style="font-size:11px">+${sfCands.length - 6} more · <a class="sz-link" href="#/optimize/summarize">see all →</a></td></tr>` : null}
-              </tbody>
-            </table>
-            <div class="sz-note" style="font-size:12px;margin-top:12px">Estimated per-call token reduction from a filesystem scan; advisory, review each rewrite before applying. An "on demand" file realizes that reduction only on the calls that follow an invocation, not on every call. <span class="estimated-tag" title=${sf.estimate_basis}>estimated · tokens</span></div>
-          ` : html`<div class="opt-line dim">No summarizable prompt files in this scan. <a class="sz-link" href="#/optimize/summarize">Open Summarize →</a></div>`}
-        </section>` : null}
 
       ${st.rec && st.rec.rows && st.rec.rows.length ? html`<${RecommendationsPanel} rec=${st.rec} />` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
-      ${/* Ranked analyzer list — the summary landing no longer stacks every
-            analyzer's full detail section (heaviest-sessions tables, fix
-            snippets, caveats). Each row links to that analyzer's own detail
-            sub-page (#/optimize/<name>) where the full card lives. Rows with a
-            real finding (a detail page) are links; ran-found-nothing / not-ready
-            rows stay listed for transparency but are not clickable — the same
-            has-data-vs-empty split the Dashboard tiles use (optimizeDetailAnalyzers).
-            Ordered biggest-waste-first via recoverableTiles' finding_rank. */ ''}
-      <section class="opt-section" id="opt-findings">
-        <div class="opt-title"><span>Findings <span class="dim" style="font-weight:400;font-size:12px">· open one for its evidence and fix</span></span></div>
-        <div class="opt-find-list">
-          ${recoverableTiles(st.opt).filter(t => order.indexOf(t.name) !== -1).map(t => {
-            const m = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
-            const hasPage = t.state === 'actionable' && detailSet.has(t.name);
-            const fig = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing)
-              : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
-              : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
-            const figCls = t.state === 'actionable' ? 'opt-find-fig' : 'opt-find-fig dim';
-            const hint = t.state === 'not_ready' && t.hint ? t.hint : m.hint;
-            const inner = html`
-              <span class="opt-find-name">${m.title}</span>
-              <span class=${figCls}>${fig}</span>
-              ${hint ? html`<span class="opt-find-hint dim">${hint}</span>` : null}`;
-            return hasPage
-              ? html`<a class="opt-find-row link" href=${'#/optimize/' + t.name}>${inner}</a>`
-              : html`<div class="opt-find-row">${inner}</div>`;
-          })}
-        </div>
-      </section>
       ${(st.opt.budgets || []).length ? html`<section class="opt-section" id="opt-budget-projection">
         <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling, not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
         ${st.opt.budgets.map(b => html`<div class="opt-line">
@@ -12415,7 +12409,7 @@ function ReviewInboxView({ params }) {
 
   return html`
     <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
-      <div class="page-title" style="margin-bottom:0">Inbox</div>
+      <div class="page-title" style="margin-bottom:0">Review actions</div>
       ${/* Scan provenance belongs beside the control that re-runs it, not in a
             per-tab header: it describes the whole inbox, and the shared
             rescan control (ScanBar, also on the Dashboard and Optimize
@@ -12445,7 +12439,7 @@ function ReviewInboxView({ params }) {
             just the write, since the write is a minority of rows. Each row still
             names its own action; these are the two consequences a row cannot
             state for itself. */ ''}
-      <div class="sz-note" style="margin:12px 0 10px"><b>Approve</b> writes the fix to a file or config, effective on the next run — not live enforcement; a copyable fix is yours to apply. <b>Dismiss</b> only hides a row in this browser.</div>
+      <div class="sz-note" style="margin:12px 0 10px"><b>Approve</b> writes the fix to a file or config; it takes effect on the next run, not as live enforcement. A copyable fix is yours to apply. <b>Dismiss</b> hides the row in this browser.</div>
       ${/* The appliable-count line: it names how many of the open rows tokenjam
             can write for you vs. the copy-and-apply rest, so "Open (6)" next to
             a single checkbox stops reading as "5 rows you forgot to select"
@@ -12759,7 +12753,7 @@ function PersonaEmptyGate({ persona, header, children }) {
 // SDK-empty page looks like a normal page with an empty body rather than a
 // bare banner. Titles keyed by primary-view key.
 const VIEW_TITLES = {
-  dashboard: 'Dashboard', review: 'Review inbox', optimize: 'Optimize',
+  dashboard: 'Dashboard', review: 'Review actions', optimize: 'Optimize',
   summarize: 'Summarize', rules: 'Rules', traces: 'Traces', cost: 'Cost',
   alerts: 'Alerts', drift: 'Drift', budget: 'Budget', faq: 'FAQ',
 };
