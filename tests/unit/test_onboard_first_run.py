@@ -260,15 +260,17 @@ def test_claude_code_asks_plan_before_budget(_isolated_claude_code, tmp_path):
 
 
 def test_claude_code_restart_banner_precedes_nudge(_isolated_claude_code, tmp_path):
-    """Founder-review order (2026-07): the one REQUIRED action (restart) is the
-    visually primary element, next steps come after it. #643: connection
-    details moved behind --verbose, so the default screen ends on next steps."""
+    """Founder-review order: the restart note comes before Next steps. #643:
+    connection details moved behind --verbose, so the default screen ends on
+    next steps. Demoted to one OPTIONAL line (2026-07-30) — the daemon catch-up
+    ingests running sessions regardless, so a restart is not required."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     out = res.output
     assert "Next steps" in out
-    assert "Action required" in out
-    assert out.index("Action required") < out.index("Next steps"), out
+    assert "restart Claude Code" in out
+    assert "Action required" not in out
+    assert out.index("restart Claude Code") < out.index("Next steps"), out
     # #643: connection details are no longer on the default success screen.
     assert "Connection details" not in out
     # No backfill happened here, so no "already loaded" over-claim.
@@ -278,16 +280,16 @@ def test_claude_code_restart_banner_precedes_nudge(_isolated_claude_code, tmp_pa
 def test_restart_panel_conditional_on_claude_running(
     _isolated_claude_code, tmp_path, monkeypatch,
 ):
-    """#643: the "Action required: restart Claude Code" panel only shows when a
-    `claude` process is actually running. A fresh terminal with none open needs
-    no restart, so the block is suppressed."""
-    # Force "not running" — the panel must be absent.
+    """#643: the optional restart line only shows when a `claude` process is
+    actually running. A fresh terminal with none open needs no restart, so the
+    line is suppressed."""
+    # Force "not running" — the line must be absent.
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._claude_code_is_running", lambda: False,
     )
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
-    assert "Action required" not in res.output
+    assert "restart Claude Code" not in res.output
     # ... but the rest of the success screen is intact.
     assert "Claude Code observability configured" in res.output
     assert "Next steps" in res.output
@@ -308,64 +310,34 @@ def test_verbose_shows_connection_details(_isolated_claude_code, tmp_path):
     assert "Agent ID:" in res.output
 
 
-def test_claude_code_restart_panel_is_why_first_and_consolidated(
+def test_claude_code_restart_note_is_one_optional_line(
     _isolated_claude_code, tmp_path,
 ):
-    """One consolidated Action-required panel (2026-07 restructure): the WHY
-    (stale telemetry endpoint) leads, then numbered steps; no more scattering
-    across a panel + a stray "open a new terminal" paragraph + an "after
-    restarting, run" pointer + a duplicate verify line near Connection
-    details."""
+    """Demo trim (2026-07-30): the old "Action required" panel (numbered steps +
+    resume semantics) is replaced by ONE optional line, because the daemon's
+    transcript catch-up ingests running sessions from disk regardless — a
+    restart only affects live-stream immediacy, so it is not an action gate."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
-    out = res.output
-    flat = " ".join(out.split())
-    assert "Action required" in flat
-    assert "restart Claude Code" in flat
-    # Why leads the panel, before the numbered steps.
-    assert flat.index("old endpoint") < flat.index("Quit Claude Code"), flat
-    assert "Quit Claude Code in every terminal" in flat
-    assert "Relaunch claude in the same folder" in flat
-    # The now-redundant scattered pieces are gone.
-    assert "Open a new terminal" not in out
-    assert "After restarting, run:" not in out
-    assert "tj status --agent" not in out
-    # The "Each relaunched terminal ... own dashboard tile" footnote was
-    # removed for the demo (founder review, demo trim).
+    flat = " ".join(res.output.split())
+    assert "Optional: restart Claude Code" in flat
+    assert "picks them up from disk" in flat
+    # The old scary panel, numbered steps, resume copy and footnote are gone.
+    assert "Action required" not in flat
+    assert "Quit Claude Code in every terminal" not in flat
+    assert "claude --resume" not in flat
     assert "own dashboard tile" not in flat
     assert "claude --as <name>" not in flat
 
 
-def test_claude_code_restart_panel_states_honest_resume_semantics(
-    _isolated_claude_code, tmp_path,
-):
-    """The old copy claimed `claude --resume` "picks up exactly where you left
-    off", which is inaccurate: --resume opens a picker you must pick from; -c
-    only reopens the CURRENT project's latest conversation. Pin the corrected,
-    honest phrasing (Critical Rule 14: no promised outcomes)."""
-    res = _run_claude_code(tmp_path, "3")
-    assert res.exit_code == 0, res.output
-    flat = " ".join(res.output.split())
-    assert "claude -c" in flat
-    assert "reopen this project's latest conversation" in flat
-    assert "claude --resume" in flat
-    assert "pick any earlier one from a list" in flat
-    assert "resuming is optional" in flat
-    # The inaccurate old claims must not resurface.
-    assert "pick up exactly where you left off" not in flat
-    assert "conversation survives" not in flat
-
-
 def test_claude_code_no_pre_restart_verify_prompt(_isolated_claude_code, tmp_path):
     """The interactive 'verify now?' poll can only time out before the restart
-    it depends on; CC gets the verify pointer as step 3 of the restart panel
-    instead, and only there (no duplicate near Connection details)."""
+    it depends on, so it must never appear. The demo trim (2026-07-30) also
+    dropped the --verify-only pointer — the restart is one optional line now."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     out = res.output
     assert "Verify tj is receiving telemetry now?" not in out
-    assert "--verify-only" in out
-    assert out.count("--verify-only") == 1
     assert "Verify after restarting:" not in out
 
 

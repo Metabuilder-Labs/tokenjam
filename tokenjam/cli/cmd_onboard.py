@@ -1276,11 +1276,11 @@ def _print_next_steps_nudge(
         console.print()
         console.print(
             "  [label]View the Web UI (Lens)[/label]  "
-            f"[muted]open[/muted] [url]{lens_url}[/url] [muted]in a browser[/muted]"
+            f"[go]open {lens_url} in a browser[/go]"
         )
         console.print(
             "  [label]View your Token Efficiency Card[/label]  "
-            "[muted]run[/muted] [accent]tj tokenmaxx[/accent]"
+            "[go]run tj tokenmaxx[/go]"
         )
         console.print()
         _warn_if_tj_path_unresolved()
@@ -2703,54 +2703,17 @@ def _claude_code_is_running() -> bool:
 
 
 def _print_claude_code_restart_panel() -> None:
-    """Render the consolidated restart-required panel for the Claude Code path.
+    """One optional line for the Claude Code restart (#643; demo trim 2026-07-30).
 
-    Every restart-adjacent instruction now lives in one why-first, numbered
-    panel instead of being scattered across four spots on the completion
-    screen: a panel, a separate "open a new terminal" paragraph, an
-    "after restarting, run" pointer, and a "verify after restarting" line
-    down near Connection details. The scattering made it easy to restart
-    without ever seeing the verify step, or to read a resume hint and assume a
-    plain restart wasn't needed.
-
-    Resume semantics are stated precisely rather than promised: ``claude -c``
-    only reopens THIS project's latest conversation, and ``claude --resume``
-    opens a picker the user must choose from; neither one "picks up exactly
-    where you left off" automatically, and resuming a conversation in one
-    terminal does nothing while other sessions for this project are still
-    running (they're still exporting to the stale endpoint too, which is why
-    step 1 is "every terminal", not "a terminal").
+    Restarting is NOT required for completeness: the daemon's transcript
+    catch-up ingests running sessions from disk on its interval regardless
+    (the ``[ingest]`` auto_catch_up path). A restart only makes today's
+    currently-active sessions stream in live immediately, so this is stated as
+    optional, not an action gate.
     """
-    from rich.panel import Panel
-    from rich.text import Text
-
-    body = Text.from_markup(
-        "Running sessions keep sending telemetry to the old endpoint. "
-        "Today's activity won't reach TokenJam until they restart.\n\n"
-        "1. Quit Claude Code in [label]every terminal[/label] open on this "
-        "project.\n\n"
-        "2. Relaunch [accent]claude[/accent] in the same folder. Your history "
-        "is safe:\n"
-        "     [accent]claude -c[/accent]        → reopen this project's latest "
-        "conversation\n"
-        "     [accent]claude --resume[/accent]  → pick any earlier one from a "
-        "list\n"
-        # Two deliberately indented lines (not one auto-wrapped one): Rich
-        # wraps continuation text back to the panel margin, not to the
-        # sub-list's hanging indent, so a single long parenthetical rendered
-        # its second line flush-left under "2." instead of under the paren.
-        "     [muted](a fresh claude works too; resuming is optional.\n"
-        "      tj adds a recap of where you left off when you resume)[/muted]\n\n"
-        "3. Confirm data is flowing:  [accent]tj onboard --claude-code "
-        "--verify-only[/accent]"
-    )
     console.print(
-        Panel(
-            body,
-            title="[warn.strong]Action required: restart Claude Code[/warn.strong]",
-            border_style="warn",
-            padding=(1, 2),
-        )
+        "[muted]Optional: restart Claude Code to stream today's active sessions "
+        "live -- otherwise tj picks them up from disk within a few minutes.[/muted]"
     )
 
 
@@ -3547,15 +3510,9 @@ def _install_launchd(config_path: str) -> str | None:
         console.print("[dim]Or run the server directly:[/dim]")
         console.print("  tj serve &")
         return None
-    from rich.panel import Panel
     console.print(
-        Panel(
-            "macOS will show a 'Background Items Added' notification "
-            "-- this is normal.",
-            title="[warn.strong]Heads up[/warn.strong]",
-            border_style="warn",
-            padding=(0, 2),
-        )
+        "[warn]Heads up:[/warn] macOS will show a 'Background Items Added' "
+        "notification -- this is normal."
     )
     return f"Daemon installed at {plist_path}"
 

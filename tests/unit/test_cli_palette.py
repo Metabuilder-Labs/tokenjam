@@ -84,11 +84,11 @@ def test_prose_carries_no_incidental_styling(prose):
 # --- one accent, and it means "you can type or click this" -------------------
 
 
-def test_accent_is_the_only_hue_in_the_next_steps_list(capsys):
+def test_next_steps_shows_the_actionable_ctas(capsys):
     _print_next_steps_nudge(has_data=False, persona="claude-code", port=7391)
     out = capsys.readouterr().out
-    # The typeable command and the clickable URL are the actionable content of
-    # this screen (the trimmed two-row CC list — founder review, demo trim).
+    # The two rows are call-to-action instructions (green `go` role — "do this
+    # next"): open the Lens URL, and run tj tokenmaxx.
     assert "tj tokenmaxx" in out
     assert "http://127.0.0.1:7391/" in out
     # no em dash in user-facing copy
@@ -162,13 +162,14 @@ def test_state_roles_keep_a_colour(role):
     assert TJ_THEME.styles[role].color is not None
 
 
-def test_restart_panel_is_the_only_warning_colour_on_the_claude_code_tail(capsys):
+def test_restart_note_is_optional_not_an_action_gate(capsys):
+    # Demoted from an "Action required" panel to one optional line: the daemon's
+    # transcript catch-up ingests running sessions from disk regardless, so a
+    # restart only affects live-stream immediacy (Anil, 2026-07-30).
     cmd_onboard._print_claude_code_restart_panel()
     out = capsys.readouterr().out
-    assert "Action required: restart Claude Code" in out
-    # the panel's instructions are commands, so they stay intact and typeable
-    assert "claude -c" in out
-    assert "claude --resume" in out
-    assert "tj onboard --claude-code --verify-only" in out
-    # no stray Rich markup escaped into the rendered panel
+    assert "Optional" in out
+    assert "restart Claude Code" in out
+    assert "Action required" not in out
+    # no stray Rich markup escaped into the rendered line
     assert "\\<" not in out
