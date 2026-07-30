@@ -5838,7 +5838,7 @@ function TraceDetailView({ traceId }) {
   // timed-out load, show a clear message + retry instead of the shimmer.
   if (loadState === 'error') return html`
     <div>
-      <button class="btn btn-back" onClick=${() => location.hash = '#/traces'}>← Back to traces</button>
+      <button class="btn btn-back" onClick=${() => history.back()}>← Back</button>
       <div class="empty-state" style="padding:32px 0">
         <div style="font-size:14px;margin-bottom:8px">${loadErr || 'Could not load this trace.'}</div>
         <div class="meta" style="margin-bottom:16px">The trace may be very large, or the server may be busy.</div>
@@ -5941,7 +5941,7 @@ function TraceDetailView({ traceId }) {
   const agentName = rootSpan ? (rootSpan.agent_id || traceId.slice(0, 12)) : traceId.slice(0, 12);
 
   return html`
-    <button class="btn btn-back" onClick=${() => location.hash = '#/traces'}>\u2190 Back to traces</button>
+    <button class="btn btn-back" onClick=${() => history.back()}>\u2190 Back</button>
     <div class="page-title">Trace details for ${agentName}</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
     <div class="wf-summary">
@@ -13260,7 +13260,10 @@ function App() {
   // rendering an orphan. replaceState so Back does not bounce them straight
   // into the same hidden view again.
   useEffect(() => {
-    if (personaHides(persona, route.view)) {
+    // A trace DETAIL (traces/<trace_id>) is a legitimate drill-in from a
+    // session's Traces tab even for a persona whose sidebar hides the top-level
+    // Traces LIST. Redirect only the hidden list pages, never a specific trace.
+    if (personaHides(persona, route.view) && !(route.view === 'traces' && route.param)) {
       history.replaceState(null, '', '#/dashboard');
       setRoute(getRoute());
     }
@@ -13278,7 +13281,14 @@ function App() {
     // Observe user opening the Dashboard stays in Observe (Greptile P1). Fall
     // back to the sidebar's current lens for a neutral view, then 'improve' only
     // on the very first paint before any lens has been set.
-    const lens = VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve';
+    // The claude-code persona has no Observe pages and its lens-switch is
+    // hidden, so its lens is ALWAYS 'improve'. Deriving it from a lens-neutral
+    // view's fallback would preserve a stale 'observe' left by a prior SDK
+    // session, which then hides every Improve nav link (leaving only Dashboard)
+    // until a reload — the persona-toggle collapse bug.
+    const lens = persona === 'claude-code'
+      ? 'improve'
+      : (VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve');
     // `data-persona` drives the nav gating in CSS, alongside `data-lens`.
     // Written in this same pass so the two can never disagree for a frame;
     // `persona` is therefore in this effect's dependency list. It is also

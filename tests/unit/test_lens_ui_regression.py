@@ -79,10 +79,30 @@ def test_dashboard_is_lens_neutral_and_preserves_active_lens(html: str) -> None:
     assert (
         "dashboard: 'improve'" not in html
     ), "Dashboard must not be classified as improve in VIEW_LENS (it is lens-neutral)"
+    # A NON-claude-code persona (SDK — it has both lenses) still preserves the
+    # active lens on a lens-neutral view; only claude-code forces 'improve'
+    # (guarded by test_claude_code_persona_forces_improve_lens below).
     assert (
-        "const lens = VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve';"
-        in html
-    ), "unmapped (lens-neutral) views must preserve the active lens, not reset to improve"
+        "(VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve')" in html
+    ), "non-claude-code personas must preserve the active lens on a lens-neutral view"
+
+
+def test_claude_code_persona_forces_improve_lens(html: str) -> None:
+    # The claude-code persona has no Observe pages and its lens-switch is hidden,
+    # so its lens must be FORCED to 'improve'. Deriving it from a lens-neutral
+    # view (Dashboard) would preserve a stale 'observe' left by a prior SDK
+    # session, collapsing the sidebar to Dashboard-only until a reload — the
+    # persona-toggle collapse bug.
+    assert "const lens = persona === 'claude-code'" in html
+    assert "? 'improve'" in html
+
+
+def test_trace_detail_is_exempt_from_persona_redirect(html: str) -> None:
+    # A trace DETAIL (traces/<id>) reached by drilling into a session's Traces
+    # tab must NOT be redirected to the Dashboard the way the hidden top-level
+    # Traces LIST is. The persona-redirect guard exempts a traces view that
+    # carries a trace-id param.
+    assert "!(route.view === 'traces' && route.param)" in html
 
 
 # --------------------------------------------------------------------------- #
