@@ -357,7 +357,9 @@ def test_dashboard_empty_tiles_are_not_clickable(html: str) -> None:
     # at-ceiling tiles render as a non-clickable <div> (.static).
     assert "const hasPage = t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name);" in html
     assert "const href = '#/optimize/' + t.name;" in html
-    assert "? html`<a class=${cls} href=${href}>${inner}</a>`" in html
+    assert "? html`<a class=${cls} href=${href}>${inner}" in html
+    # data tiles carry a persistent "→" cue inside the link; empty tiles do not
+    assert '<span class="rec-go" aria-hidden="true">→</span></a>' in html
     assert "html`<div class=${cls}>${inner}</div>`" in html
     # The .static class strips the clickable affordance (no hover border, default
     # cursor) so an empty tile cannot read as a dead link.
