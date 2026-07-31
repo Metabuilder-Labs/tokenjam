@@ -166,6 +166,24 @@ def test_pip_tj_on_path_excludes_other_managers_and_ephemeral_shims(path):
         assert uninstall_mod._pip_tj_on_path() is None
 
 
+def test_pip_tj_on_path_excludes_symlinked_pipx_shim(tmp_path):
+    """A normal pipx install puts a SHIM (~/.local/bin/tj) on PATH that is a
+    symlink into the venv (.../pipx/venvs/tokenjam/bin/tj). `shutil.which`
+    returns the shim, whose own path has no pipx/venvs/ marker — so the
+    exclusion must resolve the symlink first, or the pipx install is
+    double-counted as a plain-pip one (#669)."""
+    venv_bin = tmp_path / "pipx" / "venvs" / "tokenjam" / "bin"
+    venv_bin.mkdir(parents=True)
+    real_tj = venv_bin / "tj"
+    real_tj.write_text("#!/bin/sh\n")
+    shim_dir = tmp_path / ".local" / "bin"
+    shim_dir.mkdir(parents=True)
+    shim = shim_dir / "tj"
+    shim.symlink_to(real_tj)
+    with patch.object(uninstall_mod.shutil, "which", return_value=str(shim)):
+        assert uninstall_mod._pip_tj_on_path() is None
+
+
 # -- _find_persistent_install(): the combined detection matrix
 
 
@@ -218,6 +236,21 @@ def test_find_persistent_install_both_pipx_and_uv_tool():
         installs = uninstall_mod._find_persistent_install()
     assert {i.manager for i in installs} == {"pipx", "uv-tool"}
     assert all(i.auto for i in installs)
+
+
+def test_find_persistent_install_reports_a_genuinely_separate_pip_alongside_pipx():
+    """A machine can carry BOTH a pipx install AND a separate plain-pip install.
+    `_pip_tj_on_path` returns only a `tj` that survived the pipx/uv shim
+    exclusion (a genuinely distinct install — here `/usr/local/bin/tj`), so it
+    must be reported ALONGSIDE the pipx one, never suppressed. Suppressing it
+    would silently leave a real install behind (#669, Greptile). The realpath
+    resolution in `_pip_tj_on_path` — not a fallback guard here — is what stops a
+    pipx SHIM from being mistaken for a pip install in the first place."""
+    with patch.object(uninstall_mod, "_pipx_has_tokenjam", return_value=True), \
+         patch.object(uninstall_mod, "_uv_tool_has_tokenjam", return_value=False), \
+         patch.object(uninstall_mod, "_pip_tj_on_path", return_value="/usr/local/bin/tj"):
+        installs = uninstall_mod._find_persistent_install()
+    assert [i.manager for i in installs] == ["pipx", "pip"]
 
 
 def test_find_persistent_install_ephemeral_current_process_still_detects_pipx():

@@ -210,7 +210,13 @@ def _pip_tj_on_path() -> str | None:
     tj_path = shutil.which("tj")
     if not tj_path:
         return None
-    norm = tj_path.replace("\\", "/")
+    # `shutil.which("tj")` returns the SHIM on PATH (e.g. ~/.local/bin/tj), which
+    # for a pipx / uv-tool install is a SYMLINK into the managed venv. Resolve it
+    # before the exclusion check — the shim's own path does not contain
+    # pipx/venvs/ or /uv/tools/, so an un-resolved check misses and double-counts
+    # a pipx-managed install as a plain-pip one (#669).
+    real = os.path.realpath(tj_path)
+    norm = real.replace("\\", "/")
     if "pipx/venvs/" in norm or "/uv/tools/" in norm:
         return None
     if (
@@ -256,6 +262,13 @@ def _find_persistent_install() -> list[PersistentInstall]:
             argv=["uv", "tool", "uninstall", "tokenjam"],
             display="uv tool uninstall tokenjam",
         ))
+    # The realpath resolution in `_pip_tj_on_path` is what fixes the double-count:
+    # a pipx / uv shim now resolves into its managed venv and is excluded there,
+    # so a pipx-only install never reaches this branch. A `tj` that survives the
+    # exclusion is a GENUINELY separate plain-pip / editable install, and it must
+    # be reported even when a pipx/uv install also exists — a machine can carry
+    # both, and suppressing this one would silently leave a real install behind
+    # (#669, Greptile).
     if _pip_tj_on_path():
         installs.append(PersistentInstall(
             manager="pip", auto=False, argv=None,
