@@ -1991,7 +1991,7 @@ def _onboard_claude_code(
     wrapper_files = _install_claude_wrapper()
 
     want_daemon = not no_daemon
-    _finish_onboard_serve(
+    daemon_result = _finish_onboard_serve(
         str(config_path.resolve()),
         want_daemon=want_daemon,
         plan_changed=plan_changed,
@@ -2004,6 +2004,22 @@ def _onboard_claude_code(
         # and defer the macOS "Background Items Added" heads-up to the bottom.
         quiet_daemon=True,
     )
+    # `quiet_daemon` suppresses the routine daemon lines, but a daemon
+    # install/restart FAILURE must never be silently swallowed — a green
+    # completion screen while the server is actually down is worse than no line
+    # (Greptile, #675). A clean install returns "Daemon installed at ..."; a
+    # clean restart "restarted to pick up ..."; a skip "daemon already running".
+    # Anything else off the restart path (could-not-auto-restart / stopped-stale
+    # / restart-attempted-verify) means the server may not be up — surface it.
+    daemon_needs_attention = bool(daemon_result) and daemon_result.startswith(
+        ("could not", "stopped stale server", "restart attempted")
+    )
+    if daemon_needs_attention:
+        console.print()
+        console.print(
+            f"[warn]Daemon:[/warn] {daemon_result}. "
+            "Verify with [accent]tj status[/accent]."
+        )
 
     # ── Completion screen (founder review, 2026-07): what got wired → the one
     # required action (restart, prominent, one why-first panel) → next steps →
@@ -2111,9 +2127,16 @@ def _onboard_claude_code(
 
     # macOS "Background Items Added" heads-up last of all (#675): it was
     # suppressed at daemon-install time (`quiet_daemon`) so it lands here, after
-    # Next steps, at the very bottom of the payoff screen. Only prints on macOS,
-    # and only when a daemon was actually installed.
-    if want_daemon:
+    # Next steps, at the very bottom of the payoff screen. Gate it on a NEW
+    # background item having actually been registered — a fresh `_install_launchd`
+    # returns "Daemon installed at ..." — not merely on `want_daemon` (Greptile,
+    # #675). A skipped reinstall ("daemon already running"), a pure restart, or a
+    # failed install registers no new item, so no notification fires and the
+    # heads-up would be a lie.
+    daemon_installed_new = bool(daemon_result) and daemon_result.startswith(
+        "Daemon installed"
+    )
+    if daemon_installed_new:
         console.print()
         _print_background_items_headsup()
 
