@@ -252,7 +252,7 @@ def test_the_timeout_state_says_it_timed_out_and_offers_a_way_forward(html):
 
 
 def test_the_failure_state_says_it_failed_and_offers_a_retry(html):
-    assert "Couldn't scan for past overspend." in html
+    assert "Couldn't scan for optimization opportunities." in html
     assert "Try again" in html
 
 
@@ -291,7 +291,7 @@ def test_an_unreported_spend_field_does_not_become_a_zero_spend_tile(html):
     spend = html[html.index("function spendTileDisplay"):]
     spend = spend[:spend.index("function PlanBadge")]
     assert "const unknown = spendUsd == null;" in spend
-    assert "if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };" in spend
+    assert "if (unknown) return { label: 'Implied plan value', value: UNKNOWN_FIGURE };" in spend
     assert "value: unknown ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd)" in spend
 
 
@@ -378,11 +378,11 @@ def test_the_past_overspend_heading_has_no_estimated_badge(html):
     # The heading text is followed by the band's own window statement
     # ("· over the last N days"), so anchor on the text rather than on a
     # closing bracket that no longer sits immediately after it.
-    idx = html.index(">Past overspend")
+    idx = html.index(">Opportunities to optimize token efficiency")
     heading = html[idx - 400:idx + 400]
     assert "band-label" in heading
     assert "estimated-tag" not in heading
-    assert 'Past overspend <span class="estimated-tag"' not in html
+    assert 'Opportunities to optimize token efficiency <span class="estimated-tag"' not in html
     assert "estimated-tag" in html  # still used elsewhere (Optimize/Summarize)
 
 
@@ -615,7 +615,7 @@ def test_spend_tile_display_is_deliberately_not_deduplicated():
     api = _run_dedup_js("spendTileDisplay(500, %s)" % _API_FRAMING)
     assert api == {"label": "Spend", "value": "$500.00"}
     sub = _run_dedup_js("spendTileDisplay(500, %s)" % _SUB_FRAMING)
-    assert sub == {"label": "Implied value", "value": "2.5× plan value"}
+    assert sub == {"label": "Implied plan value", "value": "2.5×"}
     assert _run_dedup_js("spendTileDisplay(500, %s)" % _LOCAL_FRAMING) is None
 
 

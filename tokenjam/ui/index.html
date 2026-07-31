@@ -190,7 +190,14 @@ code, .mono {
    nav-children, which would otherwise win over these rules. */
 .sidebar[data-persona="claude-code"] a.nav-link[data-lens="observe"] { display: none !important; }
 .sidebar[data-persona="claude-code"] .lens-switch { display: none; }
-.sidebar[data-persona="sdk"] a.nav-link[data-view="sessions"] { display: none !important; }
+/* SDK persona: byte-for-byte the SAME sidebar the coding-agent persona shows.
+   Switching "Viewing as" changes ONLY the page data / empty-state, never the
+   nav items. Both personas use one flat Improve nav — no Improve/Observe lens
+   toggle, and the Observe pages (Traces/Cost/Alerts/Drift/Budget) are hidden
+   (they're in PERSONA_HIDDEN_VIEWS for sdk too, matching CC). Review inbox and
+   Sessions render for SDK exactly as they do for CC. */
+.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: none !important; }
+.sidebar[data-persona="sdk"] .lens-switch { display: none; }
 /* The Dashboard's health band is Observe-shaped: unread alerts, agents
    drifting, budgets at risk. A coding-agent user has no Observe lens, so the
    band summarises pages they cannot open. Hidden for that persona rather than
@@ -1018,6 +1025,61 @@ a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 .waste-none .check { font-weight: 700; }
 /* Optional dominant-component note when one token component is ~all the spend. */
 .waste-split { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
+/* Ranked findings list on the Optimize summary landing. Each row links to the
+   analyzer's own detail sub-page (#/optimize/<name>); ran-found-nothing rows are
+   listed but not clickable (no .link, so no hover/pointer affordance). */
+.opt-find-list { display: flex; flex-direction: column; }
+.opt-find-row {
+  display: grid; grid-template-columns: minmax(120px, 180px) minmax(90px, auto) 1fr;
+  align-items: baseline; gap: 12px; padding: 8px 6px; font-size: 13px;
+  border-top: 1px solid var(--border); color: inherit; text-decoration: none;
+  border-radius: 6px;
+}
+.opt-find-list > .opt-find-row:first-child { border-top: none; }
+a.opt-find-row.link { cursor: pointer; }
+a.opt-find-row.link:hover { background: var(--surface2); }
+.opt-find-name { font-weight: 600; }
+a.opt-find-row.link .opt-find-name { color: var(--accent); }
+.opt-find-fig { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); white-space: nowrap; }
+.opt-find-fig.dim { color: var(--text-dim); font-weight: 400; }
+.opt-find-hint { font-size: 12px; }
+@media (max-width: 640px) {
+  .opt-find-row { grid-template-columns: 1fr auto; }
+  .opt-find-hint { grid-column: 1 / -1; }
+}
+/* Unified "Recommended actions" list on the Optimize summary landing. One row
+   per analyzer/action (money analyzers, Rules, Summarize), each with a compact
+   hint, its figure, and a Review button when there's a detail page to act on —
+   replacing the old duplicated waste-list + separate Rules/Summarize/Findings
+   sections. */
+.opt-act-list { display: flex; flex-direction: column; }
+.opt-act-row {
+  display: grid; grid-template-columns: minmax(120px, 170px) 1fr minmax(84px, auto) 84px;
+  align-items: center; gap: 14px; padding: 11px 6px; font-size: 13px;
+  border-top: 1px solid var(--border);
+}
+.opt-act-list > .opt-act-row:first-child { border-top: none; }
+.opt-act-name { font-weight: 600; }
+.opt-act-hint { font-size: 12px; color: var(--text-dim); }
+.opt-act-fig { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); white-space: nowrap; text-align: right; }
+.opt-act-fig.dim { color: var(--text-dim); font-weight: 400; }
+.opt-act-btncell { text-align: right; }
+.opt-review-btn {
+  font-family: 'Geist', sans-serif; font-size: 12px; font-weight: 600; color: var(--accent);
+  border: 1px solid rgba(var(--accent-rgb), 0.4); border-radius: 6px; padding: 3px 11px;
+  white-space: nowrap; text-decoration: none; display: inline-block;
+}
+.opt-review-btn:hover { background: rgba(var(--accent-rgb), 0.12); }
+/* Multiple embedded fix cards under one analyzer's evidence (e.g. downsize's
+   driver-role + per-project cards) get a light divider so they read as distinct
+   recommendations rather than one run-on block. */
+.cost-fix-embed + .cost-fix-embed { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); }
+@media (max-width: 640px) {
+  .opt-act-row { grid-template-columns: 1fr auto; }
+  .opt-act-hint { grid-column: 1 / -1; }
+  .opt-act-fig { text-align: left; }
+  .opt-act-btncell { grid-column: 1 / -1; text-align: left; }
+}
 /* uPlot hover tooltip (#128). Positioned at the cursor; offset above-centered. */
 .u-tip {
   position: absolute; pointer-events: none; z-index: 5;
@@ -1082,12 +1144,24 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .tile-grid.compact .rec-hint { font-size: 10px; }
 .tile-grid.compact .health-tile { padding: 8px 10px; }
 .rec-tile {
-  display: block; text-decoration: none; color: inherit;
+  display: block; text-decoration: none; color: inherit; position: relative;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
   padding: 14px 16px; transition: border-color 0.15s;
 }
 .rec-tile:hover { border-color: var(--accent); }
 .rec-tile.muted { opacity: 0.7; }
+/* An empty-state / at-ceiling tile is rendered as a <div>, not an <a>: no detail
+   page exists for it (Option B). .static strips every clickable affordance so it
+   cannot read as a dead link — no pointer, no hover border, default cursor. */
+.rec-tile.static { cursor: default; }
+.rec-tile.static:hover { border-color: var(--border); }
+/* Persistent "opens a detail page" cue on the clickable (data-bearing) tiles: an
+   always-visible arrow, not just a hover state, so a user can tell at a glance
+   which tiles are clickable. Only the <a class="rec-tile"> data tiles carry it. */
+.rec-go { position: absolute; top: 10px; right: 12px; color: var(--text-dim);
+  font-family: 'Geist Mono', monospace; font-size: 13px; line-height: 1;
+  transition: color 0.15s, transform 0.15s; }
+a.rec-tile:hover .rec-go { color: var(--accent); transform: translateX(2px); }
 .rec-name { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .rec-amount { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 700; color: var(--accent); margin: 8px 0 6px; }
 .rec-amount.dim { color: var(--text-faint); font-size: 14px; font-weight: 500; }
@@ -1187,6 +1261,15 @@ a.health-tile.attn { border-color: var(--warn); }
 }
 .band-msg.warn { border-left: 3px solid var(--warn); }
 .band-msg.err { border-left: 3px solid var(--error); }
+/* An inline text button that reads as a link inside prose (the "Switch back to
+   Claude Code" affordance in the persona-empty banner). A button, not an <a>,
+   because it triggers a state change (persona toggle), not navigation — so it
+   has no href to reload and is keyboard-focusable by default. */
+.link-inline {
+  background: none; border: none; padding: 0; font: inherit; cursor: pointer;
+  color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
+.link-inline:hover { color: var(--text); }
 .band-msg b {
   display: block; color: var(--text); font-family: 'Geist Mono', monospace;
   font-size: 12.5px; font-weight: 600; margin-bottom: 5px;
@@ -1952,7 +2035,6 @@ code.md-code {
     <button type="button" class="lens-btn active" data-lens="improve">Improve</button>
     <button type="button" class="lens-btn" data-lens="observe">Observe</button>
   </div>
-  <a href="#/review" class="nav-link" data-view="review" data-lens="improve"><span class="icon">&#9745;</span> Review inbox</a>
   <!-- One Sessions entry, not two. The old "Status" link (#/status) and this
        one rendered the SAME StatusView for their bare route, so the sidebar
        advertised two items that were one page. This #/sessions link is the one
@@ -1967,8 +2049,13 @@ code.md-code {
        child in a different group than its parent is orphaned. All three stay
        above Sessions and well above the FAQ, which is pinned last here. -->
   <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="improve"><span class="icon">&#9889;</span> Optimize</a>
-  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-lens="improve"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
-  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-lens="improve"><span class="icon">&#8627;</span> Rules <span class="nav-badge">new</span></a>
+  <!-- Analyzer nav-children (#/optimize/<name>) are injected right here by App()
+       — one per analyzer that has a real finding, in rank order — before the
+       static Summarize and Rules children below. See the nav-child injection
+       effect in App(). The two static children carry data-optimize-static so the
+       injector can find them and always insert BEFORE Summarize. -->
+  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Summarize</a>
+  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Rules</a>
   <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <!-- TOP-LEVEL, never a nav-child. A nav-child is display:none unless its
        parent section is the active view (see App()'s route effect), so as a
@@ -5754,6 +5841,16 @@ function dedup(traces) {
 // Trace Detail + Waterfall
 // ============================
 function TraceDetailView({ traceId }) {
+  // Back navigation with a deterministic in-app fallback. A bare history.back()
+  // dead-ends on a direct deep-link entry (a fresh tab opened straight on
+  // #/traces/<id> has nothing to go back to and leaves the app). Prefer in-app
+  // history when there is some, else land on the Traces list — the trace's
+  // natural parent, mirroring the session-detail back buttons' fixed-hash
+  // pattern (Greptile).
+  const goBack = () => {
+    if (window.history.length > 1) history.back();
+    else location.hash = '#/traces';
+  };
   const [spans, setSpans] = useState([]);
   const [selected, setSelected] = useState(null);
   // Load lifecycle (#653): a large trace used to hang the skeleton forever
@@ -5838,7 +5935,7 @@ function TraceDetailView({ traceId }) {
   // timed-out load, show a clear message + retry instead of the shimmer.
   if (loadState === 'error') return html`
     <div>
-      <button class="btn btn-back" onClick=${() => location.hash = '#/traces'}>← Back to traces</button>
+      <button class="btn btn-back" onClick=${goBack}>← Back</button>
       <div class="empty-state" style="padding:32px 0">
         <div style="font-size:14px;margin-bottom:8px">${loadErr || 'Could not load this trace.'}</div>
         <div class="meta" style="margin-bottom:16px">The trace may be very large, or the server may be busy.</div>
@@ -5941,7 +6038,7 @@ function TraceDetailView({ traceId }) {
   const agentName = rootSpan ? (rootSpan.agent_id || traceId.slice(0, 12)) : traceId.slice(0, 12);
 
   return html`
-    <button class="btn btn-back" onClick=${() => location.hash = '#/traces'}>\u2190 Back to traces</button>
+    <button class="btn btn-back" onClick=${goBack}>\u2190 Back</button>
     <div class="page-title">Trace details for ${agentName}</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
     <div class="wf-summary">
@@ -6181,9 +6278,9 @@ function spendTileDisplay(spendUsd, framing) {
   const unknown = spendUsd == null;
   if (mode === 'subscription') {
     if (!framing.plan_monthly_usd) return null;          // no fee → no multiplier
-    if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };
+    if (unknown) return { label: 'Implied plan value', value: UNKNOWN_FIGURE };
     const mult = spendUsd / framing.plan_monthly_usd;    // == (% of cycle) / 100
-    return { label: 'Implied value', value: mult.toFixed(1) + '× plan value' };
+    return { label: 'Implied plan value', value: mult.toFixed(1) + '×' };
   }
   if (mode === 'local') return null;                     // no plan fee to multiply against
   // api / unknown → dollars, at most 2dp (Dashboard's own precision rule --
@@ -7336,18 +7433,18 @@ function BudgetView({ params }) {
 // cache-recommend / budget-projection are intentionally absent from the savings
 // band (no past_overspend_usd); they surface elsewhere.
 const ANALYZER_META = {
-  downsize:   { title: 'Downsize',   hint: 'Route candidate sessions to a cheaper model' },
-  cache:      { title: 'Cache',      hint: 'Raise cache-read efficacy toward the 80% ceiling' },
-  script:     { title: 'Script',     hint: 'Replace a deterministic call-pattern with a script' },
-  trim:       { title: 'Trim',       hint: 'Trim low-significance tokens from prompt templates' },
-  reuse:      { title: 'Reuse',      hint: 'Reuse a repeated planning skeleton instead of re-planning' },
-  subagent:   { title: 'Subagent',   hint: 'Right-size an over-powered subagent to a cheaper same-family model' },
-  relearn:    { title: 'Relearn',    hint: 'Recurring failure clusters the self-improve loop tracks' },
-  verbosity:  { title: 'Verbosity',  hint: 'Sessions whose output runs high vs the per-task-shape median' },
-  deadweight: { title: 'Deadweight', hint: 'Configured MCP servers whose schemas are injected but never called' },
-  resend:     { title: 'Context resend', hint: 'How much of each turn re-sends context already sent in an earlier turn' },
-  placement:  { title: 'Batch placement', hint: 'Unattended, cadence-regular workloads that fit the Batch API\'s flat-rate discount' },
-  summarize:  { title: 'Summarize', hint: 'Oversized catalog prompt files; review a compression in the curate/diff surface' },
+  downsize:   { title: 'Downsize',   hint: 'Use a cheaper model on these sessions' },
+  cache:      { title: 'Cache',      hint: 'Cache the context you re-read' },
+  script:     { title: 'Script',     hint: 'Replace the pattern with a script' },
+  trim:       { title: 'Trim',       hint: 'Trim low-value tokens from prompts' },
+  reuse:      { title: 'Reuse',      hint: 'Reuse the plan instead of re-planning' },
+  subagent:   { title: 'Subagent',   hint: 'Use a smaller model for subagents' },
+  relearn:    { title: 'Relearn',    hint: 'Turn recurring mistakes into a rule' },
+  verbosity:  { title: 'Verbosity',  hint: 'Rein in over-long outputs' },
+  deadweight: { title: 'Deadweight', hint: 'Remove MCP servers you never call' },
+  resend:     { title: 'Context resend', hint: 'Offload context instead of re-sending it' },
+  placement:  { title: 'Batch placement', hint: 'Move batch-friendly work to the Batch API' },
+  summarize:  { title: 'Summarize', hint: 'Compress oversized prompt files' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
@@ -7372,19 +7469,21 @@ function fmtCadence(seconds) {
   return '~' + Math.round(seconds) + 's';
 }
 
-// Deep-link a recoverable-waste tile straight to its own analyzer detail card
-// on the Optimize screen (#229) — not an Analytics chart slice. The
-// `finding` param drives OptimizeView's scroll-into-view + highlight of
-// #opt-<name> (see the focus effect below). `since` is passed through so the
-// destination shows the same window the tile was computed from.
+// Deep-link straight to an analyzer's OWN Optimize detail sub-page
+// (#/optimize/<name>), where the full evidence + fix card lives. The Optimize
+// page split from one long stacked page into a summary landing + one detail
+// sub-page per analyzer-with-a-finding, so a deep link now opens that page
+// directly rather than scrolling to an anchor on the stacked page. `since` is
+// carried as a query param so the destination shows the same window the source
+// figure was computed from.
 function optimizeFindingHref(name, since) {
   const sp = new URLSearchParams();
   // Omit `since` only at the shared DEFAULT_SINCE (the value Optimize resolves
   // to on a bare href) — read it from the constant rather than a literal so a
   // future default move can't silently drop a real window (issue #655).
   if (since && since !== DEFAULT_SINCE) sp.set('since', since);
-  sp.set('finding', name);
-  return '#/optimize?' + sp.toString();
+  const q = sp.toString();
+  return '#/optimize/' + name + (q ? '?' + q : '');
 }
 
 // Reverse hop: deep-link a detail card's evidence into the Review inbox's
@@ -7545,7 +7644,7 @@ function classifyFinding(name, fd, skipped) {
     return { state: 'actionable', usd, tokens, basis: (windowScoped ? fd.window_scoped_basis : fd.estimate_basis) || '' };
   }
   if (windowScoped && usd == null) {
-    return { state: 'not_ready', hint: 'No figure on this window’s basis yet; rescan to fold it in.' };
+    return { state: 'not_ready', hint: 'Rescan to surface recurring mistakes.' };
   }
   // Ran, nothing to recover. For cache, distinguish "already at the ceiling"
   // (positive) from "nothing here" so we never tell a user to raise efficacy
@@ -7685,7 +7784,7 @@ function ScanBar({ scan, busy, error, declined, declinedDetail, onRescan }) {
   const scanning = !!(busy || scan.computing);
   const when = scan.fetchFailed ? 'scan state unavailable'
     : scan.computedAt
-      ? 'computed ' + fmtAgo(scan.computedAt) + (scan.windowDays ? ' \u00b7 ' + scan.windowDays + 'd window' : '')
+      ? 'computed ' + fmtAgo(scan.computedAt)
       : (scan.status === 'error' ? 'no scan has succeeded yet' : 'never computed');
   const qualifier = buildQualifier(scan);
   return html`<span class="rescan-bar">
@@ -7843,6 +7942,26 @@ function recoverableTiles(opt) {
     }
   });
   return rankTiles(out, opt.finding_rank);
+}
+
+// The analyzers that earn their OWN Optimize detail sub-page (#/optimize/<name>)
+// and a left-submenu entry: exactly the tiles that carry a real finding
+// (`state === 'actionable'`), in the same biggest-waste-first order the tiles
+// and the summary list use. This is the ONE predicate that decides has-data vs
+// empty across all three surfaces — the submenu, the per-analyzer routes, and
+// which Dashboard tiles are clickable — so they can never disagree about which
+// analyzers have a page. `summarize` is handled separately (it has its own
+// SummarizeView + finding shape); this covers the analyzer detail cards
+// rendered by OptimizeFinding.
+const DETAIL_ANALYZER_NAMES = new Set([
+  'downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim',
+  'reuse', 'subagent', 'verbosity', 'deadweight', 'placement',
+]);
+function optimizeDetailAnalyzers(opt) {
+  if (!opt || opt.report_available === false) return [];
+  return recoverableTiles(opt)
+    .filter(t => t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name))
+    .map(t => t.name);
 }
 
 // Order recoverable tiles biggest-waste-first, mirroring the CLI's ranking
@@ -8036,7 +8155,7 @@ function HealthTile({ label, value, attention, href, sub, status = 'ready' }) {
 }
 
 // ---- Optimize detail screen ----
-function OptimizeFinding({ name, opt, framing, hasProposal }) {
+function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onProposalDismiss, onProposalMark }) {
   const meta = ANALYZER_META[name] || { title: capitalize(name) };
   let body = null;
   if (name === 'downsize') {
@@ -8233,7 +8352,16 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       ${rec ? html`<span class="opt-rec" title=${(fd && fd.estimate_basis) || ''}>${rec}</span>` : null}
     </div>
     ${body}
-    ${hasProposal ? html`<div class="opt-line" style="margin-top:10px"><a class="sz-link" href=${reviewProposalHref(name)}>A fix for this is ready. Review it in the Review inbox →</a></div>` : null}
+    ${/* The applyable fix now lives HERE, inline under the evidence, rather than
+          on a separate Review-actions page. `embedded` drops the card's own
+          title/figure (this section already shows them) and keeps the "what to
+          do": the fix snippet + the apply control + Mark applied / Dismiss. */ ''}
+    ${(proposals && proposals.length) ? html`
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+        <div class="opt-sub" style="margin-bottom:6px">Recommended change${proposals.length > 1 ? 's' : ''}</div>
+        ${proposals.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} embedded=${true} busy=${false}
+          onMark=${onProposalMark} onDismiss=${onProposalDismiss} onChanged=${onProposalChanged} />`)}
+      </div>` : null}
   </section>`;
 }
 
@@ -8273,7 +8401,12 @@ function RecommendationsPanel({ rec }) {
     </section>`;
 }
 
-function OptimizeView({ params }) {
+function OptimizeView({ params, navParam }) {
+  // `navParam` is the path segment after `#/optimize/` (e.g. `downsize`).
+  // summarize/rules/guide route to their OWN primary views (see primaryKeyFor),
+  // so any navParam that reaches here is an ANALYZER name and means "render only
+  // that analyzer's detail sub-page". Null → the summary landing.
+  const detailName = navParam || null;
   const DEFAULTS = { since: DEFAULT_SINCE, agent_id: '', compare: '', finding: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
@@ -8281,7 +8414,11 @@ function OptimizeView({ params }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null, proposalAnalyzers: new Set() });
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null, proposalAnalyzers: new Set(), proposals: [] });
+  // Locally-dismissed proposal signatures (same lock-free browser store the old
+  // Review-actions page used). A dismissed fix withdraws its OFFER only; the
+  // analyzer's figure is untouched (Critical Rule 32).
+  const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
@@ -8297,16 +8434,38 @@ function OptimizeView({ params }) {
       // Recommendation-outcome ledger: measured-recovered vs estimated-recoverable.
       // Best-effort — must not blank the Optimize screen.
       const rec = await api('/recommendations').catch(() => null);
-      // Which analyzers currently have an open Review-inbox proposal — drives
-      // the card → Review-inbox link below. Best-effort: a failed or empty
-      // fetch just means no card offers the link, never an error state.
+      // The open cost proposals — the applyable fix for each analyzer, now
+      // rendered inline on the analyzer's own detail page (the retired
+      // Review-actions page's job moved here). Best-effort: a failed or empty
+      // fetch just means a detail page shows no fix, never an error state.
       const cp = await api('/relearn/cost-proposals').catch(() => null);
-      const proposalAnalyzers = new Set((cp && cp.proposals || []).map(p => p.analyzer));
-      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers });
+      const proposals = (cp && cp.proposals) || [];
+      const proposalAnalyzers = new Set(proposals.map(p => p.analyzer));
+      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers, proposals });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [since, agentId, compare]);
 
   useEffect(() => { load(); }, [load]);
+
+  // The open, non-dismissed cost proposals for one analyzer — the fixes rendered
+  // inline on that analyzer's detail page. An analyzer can carry more than one
+  // (downsize commonly has a driver-role card plus a per-project model-oversizing
+  // card each), so this returns ALL of them, not just the first. `relearn` is
+  // excluded (it is a rollup participant, not a per-analyzer card — see
+  // cost_proposals).
+  const proposalsFor = useCallback((name) => (st.proposals || []).filter(
+    p => p.analyzer === name && p.analyzer !== 'relearn' && !dismissed.has(p.signature)
+  ), [st.proposals, dismissed]);
+  const dismissProposal = useCallback((sig) => {
+    const next = new Set([...dismissed, sig]);
+    setDismissed(next); saveDismissedRelearns(next);
+  }, [dismissed]);
+  const markProposal = useCallback(async (prop) => {
+    try {
+      await apiPostOrDetail('/relearn/cost-proposals/apply', { proposal_id: prop.proposal_id });
+      await load();
+    } catch (e) { /* surfaced on next refresh; keep the card in place */ }
+  }, [load]);
 
   // Same stored artifact the Dashboard band reads, so the two screens state one
   // computed-at and cannot disagree about whether anything has been scanned.
@@ -8369,6 +8528,75 @@ function OptimizeView({ params }) {
   const sfTotal = sfApplied + sfTok;
   const sfPctApplied = sfTotal > 0 ? Math.round(sfApplied / sfTotal * 100) : 0;
 
+  // Which analyzers have their OWN detail sub-page (a real finding), in rank
+  // order. Drives the summary landing's ranked link list AND validates a
+  // `#/optimize/<name>` deep link — an analyzer with no finding gets no page.
+  const detailNames = st.opt ? optimizeDetailAnalyzers(st.opt) : [];
+  const detailSet = new Set(detailNames);
+
+  // Unified "Recommended actions" rows — one digestible section that replaces the
+  // chart's per-analyzer waste-list, the standalone Rules and Summarize boxes, and
+  // the old Findings list (three surfaces that listed the same analyzers). One row
+  // per analyzer/action: a short hint, its figure, and a Review button when there
+  // is a detail page to act on. Money analyzers first (biggest-waste-first via
+  // recoverableTiles' finding_rank), then Summarize and Rules — the two file-write
+  // actions that carry no per-window dollar of their own.
+  const actRows = recoverableTiles(st.opt)
+    .filter(t => order.indexOf(t.name) !== -1)
+    .map(t => {
+      const m = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
+      const actionable = t.state === 'actionable';
+      const fig = actionable ? fmtFramedSavings(t.usd, t.tokens, framing)
+        : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
+        : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
+      return {
+        key: t.name, title: m.title,
+        hint: (t.state === 'not_ready' && t.hint) ? t.hint : m.hint,
+        fig, figDim: !actionable,
+        href: (actionable && detailSet.has(t.name)) ? ('#/optimize/' + t.name) : null,
+      };
+    });
+  if (sf && sf.files > 0) actRows.push({
+    key: 'summarize', title: 'Summarize', hint: 'Compress oversized prompt files',
+    fig: '~' + fmtTokens(sfTok) + ' tok/call', figDim: false, href: '#/optimize/summarize',
+  });
+  // Rules always offers its own surface (the per-project write review); it carries
+  // no per-window dollar of its own, so it shows a plain Review affordance.
+  actRows.push({
+    key: 'rules', title: 'Rules', hint: 'Turn repeated findings into permanent CLAUDE.md rules',
+    fig: '', figDim: true, href: '#/optimize/rules',
+  });
+
+  // DETAIL SUB-PAGE (`#/optimize/<analyzer>`): render THAT analyzer's section
+  // alone, reusing the exact OptimizeFinding card the summary used to stack. A
+  // name with no finding this window (stale link, or scanned-away) falls through
+  // to a small "back to Optimize" notice rather than a blank page.
+  if (detailName) {
+    const meta = ANALYZER_META[detailName] || { title: capitalize(detailName) };
+    const backLink = html`<div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Back to Optimize</a></div>`;
+    if (st.loading && !st.opt) {
+      return html`${backLink}<div class="shimmer" style="height:200px"></div>`;
+    }
+    if (st.error) {
+      return html`${backLink}<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load: ${st.error}</div><button class="btn" onClick=${load}>Retry</button></div>`;
+    }
+    const hasCard = st.opt && (detailName === 'downsize'
+      ? true
+      : detailName === 'placement'
+        ? true
+        : !!(st.opt.findings || {})[detailName]);
+    return html`
+      ${backLink}
+      <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px">
+        ${meta.title} <${PlanBadge} framing=${framing} />
+      </div>
+      ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px;margin-bottom:12px">Computed over the last ${scan.windowDays} days by the background scan.</div>` : null}
+      ${hasCard
+        ? html`<${OptimizeFinding} name=${detailName} opt=${st.opt} framing=${framing} proposals=${proposalsFor(detailName)} onProposalChanged=${load} onProposalDismiss=${dismissProposal} onProposalMark=${markProposal} />`
+        : html`<div class="chart-card"><div class="opt-line dim">No <b>${meta.title}</b> finding in the latest scan. It may have been resolved, or this window has no candidates. <a class="sz-link" href="#/optimize">Back to Optimize →</a></div></div>`}
+    `;
+  }
+
   return html`
     ${/* The contextual "What do these checks mean?" link that used to sit
           beside this title is gone. The FAQ is still a top-level Improve entry
@@ -8430,72 +8658,34 @@ function OptimizeView({ params }) {
           <div class="chart-foot" style="margin-top:2px">
             <span class="dim">Biggest single cause: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.</span>
           </div>` : null}
-          ${waste.recSegs.length ? html`
-            <div class="waste-list">
-              ${waste.recSegs.map(r => {
-                const ov = WASTE_LEGEND_OVERRIDE[r.analyzer];
-                return html`
-                <div class="waste-row">
-                  <span class="waste-name">${r.title === 'Summarize'
-                    ? html`<a class="sz-link" href="#/optimize/summarize">${r.title}</a>`
-                    : r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
-                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)}${ov ? html` <span class=${ov.tagClass} title=${r.caveat || r.basis}>${ov.tagText}</span>` : null}${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
-                </div>
-                ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
-              `;})}
-            </div>` : html`<div class="waste-none"><span class="check">✓</span> No overspend found in this window by any analyzer.</div>`}
-          ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
+          ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window. The per-analyzer breakdown is in <b>Recommended actions</b> below.</div>` : null}
         </div>` : null}
 
-      <section class="opt-section" id="opt-rules">
-        <div class="opt-title">
-          <span>Rules <span class="dim" style="font-weight:400;font-size:12px">· permanent CLAUDE.md rules, and which projects they land in</span></span>
-          <a class="sz-link" href="#/optimize/rules" style="font-size:13px">Review →</a>
-        </div>
-        <div class="opt-line dim">
-          Four analyzers end in the same fix: a rule written into a CLAUDE.md.
-          The Rules screen shows each one with the project files it would be
-          written into, one diff per file, applied selectively.
+      ${/* ONE unified action list. Each analyzer/action is a compact row —
+            title, one-line hint, its figure, and a Review button that opens the
+            full evidence + fix on the analyzer's own detail page. Money analyzers
+            rank biggest-waste-first (recoverableTiles' finding_rank); Summarize
+            and Rules follow as the two file-write actions with no per-window
+            dollar of their own. Rows without an actionable finding stay listed
+            for transparency (cache at ceiling, ran-found-nothing) but carry no
+            Review button. Replaces the old waste-list + Rules/Summarize/Findings
+            sections, which listed the same analyzers three times. */ ''}
+      <section class="opt-section" id="opt-actions">
+        <div class="opt-title"><span>Recommended actions <span class="dim" style="font-weight:400;font-size:12px">· open one to see its evidence and apply the fix</span></span></div>
+        <div class="opt-act-list">
+          ${actRows.map(r => html`
+            <div class="opt-act-row" key=${r.key}>
+              <span class="opt-act-name">${r.title}</span>
+              <span class="opt-act-hint">${r.hint}</span>
+              <span class=${r.figDim ? 'opt-act-fig dim' : 'opt-act-fig'}>${r.fig}</span>
+              <span class="opt-act-btncell">${r.href ? html`<a class="opt-review-btn" href=${r.href}>Review →</a>` : null}</span>
+            </div>`)}
         </div>
       </section>
-
-      ${sf ? html`
-        <section class="opt-section" id="opt-summarize">
-          <div class="opt-title">
-            <span>Summarize <span class="dim" style="font-weight:400;font-size:12px">· structure-aware prompt summaries</span></span>
-            <a class="sz-link" href="#/optimize/summarize" style="font-size:13px">Review →</a>
-          </div>
-          ${sf.files > 0 ? html`
-            <div class="sz-tiles">
-              <div class="sz-tile"><div class="sz-tile-v">${sf.files}</div><div class="sz-tile-l">summarizable file${sf.files === 1 ? '' : 's'}</div></div>
-              <div class="sz-tile"><div class="sz-tile-v">~${fmtTokens(sfTok)}</div><div class="sz-tile-l">est. tokens recoverable / call</div></div>
-              <div class="sz-tile"><div class="sz-tile-v">${sfAvgPct}%</div><div class="sz-tile-l">avg prose reduction</div></div>
-            </div>
-            ${sfApplied > 0 ? html`<div style="margin:14px 0 2px">
-              <div class="sz-prog" style="height:10px"><div style=${'width:' + sfPctApplied + '%;background:var(--success)'}></div></div>
-              <div class="sz-note" style="font-size:12px;margin-top:6px"><b>${sfPctApplied}% applied</b>: ~${fmtTokens(sfApplied)} tok/call recovered across ${sfAppliedN} file(s); ~${fmtTokens(sfTok)} still recoverable here. <span class="dim">Applied counts every run; still-recoverable is this scan.</span></div>
-            </div>` : null}
-            <table class="opt-table" style="margin-top:12px">
-              <thead><tr><th>File</th><th>Scope</th><th>Loads</th><th style="text-align:right">~tok/call</th><th style="text-align:right">reduction</th></tr></thead>
-              <tbody>
-                ${sfCands.slice(0, 6).map((c, i) => html`<tr key=${i}>
-                  <td class="mono" title=${c.path}>${c.path.split('/').slice(-2).join('/')}</td>
-                  <td class="dim" style="font-size:11px">${c.scope}</td>
-                  <td class="dim" style="font-size:11px" title=${(c.load_class && c.load_class !== 'always') ? 'Frontmatter is always in context; the body arrives only when this ' + c.load_class + ' is invoked' + (c.invocations != null ? ' (' + c.invocations + ' observed this window)' : '')  : 'Re-sent at the head of every session that loads it'}>${(!c.load_class || c.load_class === 'always') ? 'always-on' : 'on demand'}</td>
-                  <td class="mono" style="text-align:right;color:var(--accent)">~${c.est_tokens_saved}</td>
-                  <td class="mono" style="text-align:right">${c.reduction_pct != null ? c.reduction_pct : 0}%</td>
-                </tr>`)}
-                ${sfCands.length > 6 ? html`<tr><td colspan="5" class="dim" style="font-size:11px">+${sfCands.length - 6} more · <a class="sz-link" href="#/optimize/summarize">see all →</a></td></tr>` : null}
-              </tbody>
-            </table>
-            <div class="sz-note" style="font-size:12px;margin-top:12px">Estimated per-call token reduction from a filesystem scan; advisory, review each rewrite before applying. An "on demand" file realizes that reduction only on the calls that follow an invocation, not on every call. <span class="estimated-tag" title=${sf.estimate_basis}>estimated · tokens</span></div>
-          ` : html`<div class="opt-line dim">No summarizable prompt files in this scan. <a class="sz-link" href="#/optimize/summarize">Open Summarize →</a></div>`}
-        </section>` : null}
 
       ${st.rec && st.rec.rows && st.rec.rows.length ? html`<${RecommendationsPanel} rec=${st.rec} />` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
-      ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(n)} />`)}
       ${(st.opt.budgets || []).length ? html`<section class="opt-section" id="opt-budget-projection">
         <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling, not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
         ${st.opt.budgets.map(b => html`<div class="opt-line">
@@ -9978,24 +10168,11 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
       const activeSub = ((metric === 'events' || metric === 'sessions')
         && breakdownTotal > 0 && breakdownTotal < (kpis[metric] || 0))
         ? { value: fmtCount(breakdownTotal), label: `by ${breakdownDim}` } : null;
-      // Founder request: the Tokens card leads with its dollar value, token
-      // count secondary. Computed independently of `spend` (card 1) rather
-      // than reused from it: card 1 renders an implied-value MULTIPLIER for
-      // SUBSCRIPTION, a different metric entirely, not a dollar figure --
-      // reusing spend.value there would put "43.5× plan value" on the Tokens
-      // card too. LOCAL is the only case with no marginal cost to price at
-      // all; every other pricing mode (api / subscription / unknown) shows
-      // the real dollar amount here. Never fabricated for an unreported
-      // spend field -- falls back to the plain token headline, unchanged,
-      // with no secondary line.
-      const spendMode = framing && framing.pricing_mode;
-      const tokensDollar = (kpis.spend != null && spendMode !== 'local') ? fmtDashUsd(kpis.spend) : null;
-      // `dim: true` is this call site's own request for a dimmer sub-line
-      // (the founder's "subtitle-scale, dimmer" spec); the #318 breakdown
-      // sub (activeSub above) keeps its normal-brightness look unchanged --
-      // .kpi-sub-dim is a separate, additive modifier class, not a change to
-      // the shared .kpi-sub-val/.kpi-sub-lab rules.
-      const tokensSub = tokensDollar ? { value: kpiFigure(kpis.tokens, fmtTokens), label: 'tokens', dim: true } : null;
+      // Founder request (2026-07-30): the Tokens card leads with the TOKEN
+      // count, no dollar figure. On a subscription plan a raw $ spend is not a
+      // figure the user actually pays (Rule 22 framing), and the card is
+      // labelled "Tokens" -- so it shows the count, plain: no dollar headline,
+      // no secondary line.
       const tiles = [];
       if (spend) {
         tiles.push({ key: 'spend', label: spend.label, cost: true, value: spend.value,
@@ -10003,8 +10180,8 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
       }
       // kpiFigure, not the bare formatter: a field the payload omitted renders as
       // unknown rather than as fmtCount(null)'s "0" or fmtTokens(null)'s dash.
-      tiles.push({ key: 'tokens', label: 'Tokens', cost: !!tokensDollar,
-        value: tokensDollar || kpiFigure(kpis.tokens, fmtTokens), sub: tokensSub,
+      tiles.push({ key: 'tokens', label: 'Tokens', cost: false,
+        value: kpiFigure(kpis.tokens, fmtTokens),
         series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens });
       tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: kpiFigure(kpis.sessions, fmtCount),
         series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions });
@@ -11357,7 +11534,7 @@ const APPLY_KIND_COPY = {
   mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; takes effect on the next run, not live — confirm the target first", button: 'Remove entry' },
 };
 
-function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, onChanged, suppressed }) {
+function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, onChanged, suppressed, embedded }) {
   // Headline figure is the card's own PAST OVERSPEND: what this behaviour
   // already cost over the analyzed window, read straight off the payload
   // (`past_overspend_usd`/`_tokens`, stamped server-side by
@@ -11503,8 +11680,14 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
   // paragraph, the fix (snippet or apply control), the estimate, and the
   // Mark applied / Dismiss actions. The fix modality is legible from the
   // fix block itself, so it no longer gets its own sub-label.
-  return html`
-    <div class=${'opt-section inbox-row' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} key=${prop.signature}>
+  // EMBEDDED mode: rendered underneath an Optimize detail page's evidence (which
+  // already shows the analyzer title + its recoverable figure), so the card drops
+  // its own bordered box, title/badge row and figure — those would duplicate the
+  // page. What survives is the "what to do": description, coverage, fix snippet,
+  // apply control, and Mark applied / Dismiss. This is how the fix lifecycle moved
+  // out of the retired Review-actions page and onto each analyzer's own page.
+  const inner = html`
+      ${embedded ? null : html`
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
@@ -11519,7 +11702,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         <span style="margin-left:auto;text-align:right">
           <span class="po-amount" title=${prop.past_overspend_basis || ''}>${est.big}</span>
         </span>
-      </div>
+      </div>`}
       ${/* THE DESCRIPTION BLOCK. Every prose line the card carries lives inside
             one clamp, so the collapsed row is the same height as every other row
             and one "Show more" reveals all of it. Clamping only the first
@@ -11720,12 +11903,14 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         <div style="margin-top:12px">
           ${!blockedReason && !description ? html`<div class="sz-note" style="font-size:12px">There is no ready-made change to apply here yet. What this cost is measured; the fix is not something tokenjam can hand over.</div>` : null}
           <div style="display:flex;gap:12px;align-items:center;justify-content:flex-end">
-            <a class="sz-link" href=${optimizeFindingHref(prop.analyzer)}>See the full analysis →</a>
+            ${embedded ? null : html`<a class="sz-link" href=${optimizeFindingHref(prop.analyzer)}>See the full analysis →</a>`}
             <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
           </div>
         </div>
-      `}
-    </div>`;
+      `}`;
+  return embedded
+    ? html`<div class="cost-fix-embed" data-analyzer=${prop.analyzer}>${inner}</div>`
+    : html`<div class=${'opt-section inbox-row' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} key=${prop.signature}>${inner}</div>`;
 }
 
 // The headline band + the FIXES APPLIED tile.
@@ -12280,7 +12465,7 @@ function ReviewInboxView({ params }) {
 
   return html`
     <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
-      <div class="page-title" style="margin-bottom:0">Inbox</div>
+      <div class="page-title" style="margin-bottom:0">Review actions</div>
       ${/* Scan provenance belongs beside the control that re-runs it, not in a
             per-tab header: it describes the whole inbox, and the shared
             rescan control (ScanBar, also on the Dashboard and Optimize
@@ -12310,7 +12495,7 @@ function ReviewInboxView({ params }) {
             just the write, since the write is a minority of rows. Each row still
             names its own action; these are the two consequences a row cannot
             state for itself. */ ''}
-      <div class="sz-note" style="margin:12px 0 10px"><b>Approve</b> writes the fix to a file or config, effective on the next run — not live enforcement; a copyable fix is yours to apply. <b>Dismiss</b> only hides a row in this browser.</div>
+      <div class="sz-note" style="margin:12px 0 10px"><b>Approve</b> writes the fix to a file or config; it takes effect on the next run, not as live enforcement. A copyable fix is yours to apply. <b>Dismiss</b> hides the row in this browser.</div>
       ${/* The appliable-count line: it names how many of the open rows tokenjam
             can write for you vs. the copy-and-apply rest, so "Open (6)" next to
             a single checkbox stops reading as "5 rows you forgot to select"
@@ -12558,26 +12743,83 @@ function windowOptionsWithCurrent(availableDays, since) {
  * zero; an unanswered or failed read says nothing at all, because a zero we do
  * not have is not a measurement.
  */
+// True once the persona read has ANSWERED and reports a hard zero for this
+// persona. `null` means "not answered / failed" (a zero we do not have is not a
+// measurement), so callers gate on `=== true`, never on falsiness. Reads the
+// context App() already populates from its single `/persona` fetch rather than
+// issuing its own — so the gate and the switcher can never disagree, and there
+// is one request, not one per view.
+function usePersonaHasNoData(persona) {
+  const ctx = useContext(PersonaCtx);
+  if (!ctx || !ctx.known || !ctx.counts) return null;
+  return (ctx.counts[persona] || 0) === 0;
+}
+
+// The banner shown IN PLACE OF a page's body when the reader has switched to a
+// persona this machine has no data for. It carries no header of its own — the
+// shared gate (`PersonaEmptyGate`) renders the page's normal header above it,
+// so this sits in the content region, never above the header.
+//
+// The distinction this exists to protect: "you have no SDK workflows here" and
+// "your SDK workflows cost nothing" are different statements, and every tile a
+// page would otherwise render states the second while the truth is the first.
 function PersonaNoDataNotice({ persona }) {
-  const [info, setInfo] = useState(null);
-  useEffect(() => {
-    let cancelled = false;
-    api('/persona').then(d => { if (!cancelled) setInfo(d); }).catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
-  if (!info || !info.known || !info.counts) return null;
-  if ((info.counts[persona] || 0) > 0) return null;
+  const ctx = useContext(PersonaCtx);
   const label = persona === 'sdk' ? 'SDK workflows' : 'Claude Code sessions';
   const other = persona === 'sdk' ? 'Claude Code' : 'SDK workflows';
+  const otherKey = persona === 'sdk' ? 'claude-code' : 'sdk';
+  // "Switch back to <other>" is a real control: it makes the SAME persona state
+  // change the "Viewing as" <select> does (App()'s setPersona, threaded through
+  // context), never a page reload. A button styled inline as a link so it reads
+  // as prose but is keyboard-focusable and does the state change.
+  const switchBack = html`<button type="button" class="link-inline"
+      onClick=${() => ctx && ctx.onChange && ctx.onChange(otherKey)}>Switch back to ${other}</button>`;
   return html`
     <div class="band-msg" style="margin:0 0 18px">
       <b>No ${label} on this machine.</b>
       <p>
-        Nothing has been ingested for this persona, so the figures below are not
-        small: they are empty. Switch back to ${other} to see what this machine
-        actually has, or point an SDK workload at the collector and it will show
-        up here.
+        ${switchBack} to see what this machine actually has, or point an SDK
+        workload at the collector and it will show up here.
       </p>
+    </div>`;
+}
+
+// The shared empty-state gate every primary view honors (issue: SDK persona on
+// a Claude-Code-only machine). Renders the page's normal HEADER above, then —
+// when this persona has no data — the banner IN PLACE OF the page's body, so a
+// page shows its normal header then the banner instead of its overspend tiles /
+// chart / analyzer cards. When data exists (or the read is unanswered) it
+// renders the children untouched, so the gate is a no-op on the common path.
+//
+// One place, not per-page copy: App() wraps the active view in this, passing a
+// header node the gate always shows and the view's own body as children. A view
+// that already renders its own header inside its body passes an empty header
+// here and keeps rendering it as before on the non-empty path — the gate only
+// SUPPRESSES the body, it never has to reproduce a page's header.
+function PersonaEmptyGate({ persona, header, children }) {
+  const noData = usePersonaHasNoData(persona);
+  if (noData !== true) return children;
+  return html`
+    ${header || null}
+    <${PersonaNoDataNotice} persona=${persona} />`;
+}
+
+// The standard header the gate renders above the banner: page title + the
+// persona switcher, in the same `.ov-head` row the Dashboard uses, so an
+// SDK-empty page looks like a normal page with an empty body rather than a
+// bare banner. Titles keyed by primary-view key.
+const VIEW_TITLES = {
+  dashboard: 'Dashboard', optimize: 'Optimize',
+  summarize: 'Summarize', rules: 'Rules', traces: 'Traces', cost: 'Cost',
+  alerts: 'Alerts', drift: 'Drift', budget: 'Budget', faq: 'FAQ',
+};
+function PersonaEmptyHeader({ viewKey }) {
+  return html`
+    <div class="ov-head">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="page-title" style="margin:0">${VIEW_TITLES[viewKey] || ''}</div>
+        <${PersonaPicker} bare=${true} />
+      </div>
     </div>`;
 }
 
@@ -12844,20 +13086,17 @@ function DashboardView({ params, persona }) {
   // all), the dollar figure (via fmtFramedDollar, fmtDashUsd's 2dp) for
   // api/subscription/unknown. Requires `projection`, which requires
   // `costData`, so this caption cannot be built from an unanswered read.
-  const kpiCaption = (projection && projection !== '—')
-    ? ('At this pace, ~' + projection + ' by ' + cyc.label + '; linear run-rate, not a forecast')
-    : null;
+  // Run-rate caption removed from the Dashboard (founder review, 2026-07-30).
+  const kpiCaption = null;
 
   return html`
-    <${PersonaNoDataNotice} persona=${persona} />
     <div class="ov-head">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div class="page-title" style="margin:0">Dashboard</div>
+        <${PersonaPicker} bare=${true} />
         <${PlanBadge} framing=${framing} />
       </div>
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-        <${PersonaPicker} />
-        <div class="filters" style="margin:0">${winPicker}</div>
         <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
       </div>
     </div>
@@ -12918,7 +13157,7 @@ function DashboardView({ params, persona }) {
                       windows are one seam now (core/optimize/report_window.py)
                       and each surface still names it, because a figure whose
                       window the reader cannot see is not auditable. */ ''}
-                <div class="band-label">Past overspend${scan.windowDays ? html`<span class="band-window">· over the last ${scan.windowDays} days</span>` : null}</div>
+                <div class="band-label">Opportunities to optimize token efficiency${scan.windowDays ? html`<span class="band-window">· over the last ${scan.windowDays}d</span>` : null}</div>
                 ${/* recoverableBandState() decided which of the six states this
                       is; the branches below only render. The ONE branch allowed
                       to say there is nothing recoverable is 'none', which
@@ -12937,7 +13176,7 @@ function DashboardView({ params, persona }) {
                         <div class="shimmer" style="height:10px;width:78%;margin-top:4px"></div>
                       </div>`)}
                   </div>
-                  <div class="band-note">Scanning your history for past overspend. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
+                  <div class="band-note">Scanning your history for optimization opportunities. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
                 ${bandState === 'cold' ? html`
                   <div class="band-msg">
                     <b>No scan has run yet.</b>
@@ -12953,7 +13192,7 @@ function DashboardView({ params, persona }) {
                   </div>` : null}
                 ${bandState === 'failed' ? html`
                   <div class="band-msg err">
-                    <b>Couldn't scan for past overspend.</b>
+                    <b>Couldn't scan for optimization opportunities.</b>
                     <p>${optState.error || 'The request failed.'}</p>
                     <p>Until this succeeds there is no basis for saying whether overspend exists here, so no figure is shown.</p>
                     <button class="btn" onClick=${retryOptimize}>Try again</button>
@@ -12968,26 +13207,35 @@ function DashboardView({ params, persona }) {
                   ${tiles.length === 0 ? html`<div class="empty">No overspend found.</div>`
                     : tiles.map(t => {
                       const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
-                      // Route straight to the analyzer's own detail card on
-                      // the Optimize screen — not an Analytics chart slice
-                      // (#229). The recoverable number's evidence
-                      // and next step live there, not in a chart.
-                      const href = optimizeFindingHref(t.name, since);
+                      // ONLY a tile with a real finding is clickable (Option B,
+                      // founder-approved): it routes straight to that analyzer's
+                      // own detail sub-page (#/optimize/<name>), where the
+                      // number's evidence and fix live. Empty-state tiles
+                      // ("No candidates" / "Not ready") and the positive
+                      // at-ceiling tile stay rendered for transparency but are
+                      // NOT links — no href, no pointer, no hover — because there
+                      // is no detail page for them to open. Has-data is decided by
+                      // the SAME predicate the submenu + summary list use
+                      // (state === 'actionable' + a known detail analyzer).
+                      const hasPage = t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name);
+                      const href = '#/optimize/' + t.name;
                       const amount = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing, fmtDashUsd)
                         : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
                         : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
-                      const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok' : 'rec-tile muted');
+                      const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok static' : 'rec-tile muted static');
                       const amtCls = t.state === 'actionable' ? 'rec-amount' : (t.state === 'at_ceiling' ? 'rec-amount ok' : 'rec-amount dim');
                       // Brief context so the tile says what the number means,
                       // not just how big it is — the specific
                       // not-ready reason when there is one, else what the
                       // analyzer measures.
                       const explain = t.state === 'not_ready' && t.hint ? t.hint : meta.hint;
-                      return html`<a class=${cls} href=${href}>
+                      const inner = html`
                         <div class="rec-name">${meta.title}</div>
                         <div class=${amtCls}>${amount}</div>
-                        ${explain ? html`<div class="rec-hint">${explain}</div>` : null}
-                      </a>`;
+                        ${explain ? html`<div class="rec-hint">${explain}</div>` : null}`;
+                      return hasPage
+                        ? html`<a class=${cls} href=${href}>${inner}<span class="rec-go" aria-hidden="true">→</span></a>`
+                        : html`<div class=${cls}>${inner}</div>`;
                     })}
                 </div>` : null}
               </div>
@@ -13005,8 +13253,8 @@ function DashboardView({ params, persona }) {
                       is also why the tiles no longer appear together: each one
                       paints when its own endpoint answers. */ ''}
                 <div class="tile-grid compact">
-                  <${HealthTile} label="Pending fixes" value=${relearnClusters.length} attention=${relearnClusters.length > 0} href="#/review"
-                    status=${readStatus(relearnRead)} sub="the loop, review inbox" />
+                  <${HealthTile} label="Pending fixes" value=${relearnClusters.length} attention=${relearnClusters.length > 0} href="#/optimize/rules"
+                    status=${readStatus(relearnRead)} sub="recurring mistakes → rules" />
                   <${HealthTile} label="Unread alerts" value=${alertList.length} attention=${alertList.length > 0}
                     status=${readStatus(alertsRead)}
                     href="#/alerts?unread=true" sub=${alertList.length ? alertList[0].severity : 'all clear'} />
@@ -13023,7 +13271,8 @@ function DashboardView({ params, persona }) {
 
         <!-- The HERO: the embedded Analytics pivot explorer. Spend lives here
              once (Spend KPI tile + chart); the run-rate projection is the caption. -->
-        <div id="dash-explore" class="band-label" style="margin-top:18px">Explore <span class="band-window">· metric × dimension × chart, the full pivot</span></div>
+        <div id="dash-explore" class="band-label" style="margin-top:28px;padding-top:22px;border-top:1px solid var(--border)">Spend exploration <span class="band-window">· slice and dice by model, agent, tool, provider and more</span></div>
+        <div style="display:flex;align-items:center;gap:8px;margin:10px 0 2px"><span class="persona-bar-label">Window</span><div class="filters" style="margin:0">${winPicker}</div></div>
         <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />`}
   `;
 }
@@ -13044,7 +13293,7 @@ function DashboardView({ params, persona }) {
 // route-sync effect, which then PRESERVES whatever lens is active rather than
 // forcing a switch.
 const VIEW_LENS = {
-  review: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
+  status: 'improve', sessions: 'improve', runs: 'improve',
   faq: 'improve', optimize: 'improve',
   traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
   budget: 'observe',
@@ -13063,7 +13312,6 @@ const VIEW_LENS = {
 // expected and fine).
 const PRIMARY_VIEWS = [
   ['dashboard', DashboardView],
-  ['review',    ReviewInboxView],
   ['sessions',  StatusView],
   ['traces',    TracesListView],
   ['cost',      CostView],
@@ -13093,7 +13341,10 @@ const WARM_STAGGER_MS = 120;   // gap between mounting each warmed-on-boot view
 // Anything else is its own view key.
 function primaryKeyFor(route) {
   const v = route.view;
-  if (v === 'overview' || v === 'analytics') return 'dashboard';
+  // The Review-actions page was retired (its apply lifecycle moved onto the
+  // Optimize detail pages, its summary onto the Dashboard ACTIONS band). A stale
+  // #/review deep-link aliases to the Dashboard rather than 404ing.
+  if (v === 'overview' || v === 'analytics' || v === 'review') return 'dashboard';
   if (v === 'status' || v === 'runs') return 'sessions';
   if (v === 'optimize' && route.param === 'summarize') return 'summarize';
   if (v === 'optimize' && route.param === 'rules') return 'rules';
@@ -13137,7 +13388,7 @@ function detailNodeFor(route) {
 // but the guard is worth keeping blunt.)
 const PERSONA_HIDDEN_VIEWS = {
   'claude-code': ['traces', 'cost', 'alerts', 'drift', 'budget'],
-  'sdk': ['sessions'],
+  'sdk': ['traces', 'cost', 'alerts', 'drift', 'budget'],
 };
 
 function personaHides(persona, view) {
@@ -13160,11 +13411,19 @@ const PersonaCtx = createContext(null);
 // spot: a page's own header-right group when it has one, otherwise the floated
 // fallback below. Reads context rather than props so a page can place it
 // without every view having to thread persona state down to its header.
-function PersonaPicker() {
+function PersonaPicker({ bare } = {}) {
   const ctx = useContext(PersonaCtx);
   if (!ctx) return null;
   const { persona, detected, known, counts, onChange } = ctx;
   const opts = [['claude-code', 'Claude Code'], ['sdk', 'SDK workflows']];
+  // `bare` (the Dashboard heading) renders just the dropdown, no "Viewing as"
+  // label — it sits next to the "Dashboard" title, where the context is obvious.
+  const select = html`
+    <select class="persona-select" aria-label="Persona"
+            value=${persona} onChange=${(e) => onChange(e.currentTarget.value)}>
+      ${opts.map(([value, label]) => html`
+        <option key=${value} value=${value} selected=${persona === value}>${label}</option>`)}
+    </select>`;
   return html`
     <span class="persona-pick">
       ${/* No id + for pairing here. App keeps every visited primary view
@@ -13172,17 +13431,7 @@ function PersonaPicker() {
             own picker at once and a fixed id would be duplicated across the
             document. The label wraps its control instead, which associates the
             two without needing a global identifier. */''}
-      <label class="persona-bar-label">Viewing as
-        <select class="persona-select" aria-label="Persona"
-                value=${persona} onChange=${(e) => onChange(e.currentTarget.value)}>
-          ${opts.map(([value, label]) => html`
-            <option key=${value} value=${value} selected=${persona === value}>${label}</option>`)}
-        </select>
-      </label>
-      ${known && detected && persona !== detected ? html`
-        <span class="persona-bar-note">Detected: ${detected === 'claude-code' ? 'Claude Code' : detected}</span>` : null}
-      ${known && counts && counts[persona] === 0 ? html`
-        <span class="persona-bar-note">No ${persona === 'sdk' ? 'SDK' : 'Claude Code'} sessions on this machine</span>` : null}
+      ${bare ? select : html`<label class="persona-bar-label">Viewing as ${select}</label>`}
     </span>`;
 }
 
@@ -13198,6 +13447,35 @@ const VIEWS_WITH_PERSONA_SLOT = new Set(['dashboard', 'optimize', 'review']);
 // taking a row above every such page.
 function PersonaBar() {
   return html`<div class="persona-bar"><${PersonaPicker} /></div>`;
+}
+
+// Reconcile the sidebar to the current route + persona: active-highlight, reveal
+// the active section's nav-children, and keep the lens pill in sync. Module-level
+// so both the route-sync effect and the nav-child injection effect (which adds
+// Optimize children mid-session) can re-apply the same rules to the DOM as it
+// stands right now. Pure DOM work — reads no React state beyond its args.
+function syncNavState(view, param, persona) {
+  const sidebar = document.querySelector('.sidebar');
+  const lens = (persona === 'claude-code' || persona === 'sdk')
+    ? 'improve'
+    : (VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve');
+  if (sidebar) sidebar.dataset.persona = persona;
+  document.body.dataset.persona = persona;
+  if (sidebar) sidebar.dataset.lens = lens;
+  document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
+  document.querySelectorAll('.nav-link').forEach(el => {
+    const v = el.dataset.view || '';
+    if (el.classList.contains('nav-child')) {
+      // "Click Optimize → expand": show a child only while its section is active.
+      el.style.display = (v === view) ? 'flex' : 'none';
+      el.classList.toggle('active', v === view && (el.dataset.param || '') === param);
+    } else {
+      // A parent yields the highlight to a child that matches the current param.
+      const childActive = v === view && param !== '' &&
+        !!document.querySelector('.nav-child[data-view="' + v + '"][data-param="' + param + '"]');
+      el.classList.toggle('active', v === view && !childActive);
+    }
+  });
 }
 
 function App() {
@@ -13219,6 +13497,58 @@ function App() {
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
+
+  // Analyzer names that have a real finding → one Optimize nav-child each
+  // (#/optimize/<name>), in rank order. Read from the SAME stored /optimize
+  // artifact every other surface reads (fast=true skips the heavy Trim pass —
+  // the nav only needs which analyzers have a finding, not the full report), so
+  // the submenu, the summary landing, and the Dashboard tiles cannot disagree
+  // about which analyzers have a page. Best-effort: a failed read leaves the
+  // submenu with just Summarize + Rules, never an error.
+  const [optimizeChildren, setOptimizeChildren] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    api('/optimize', { fast: 'true' })
+      .then(d => { if (!cancelled && d) setOptimizeChildren(optimizeDetailAnalyzers(d)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Inject/refresh the analyzer nav-children in the sidebar (before the static
+  // Summarize/Rules children). The sidebar is server-rendered static HTML, so we
+  // reconcile it imperatively here rather than owning the whole nav in Preact:
+  // create one <a class="nav-link nav-child"> per finding, tagged
+  // data-optimize-dyn so a re-run can clear its own previous set without
+  // touching the two static children. The route-sync effect below then handles
+  // active-highlight + show/hide exactly as it does for any nav-child.
+  useEffect(() => {
+    const sidebar = document.querySelector('.sidebar');
+    if (!sidebar) return;
+    sidebar.querySelectorAll('a.nav-child[data-optimize-dyn]').forEach(el => el.remove());
+    const anchorBefore = sidebar.querySelector('a.nav-child[data-optimize-static="1"]');
+    if (!anchorBefore) return;
+    optimizeChildren.forEach(name => {
+      const meta = ANALYZER_META[name] || { title: capitalize(name) };
+      const a = document.createElement('a');
+      a.href = '#/optimize/' + name;
+      a.className = 'nav-link nav-child';
+      a.dataset.view = 'optimize';
+      a.dataset.param = name;
+      a.dataset.lens = 'improve';
+      a.dataset.optimizeDyn = '1';
+      const icon = document.createElement('span');
+      icon.className = 'icon';
+      icon.innerHTML = '&#8627;';
+      a.appendChild(icon);
+      a.appendChild(document.createTextNode(' ' + meta.title));
+      sidebar.insertBefore(a, anchorBefore);
+    });
+    // Re-apply active-highlight + show/hide to the freshly-injected children,
+    // which the route-sync effect below computes but only over the DOM as it was
+    // when it last ran. Cheap and idempotent; keeps a newly-injected child from
+    // flashing in the wrong state until the next route change.
+    syncNavState(route.view, route.param || '', persona);
+  }, [optimizeChildren]);
 
   useEffect(() => {
     const handler = () => setRoute(getRoute());
@@ -13260,7 +13590,10 @@ function App() {
   // rendering an orphan. replaceState so Back does not bounce them straight
   // into the same hidden view again.
   useEffect(() => {
-    if (personaHides(persona, route.view)) {
+    // A trace DETAIL (traces/<trace_id>) is a legitimate drill-in from a
+    // session's Traces tab even for a persona whose sidebar hides the top-level
+    // Traces LIST. Redirect only the hidden list pages, never a specific trace.
+    if (personaHides(persona, route.view) && !(route.view === 'traces' && route.param)) {
       history.replaceState(null, '', '#/dashboard');
       setRoute(getRoute());
     }
@@ -13270,41 +13603,14 @@ function App() {
   // keep the Improve/Observe lens pill in sync with the current route (self-
   // improve-loop SPEC.md §12 — two lenses, one router; a direct link or
   // back-nav into the other lens's view must flip the pill, not just the page).
+  // Active-highlight + reveal the active section's children + lens pill sync.
+  // The rules live in module-level syncNavState so the nav-child injection effect
+  // can re-apply them to newly-added Optimize children. `persona` is a dependency
+  // because syncNavState writes `data-persona` (which drives CSS nav gating);
+  // without it the attribute would only refresh on a ROUTE change, leaving the
+  // sidebar on the previous persona's pages after a persona switch alone.
   useEffect(() => {
-    const view = route.view, param = route.param || '';
-    const sidebar = document.querySelector('.sidebar');
-    // A view maps to a lens, EXCEPT the lens-neutral ones (Dashboard, #654):
-    // those are absent from VIEW_LENS and must PRESERVE the active lens so an
-    // Observe user opening the Dashboard stays in Observe (Greptile P1). Fall
-    // back to the sidebar's current lens for a neutral view, then 'improve' only
-    // on the very first paint before any lens has been set.
-    const lens = VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve';
-    // `data-persona` drives the nav gating in CSS, alongside `data-lens`.
-    // Written in this same pass so the two can never disagree for a frame;
-    // `persona` is therefore in this effect's dependency list. It is also
-    // mirrored onto <body>, because persona gates content INSIDE views too
-    // (the Dashboard's health band), which the sidebar attribute cannot reach.
-    if (sidebar) sidebar.dataset.persona = persona;
-    document.body.dataset.persona = persona;
-    if (sidebar) sidebar.dataset.lens = lens;
-    document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
-    document.querySelectorAll('.nav-link').forEach(el => {
-      const v = el.dataset.view || '';
-      if (el.classList.contains('nav-child')) {
-        // "Click Optimize → expand": show a child only while its section is active.
-        el.style.display = (v === view) ? 'flex' : 'none';
-        el.classList.toggle('active', v === view && (el.dataset.param || '') === param);
-      } else {
-        // A parent yields the highlight to a child that matches the current param.
-        const childActive = v === view && param !== '' &&
-          !!document.querySelector('.nav-child[data-view="' + v + '"][data-param="' + param + '"]');
-        el.classList.toggle('active', v === view && !childActive);
-      }
-    });
-    // `persona` is a dependency because this effect writes `data-persona`, which
-    // drives the nav gating. Without it the attribute is only refreshed when the
-    // ROUTE changes, so switching persona while standing still leaves the
-    // sidebar showing the previous persona's pages.
+    syncNavState(route.view, route.param || '', persona);
   }, [route.view, route.param, persona]);
 
   const primaryKey = primaryKeyFor(route);
@@ -13373,7 +13679,23 @@ function App() {
       // it today: a view needs the SELECTED persona (not the detected one) to
       // say anything honest about a persona with no data, and re-fetching it
       // per view would let two surfaces disagree mid-render.
-      return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}><${Comp} params=${vp} persona=${persona} /></div>`;
+      // Every primary view is wrapped in the shared empty-state gate: on a
+      // persona this machine has no data for, it renders a normal header for
+      // the page (title + persona switcher) then the banner IN PLACE OF the
+      // view's body — so the header is never mangled by a banner rendered above
+      // it, and the rule applies uniformly to every page, not just Dashboard.
+      // On the common path (data present, or read unanswered) the gate is a
+      // no-op and the view renders exactly as before.
+      // The path param (`#/optimize/<name>`) is threaded to the ACTIVE view only,
+      // so a kept-alive hidden view never sees a param meant for another. It
+      // drives OptimizeView's summary-vs-single-analyzer-detail split; other
+      // views ignore it.
+      const navParam = isActive ? route.param : null;
+      return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}>
+        <${PersonaEmptyGate} persona=${persona} header=${html`<${PersonaEmptyHeader} viewKey=${key} />`}>
+          <${Comp} params=${vp} persona=${persona} navParam=${navParam} />
+        <//>
+      </div>`;
     })}
     ${detail ? html`<div key=${'detail:' + route.view + ':' + route.param} class="view-pane">${detail}</div>` : null}
     ${!detail && !PRIMARY_KEYS.has(primaryKey) ? html`<div class="empty">Page not found.</div>` : null}
@@ -13425,13 +13747,13 @@ fetch('/api/v1/version')
   // which lens is actually shown — it re-syncs the pill + nav-link visibility
   // on every hashchange, so this handler only needs to navigate.
   (function () {
-    var LENS_HOME = { improve: '#/review', observe: '#/traces' };
+    var LENS_HOME = { improve: '#/dashboard', observe: '#/traces' };
     document.querySelectorAll('.lens-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var lens = btn.dataset.lens;
         var sidebar = document.querySelector('.sidebar');
         if (sidebar && sidebar.dataset.lens === lens) return;
-        location.hash = LENS_HOME[lens] || '#/review';
+        location.hash = LENS_HOME[lens] || '#/dashboard';
       });
     });
   })();
