@@ -489,11 +489,16 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 /* Collapsible archive / inactive block */
 details.archive-block { margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
 details.archive-block > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: var(--pad-head-y) var(--inset-x); background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+details.archive-block > summary:hover { background: var(--surface3, var(--border)); }
 details.archive-block > summary::-webkit-details-marker { display: none; }
-details.archive-block > summary .tw { color: var(--text-faint); font-size: 9px; transition: transform 0.15s; display: inline-block; }
+details.archive-block > summary .tw { color: var(--accent); font-size: 11px; transition: transform 0.15s; display: inline-block; }
 details.archive-block[open] > summary .tw { transform: rotate(90deg); }
 details.archive-block > summary .a-count { color: var(--text-faint); }
+/* Expand/collapse hint, CSS-driven so it is correct in BOTH states (a static
+   string would say "collapse" while collapsed). */
 details.archive-block > summary .a-hint { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--text-faint); }
+details.archive-block > summary .a-hint::after { content: 'click to expand'; }
+details.archive-block[open] > summary .a-hint::after { content: 'click to collapse'; }
 details.archive-block .table-wrap { border-top: 1px solid var(--border); }
 table.archive-list { width: 100%; border-collapse: collapse; font-family: 'Geist Mono', monospace; font-size: 13px; min-width: 820px; }
 table.archive-list th { text-align: left; padding: var(--pad-head-y) var(--inset-x); color: var(--text-faint); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -3338,7 +3343,7 @@ function StatusView({ params, persona }) {
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 && showAlerts ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
-          <div class="card-foot">→ Map / Approach / Timeline</div>
+          <div class="card-foot">View details →</div>
         </div>`;
   };
 
@@ -3361,29 +3366,34 @@ function StatusView({ params, persona }) {
         <td>${endedLabel}</td>
         <td class="row-actions">
           ${s.session_id ? html`
-            <a href=${'#/sessions/' + s.session_id} onClick=${e => e.stopPropagation()}>Map</a>
-            <a href=${'#/sessions/' + s.session_id} onClick=${e => e.stopPropagation()}>Approach</a>
-            <a href=${'#/sessions/' + s.session_id} onClick=${e => e.stopPropagation()}>Timeline</a>` : null}
+            <a href=${'#/sessions/' + s.session_id} onClick=${e => e.stopPropagation()}>Details →</a>` : null}
         </td>
       </tr>`;
   };
 
   return html`
-    <div class="page-title">Sessions</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 18px;font-family:'Geist Mono',monospace">
-      ${agentId
-        ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/sessions" style="color:var(--brand)">show all</a>`
-        : (showSdkZone
-            ? 'Two zones: coding sessions (bounded work) and SDK services (unbounded telemetry).'
-            : 'Coding sessions: bounded work, active to idle to stale to closed.')}
+    ${/* One heading, "Sessions", with the persona dropdown bare beside it —
+          consistent with the Dashboard and Optimize headers. The old duplicated
+          "Coding sessions · bounded work · active→idle→stale→closed" tagline (it
+          appeared twice) is gone; the active/archived count carries the useful
+          part. The SDK two-zone case keeps a small zone label so the coding zone
+          is still distinguishable from the SDK-services panel below. */ ''}
+    <div class="ov-head">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="page-title" style="margin:0">Sessions</div>
+        <${PersonaPicker} bare=${true} />
+      </div>
+      ${(codingAgents.length || codingArchived.length) ? html`
+        <span class="zone-count" style="align-self:center">${codingAgents.length} active · ${archivedCountLabel(codingArchived.length, data.archived_total)} archived</span>` : null}
     </div>
+    ${agentId ? html`<div style="font-size:12px;color:var(--text-dim);margin:2px 0 16px;font-family:'Geist Mono',monospace">Filtered to <span class="mono">${agentId}</span> · <a href="#/sessions" style="color:var(--brand)">show all</a></div>` : null}
 
     ${(codingAgents.length || codingArchived.length) ? html`
-      <div class="zone-head">
-        <span class="zone-title">Coding sessions</span>
-        <span class="zone-sub">bounded work · active → idle → stale → closed</span>
-        <span class="zone-count">${codingAgents.length} active · ${archivedCountLabel(codingArchived.length, data.archived_total)} archived</span>
-      </div>
+      ${showSdkZone ? html`
+        <div class="zone-head">
+          <span class="zone-title">Coding sessions</span>
+          <span class="zone-sub">bounded work · active → idle → stale → closed</span>
+        </div>` : null}
       ${codingAgents.length ? groupKeys.map(key => html`
         ${(showHeadings || groupOverflow(key) > 0) ? html`
           <div style="display:flex;align-items:baseline;gap:10px;margin:18px 0 10px;font-family:'Geist Mono',monospace">
@@ -3397,12 +3407,12 @@ function StatusView({ params, persona }) {
         <div style="font-size:12px;color:var(--text-dim);margin:8px 0 4px;font-family:'Geist Mono',monospace">No active coding sessions</div>`}
 
       ${codingArchived.length > 0 ? html`
-        <details class="archive-block">
+        <details class="archive-block" open>
           <summary>
             <span class="tw">▶</span>
             <span>Archived</span>
             <span class="a-count">(closed / stale) · ${archivedCountLabel(codingArchived.length, data.archived_total)}</span>
-            <span class="a-hint">keyed on ended-at · method still openable</span>
+            <span class="a-hint"></span>
           </summary>
           <div class="table-wrap"><table class="archive-list">
             <thead><tr><th></th><th>Session</th><th>Cost</th><th>Tokens (in / out)</th><th>Duration</th><th>Tool calls</th><th>Ended</th><th></th></tr></thead>
@@ -5414,9 +5424,16 @@ function SessionDetailView({ sessionId }) {
         <tbody>
           ${traces.map(t => html`
             <tr class="clickable" onClick=${() => location.hash = '#/traces/' + t.trace_id} title=${'Trace ' + t.trace_id}>
-              <td>${friendlySpanName(t.name)}</td>
+              ${/* A backfilled Claude Code session rolls its whole conversation
+                    up under one trace_id, so this one row can hold thousands of
+                    mixed spans. Labelling it by the FIRST span's type (e.g. "Tool
+                    Call") read as "only one tool call happened"; call a multi-span
+                    roll-up a Conversation instead, with the real count in Spans. */ ''}
+              <td>${t.span_count > 1 ? 'Conversation' : friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
-              <td>${fmtDur(t.duration_ms)}</td>
+              ${/* Backfilled spans carry no per-span duration, so the SUM is 0;
+                    an em dash is honest where "0ms" reads as an instant trace. */ ''}
+              <td>${t.duration_ms > 0 ? fmtDur(t.duration_ms) : '—'}</td>
               <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${t.span_count}</td>
@@ -8588,7 +8605,7 @@ function OptimizeView({ params, navParam }) {
     return html`
       ${backLink}
       <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px">
-        ${meta.title} <${PlanBadge} framing=${framing} />
+        ${meta.title} <${PersonaPicker} bare=${true} /> <${PlanBadge} framing=${framing} />
       </div>
       ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px;margin-bottom:12px">Computed over the last ${scan.windowDays} days by the background scan.</div>` : null}
       ${hasCard
@@ -8604,9 +8621,8 @@ function OptimizeView({ params, navParam }) {
           second, in-title entry point was noise on the heading. */ ''}
     <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px">
       <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:0">
-        Optimize <${PlanBadge} framing=${framing} />
+        Optimize <${PersonaPicker} bare=${true} /> <${PlanBadge} framing=${framing} />
       </div>
-      <${PersonaPicker} />
       <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
     </div>
     <div class="filters">
@@ -13440,7 +13456,7 @@ function PersonaPicker({ bare } = {}) {
 // window picker, then Rescan). App() must not also float the fallback for
 // these, or the switcher appears twice. Anything not listed here has no
 // header-right group of its own and gets the floated fallback instead.
-const VIEWS_WITH_PERSONA_SLOT = new Set(['dashboard', 'optimize', 'review']);
+const VIEWS_WITH_PERSONA_SLOT = new Set(['dashboard', 'optimize', 'sessions', 'review']);
 
 // The fallback for every page with no header-right group of its own. Floated
 // so it shares the line with a heading that follows it in source, rather than
