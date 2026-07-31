@@ -3357,12 +3357,17 @@ function StatusView({ params, persona }) {
     const dur = (s.started_at && s.last_span_time)
       ? fmtDurLong(new Date(s.last_span_time).getTime() - new Date(s.started_at).getTime())
       : '-';
-    const endedLabel = (s.status === 'stale' ? 'last activity ' : 'ended ') + fmtAgo(s.last_span_time || s.started_at);
+    // The "ended"/"last activity" prefix is redundant under the "Ended" column
+    // header — just the relative time. (A stale row is flagged by its badge.)
+    const endedLabel = fmtAgo(s.last_span_time || s.started_at);
     return html`
       <tr class=${s.session_id ? 'clickable' : ''} onClick=${() => { if (s.session_id) location.hash = '#/sessions/' + s.session_id; }}>
-        ${/* The status dot was redundant beside the badge that already spells the
-              status out; the badge stays (it carries the word), the dot is gone. */ ''}
-        <td class="a-id">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')} <span class="badge badge-${s.status}" style="margin-left:4px">${s.status}</span></td>
+        ${/* No status dot and no "completed" badge: every archived row is done by
+              definition (an active session sits above this table), so "completed"
+              was pure noise. Only 'stale' — a session that timed out rather than
+              ending cleanly — is a genuinely different state, so it alone keeps a
+              badge. */ ''}
+        <td class="a-id">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')}${s.status === 'stale' ? html` <span class="badge badge-stale" style="margin-left:4px">stale</span>` : null}</td>
         <td class="a-agent" title=${s.agent_id || ''}>${s.agent_id || '-'}</td>
         <td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
         <td>${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
