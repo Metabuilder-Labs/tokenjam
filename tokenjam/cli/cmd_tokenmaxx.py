@@ -233,9 +233,14 @@ def _render(
     # ── Action line — what you can reclaim, never a guaranteed saving. ──
     action = Text("💡 ")
     if diag.compact_candidates:
-        # The share isn't repeated here (#672): the reclaimable overhead sits
-        # in these compactable sessions — reference it, don't restate the %.
-        action.append("That overhead sits in ")
+        # Show the RECLAIMABLE figure — the overhead that actually sits in the
+        # compactable sessions — not the window-wide total. These sessions are a
+        # threshold-filtered, capped subset, so "that overhead" (the headline %)
+        # would overstate how much is here (Greptile, #672). This is a distinct,
+        # actionable number, not a restatement of the composition block above.
+        reclaimable = sum(c.reread_tokens for c in diag.compact_candidates)
+        action.append(_quota_share(reclaimable, framing), style="bold")
+        action.append(" sits in ")
         action.append(f"{len(diag.compact_candidates)}", style="bold")
         action.append(" compactable session"
                       f"{'s' if len(diag.compact_candidates) != 1 else ''}. Run ")
