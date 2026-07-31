@@ -58,6 +58,10 @@ TJ_THEME = Theme(
         "muted": "dim",
         # genuine state only
         "ok": "bold",  # success is bold + ✓, never green
+        # A CALL-TO-ACTION the user should do next (green = go). Distinct from
+        # `ok` success: this is "do this now", not "this worked" — so it earns a
+        # colour where success does not (Anil, 2026-07-30).
+        "go": "green",
         "warn": "yellow",
         "warn.strong": "bold yellow",
         "error": "red",

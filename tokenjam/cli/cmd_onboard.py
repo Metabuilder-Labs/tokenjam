@@ -30,11 +30,6 @@ from tokenjam.utils.formatting import console, display_path
 # `tj backfill claude-code` — the prompt below always says so.
 DEFAULT_BACKFILL_DAYS = 30
 
-# Above this many in-scope sessions, print a one-line heads-up before the
-# (still potentially slow) ingest starts, so a big "everything" choice or a
-# very active last-30-days window doesn't look like a hang either.
-_BACKFILL_HEADSUP_THRESHOLD = 300
-
 # --- output-trim (`tj hook cap-output`) legacy hook cleanup ------------------
 # The output-trim hook itself was removed (measured negative: +5.6% whole-
 # session cost on Claude Code, see CLAUDE.md). This matcher/unwire pair stays
@@ -1121,51 +1116,6 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
     return msg, True, total
 
 
-def _review_inbox_url(port: int, *, want_daemon: bool) -> str:
-    """Pointer to the web dashboard's review inbox (``#/review``), where every
-    detected fix is reviewed, applied, and one-click reverted. When the daemon
-    isn't running yet (``--no-daemon``), say so instead of printing a URL that
-    won't answer."""
-    if want_daemon:
-        return f"http://127.0.0.1:{port}/#/review"
-    return f"run `tj serve`, then open http://127.0.0.1:{port}/#/review"
-
-
-def _print_review_inbox_pointer(*, port: int, want_daemon: bool) -> None:
-    """Onboarding tail: point at the web dashboard's review inbox instead of
-    re-deriving and rendering findings in the terminal.
-
-    Onboard used to run the full relearn scan inline (tens of seconds over a
-    real corpus), dump the recurring-mistake list plus a #1-fix evidence
-    block, and ask an interactive "enable this fix now?" question. That scan
-    was purely compute-for-display: it called ``compute_relearn_finding``
-    directly, bypassing ``core.optimize.relearn_store``, so nothing it
-    produced was persisted or read by any other surface. The daemon's own
-    background job computes and caches the findings the review inbox renders,
-    on its own schedule, so onboarding just sends the user there. Removing
-    the ask also means onboard has one fewer blocking question.
-    """
-    console.print()
-    if want_daemon:
-        console.print(
-            "[heading]Recurring mistakes:[/heading] tj keeps watching your sessions "
-            "in the background."
-        )
-    else:
-        # The relearn job that produces this only runs under `tj serve` --
-        # under `--no-daemon` nothing is watching anything yet, and claiming
-        # otherwise would contradict the next line telling the user to start
-        # the server.
-        console.print(
-            "[heading]Recurring mistakes:[/heading] tj will watch your sessions "
-            "in the background once the server is running."
-        )
-    console.print(
-        f"[muted]  Review and apply fixes in the web dashboard:[/muted] "
-        f"[url]{_review_inbox_url(port, want_daemon=want_daemon)}[/url]"
-    )
-
-
 def _print_setup_complete_home(
     *, sessions_backfilled: int = 0, has_data: bool = False,
     days: int | None = None,
@@ -1283,11 +1233,10 @@ def _resolve_backfill_scope(
             span_days = DEFAULT_BACKFILL_DAYS
 
     if span_days is None:
-        # "all available" span → backfill everything, uncapped.
-        console.print(
-            "[dim]  Backfilling all available Claude Code history "
-            "(matching your analysis span).[/dim]"
-        )
+        # "all available" span → backfill everything, uncapped. No preamble
+        # line: the post-backfill "N new · N total sessions" result line is the
+        # honest count (sessionId-deduped), and a "~N sessions in scope"
+        # pre-count over transcript FILES over-reports badly (Critical Rule 34).
         return None, True, None
 
     _print_complete_later_tip(span_days)
@@ -1308,18 +1257,34 @@ def _print_next_steps_nudge(
 
     Commands that work on the just-backfilled data *immediately* — no Claude
     Code restart required. The Claude Code list is deliberately down to TWO
-    entries: the web dashboard (where the diagnosis actually lives, rendered
-    rather than re-derived per CLI invocation) and ``tj tokenmaxx`` (the
-    shareable card). ``tj context`` / ``tj quota-audit`` still exist as
+    action rows (founder review, demo trim): View the Web UI (Lens) and View
+    your Token Efficiency Card (``tj tokenmaxx``) — each an action label plus a
+    concrete instruction. ``tj context`` / ``tj quota-audit`` still exist as
     commands; they are just not what a fresh user should be sent to first.
     ``tjb`` is an SDK-persona workflow (re-run your own agent on a cheaper
-    model) so it only appears on the generic list. When onboarding just
-    installed the daemon, the dashboard is already serving — suggesting
-    ``tj serve`` there invites a port conflict, so that line says "already
-    running" instead. Copy stays honest (no promised savings — Critical
-    Rule 14).
+    model) so it only appears on the generic (non-Claude-Code) list. On that
+    list, when onboarding just installed the daemon, the dashboard is already
+    serving — suggesting ``tj serve`` there invites a port conflict, so that
+    line says "already running" instead. Copy stays honest (no promised
+    savings — Critical Rule 14).
     """
     console.print()
+    lens_url = f"http://127.0.0.1:{port}/"
+    if persona == "claude-code":
+        # Two action/instruction rows, plain header (founder review, demo trim).
+        console.print("[heading]▸ Next steps[/heading]")
+        console.print()
+        console.print(
+            "  [label]View the Web UI (Lens)[/label]  "
+            f"[go]open {lens_url} in a browser[/go]"
+        )
+        console.print(
+            "  [label]View your Token Efficiency Card[/label]  "
+            "[go]run tj tokenmaxx[/go]"
+        )
+        console.print()
+        _warn_if_tj_path_unresolved()
+        return
     if has_data:
         span = f"last {days} days" if days else "history"
         console.print(
@@ -1331,7 +1296,6 @@ def _print_next_steps_nudge(
             "[heading]▸ Next steps[/heading]  [muted]these work right now:[/muted]"
         )
     console.print()
-    lens_url = f"http://127.0.0.1:{port}/"
     if daemon_running:
         lens_line = (
             f"  [label]web dashboard[/label]  [muted]already running →[/muted] [url]{lens_url}[/url]"
@@ -1341,24 +1305,19 @@ def _print_next_steps_nudge(
             f"  [accent]tj serve[/accent]       "
             f"[muted]open the web dashboard at[/muted] [url]{lens_url}[/url]"
         )
-    tokenmaxx_line = (
+    console.print(
         "  [accent]tj tokenmaxx[/accent]   [muted]your shareable efficiency tier[/muted]"
     )
-    if persona == "claude-code":
-        console.print(lens_line)
-        console.print(tokenmaxx_line)
-    else:
-        console.print(tokenmaxx_line)
-        console.print(
-            "  [accent]tj optimize[/accent]    "
-            "[muted]cost-saving candidates from your usage[/muted]"
-        )
-        console.print(
-            "  [accent]tjb[/accent]            "
-            "[muted]prove a cheaper model still holds "
-            "(pip install tokenjam-bench)[/muted]"
-        )
-        console.print(lens_line)
+    console.print(
+        "  [accent]tj optimize[/accent]    "
+        "[muted]cost-saving candidates from your usage[/muted]"
+    )
+    console.print(
+        "  [accent]tjb[/accent]            "
+        "[muted]prove a cheaper model still holds "
+        "(pip install tokenjam-bench)[/muted]"
+    )
+    console.print(lens_line)
     console.print()
     _warn_if_tj_path_unresolved()
 
@@ -1682,10 +1641,11 @@ def _onboard_claude_code(
     """Configure Claude Code to send telemetry to tj.
 
     ``standalone`` is True on the single-path flow (`tj onboard --claude-code`)
-    and False when this runs as one leg of the combination flow (#432). On the
-    combination path the closing home banner must print exactly once, at the end
-    of `_onboard_combination` — so we suppress it here when not standalone. The
-    inline Claude Code backfill still runs (it is only ever invoked from here).
+    and False when this runs as one leg of the combination flow (#432). The
+    Claude Code flow itself ends right after the Next steps block (no closing
+    home banner — founder review, demo trim); the combination flow prints its
+    own closing banner once at the end of `_onboard_combination`. The inline
+    Claude Code backfill still runs (it is only ever invoked from here).
 
     ``plan_usd_override`` is the pre-collected API monthly spend ceiling that
     pairs with ``plan_override``: when the combination flow hoists the billing
@@ -1836,7 +1796,6 @@ def _onboard_claude_code(
     backfill_msg: str | None = None
     backfill_has_data = False
     backfill_span_days: int | None = None
-    backfill_sessions_total = 0
     try:
         from tokenjam.cli.backfill_progress import backfill_progress
         from tokenjam.core.backfill import (
@@ -1850,14 +1809,15 @@ def _onboard_claude_code(
                 since, _backfill_is_full, max_sessions = _resolve_backfill_scope(
                     backfill_days, backfill_all, config,
                 )
+                # Used only to size the progress bar below. Deliberately NOT
+                # printed as a "~N sessions in scope" heads-up: it counts
+                # transcript FILES, which over-reports the true (sessionId-
+                # deduped) session count badly (Critical Rule 34) — the
+                # post-backfill "N new · N total sessions" line is the honest
+                # figure.
                 total_in_scope = count_claude_code_sessions_in_scope(
                     since=since, max_sessions=max_sessions,
                 )
-                if total_in_scope > _BACKFILL_HEADSUP_THRESHOLD:
-                    console.print(
-                        f"[dim]  ~{total_in_scope:,} sessions in scope — this "
-                        f"may take a few minutes.[/dim]"
-                    )
                 db = open_db(config.storage)
                 with backfill_progress(total_in_scope) as backfill_progress_cb:
                     result = ingest_claude_code(
@@ -1887,7 +1847,6 @@ def _onboard_claude_code(
                     # Report new / already-present / total so a re-run reads as
                     # "13 total" rather than "1 session" (#238).
                     total = result.sessions_total
-                    backfill_sessions_total = total
                     pieces = [
                         f"{result.sessions_new} new "
                         f"({result.sessions_existing} already present) · "
@@ -1965,7 +1924,8 @@ def _onboard_claude_code(
     # could cross-leak a concurrent session's brief). Idempotent +
     # non-destructive (foreign SessionStart hooks preserved); removed by
     # `tj uninstall`.
-    resume_brief_status = _wire_claude_resume_brief_hook(global_settings)
+    # Installed silently — no printed status line (founder review, demo trim).
+    _wire_claude_resume_brief_hook(global_settings)
 
     # The output-trim PostToolUse hook was removed (measured negative: +5.6%
     # whole-session cost on Claude Code, see CLAUDE.md). Best-effort cleanup
@@ -1978,18 +1938,6 @@ def _onboard_claude_code(
             "[ok]✓[/ok] Removed the legacy output-trim hook "
             "(tj hook cap-output) — this feature was removed."
         )
-    _RESUME_BRIEF_STATUS_MSG = {
-        "written": "installed (SessionStart: resume|compact)",
-        "updated": "updated to current path",
-        "kept": "already installed",
-        "skipped": "skipped — ~/.claude/settings.json has malformed hooks "
-                   "(expected object with SessionStart list); fix and re-run",
-    }
-    console.print(
-        f"[ok]✓[/ok] Resume-brief hook (tj resume-brief --from-hook): "
-        f"{_RESUME_BRIEF_STATUS_MSG.get(resume_brief_status, resume_brief_status)}"
-    )
-
     # --- Project settings (<cwd>/.claude/settings.json) ---
     project_claude_dir = Path.cwd() / ".claude"
     project_claude_dir.mkdir(parents=True, exist_ok=True)
@@ -2149,19 +2097,11 @@ def _onboard_claude_code(
 
     _maybe_verify_onboarding(config, persona="claude-code", verify=verify)
 
-    # Shared closing banner (#448): every onboard path ends on the branded home
-    # screen + tailored next-best-actions. For Claude Code the success signal is
-    # the backfill ("N sessions backfilled"), NOT a live span — the log parse
-    # already ran above. On the combination path this is deferred to
-    # `_onboard_combination` so the banner prints exactly once (#432).
-    if standalone:
-        if backfill_has_data:
-            _print_review_inbox_pointer(port=port, want_daemon=want_daemon)
-        _print_setup_complete_home(
-            sessions_backfilled=backfill_sessions_total,
-            has_data=backfill_has_data,
-            days=backfill_span_days,
-        )
+    # The Claude Code flow ends right after the Next steps block (founder
+    # review, demo trim): no "Recurring mistakes" pointer and no "You're set up
+    # / full command list" footer. The other onboard paths keep those via
+    # `_print_setup_complete_home`. The backfilled-session count is still
+    # reported on the "Backfilled: N total sessions" line printed above.
 
 
 def _onboard_codex(
@@ -2763,58 +2703,17 @@ def _claude_code_is_running() -> bool:
 
 
 def _print_claude_code_restart_panel() -> None:
-    """Render the consolidated restart-required panel for the Claude Code path.
+    """One optional line for the Claude Code restart (#643; demo trim 2026-07-30).
 
-    Every restart-adjacent instruction now lives in one why-first, numbered
-    panel instead of being scattered across four spots on the completion
-    screen: a panel, a separate "open a new terminal" paragraph, an
-    "after restarting, run" pointer, and a "verify after restarting" line
-    down near Connection details. The scattering made it easy to restart
-    without ever seeing the verify step, or to read a resume hint and assume a
-    plain restart wasn't needed.
-
-    Resume semantics are stated precisely rather than promised: ``claude -c``
-    only reopens THIS project's latest conversation, and ``claude --resume``
-    opens a picker the user must choose from; neither one "picks up exactly
-    where you left off" automatically, and resuming a conversation in one
-    terminal does nothing while other sessions for this project are still
-    running (they're still exporting to the stale endpoint too, which is why
-    step 1 is "every terminal", not "a terminal").
+    Restarting is NOT required for completeness: the daemon's transcript
+    catch-up ingests running sessions from disk on its interval regardless
+    (the ``[ingest]`` auto_catch_up path). A restart only makes today's
+    currently-active sessions stream in live immediately, so this is stated as
+    optional, not an action gate.
     """
-    from rich.panel import Panel
-    from rich.text import Text
-
-    body = Text.from_markup(
-        "Running sessions keep sending telemetry to the old endpoint. "
-        "Today's activity won't reach TokenJam until they restart.\n\n"
-        "1. Quit Claude Code in [label]every terminal[/label] open on this "
-        "project.\n\n"
-        "2. Relaunch [accent]claude[/accent] in the same folder. Your history "
-        "is safe:\n"
-        "     [accent]claude -c[/accent]        → reopen this project's latest "
-        "conversation\n"
-        "     [accent]claude --resume[/accent]  → pick any earlier one from a "
-        "list\n"
-        # Two deliberately indented lines (not one auto-wrapped one): Rich
-        # wraps continuation text back to the panel margin, not to the
-        # sub-list's hanging indent, so a single long parenthetical rendered
-        # its second line flush-left under "2." instead of under the paren.
-        "     [muted](a fresh claude works too; resuming is optional.\n"
-        "      tj adds a recap of where you left off when you resume)[/muted]\n\n"
-        "3. Confirm data is flowing:  [accent]tj onboard --claude-code "
-        "--verify-only[/accent]"
-    )
     console.print(
-        Panel(
-            body,
-            title="[warn.strong]Action required: restart Claude Code[/warn.strong]",
-            border_style="warn",
-            padding=(1, 2),
-        )
-    )
-    console.print(
-        "[muted]Each relaunched terminal shows as its own dashboard tile;[/muted] "
-        "[accent]claude --as <name>[/accent] [muted]labels it.[/muted]"
+        "[muted]Optional: restart Claude Code to stream today's active sessions "
+        "live -- otherwise tj picks them up from disk within a few minutes.[/muted]"
     )
 
 
@@ -3612,8 +3511,8 @@ def _install_launchd(config_path: str) -> str | None:
         console.print("  tj serve &")
         return None
     console.print(
-        "  [dim]macOS will show a 'Background Items Added' notification "
-        "-- this is normal.[/dim]"
+        "[warn]Heads up:[/warn] macOS will show a 'Background Items Added' "
+        "notification -- this is normal."
     )
     return f"Daemon installed at {plist_path}"
 
