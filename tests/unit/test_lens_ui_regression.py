@@ -323,8 +323,17 @@ def test_optimize_analyzer_children_are_injected_dynamically(html: str) -> None:
     # static Summarize/Rules children.
     assert "function optimizeDetailAnalyzers(opt)" in html
     assert 'a.nav-child[data-optimize-dyn]' in html, "dynamic children must be tagged for reconciliation"
-    assert "setOptimizeChildren(optimizeDetailAnalyzers(d))" in html
+    assert "optimizeDetailAnalyzers(d)" in html
     assert "a.dataset.optimizeDyn = '1'" in html
+    # The submenu is PERSONA-AWARE (#671): the effect re-derives when the
+    # selected persona changes, and a no-data persona yields an empty submenu.
+    assert "}, [persona, personaHasNoData]);" in html, (
+        "the submenu effect must depend on the selected persona so it re-derives on toggle"
+    )
+    assert "personaHasNoData" in html
+    # The static Summarize/Rules children are gated (not injected
+    # unconditionally) via a data-optimize-hidden flag syncNavState honors.
+    assert "optimizeHidden" in html
     # Rules stays a submenu item (cross-cutting rule-write surface).
     assert 'href="#/optimize/rules"' in html
 
