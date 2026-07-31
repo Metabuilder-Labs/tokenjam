@@ -2862,10 +2862,19 @@ function CacheSavingsChart({ data, height = 180, fmtY = fmtCost, axisFmtY = null
 // `recSegs` = [{title,value,...}] already framed ($ or tokens) by the caller.
 // Stacking reuses the back-to-front cumulative-bars trick; each series is
 // non-zero in only ONE column, so per-column stacks stay independent.
-function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }) {
+function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, useTokens = false, height = 220 }) {
   const ref = useRef(null);
   useEffect(() => {
     if (!ref.current || !window.uPlot) return;
+    // Axis ticks want a SHORT, rounded label — the full-precision fmtY (4dp,
+    // e.g. "$4000.0000") is ~10 chars and overflows the fixed y-gutter, so
+    // uPlot right-clips it and every tick collapses to "0.0000" (#670). Keep
+    // fmtY for the tooltip/total (which have room) and give the axis its own
+    // compact formatter. Tokens already abbreviate via fmtTokens, so only the
+    // dollar path needs a no-decimals / k-suffix rounding.
+    const fmtAxisY = useTokens
+      ? fmtTokens
+      : (v) => (v >= 1000 ? '$' + (v / 1000).toFixed(1) + 'k' : '$' + Math.round(v));
     const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
     const grid = cssVar('--border') || '#1f1f1f';
     const tick = cssVar('--text-dim') || '#a1a1a1';
@@ -2919,7 +2928,7 @@ function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }
         { stroke: tick, grid: { show: false }, ticks: { stroke: grid },
           splits: [0, 1], values: () => ['Spend', 'Overspend'] },
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
-          size: 60, values: (u, vals) => vals.map(v => fmtY(v)) },
+          size: 64, values: (u, vals) => vals.map(fmtAxisY) },
       ],
       series,
     };
@@ -2927,7 +2936,7 @@ function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }
     const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
     window.addEventListener('resize', onResize);
     return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
-  }, [costSegs, recSegs, height]);
+  }, [costSegs, recSegs, useTokens, height]);
   return html`<div class="chart" ref=${ref}></div>`;
 }
 
@@ -8690,7 +8699,7 @@ function OptimizeView({ params, navParam }) {
               <span class="chart-total">${useTokens ? (fmtTokens(st.comp.total_tokens || 0) + ' tokens') : fmtFramedDollar(st.comp.total_cost_usd || 0, compFraming)}</span>
             </div>
           </div>
-          <${ComponentWasteChart} costSegs=${waste.costSegs} recSegs=${waste.recSegs} fmtY=${wasteFmtY} height=${220} />
+          <${ComponentWasteChart} costSegs=${waste.costSegs} recSegs=${waste.recSegs} fmtY=${wasteFmtY} useTokens=${useTokens} height=${220} />
           <div class="chart-foot">
             <span class="dim">Left bar = measured spend split by token component. Right bar = <b>what you already overspent</b>, stacked by analyzer: money the window has already been billed for, not a projection of future savings.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}</span>
           </div>
@@ -13507,8 +13516,13 @@ function syncNavState(view, param, persona) {
     const v = el.dataset.view || '';
     if (el.classList.contains('nav-child')) {
       // "Click Optimize → expand": show a child only while its section is active.
-      el.style.display = (v === view) ? 'flex' : 'none';
-      el.classList.toggle('active', v === view && (el.dataset.param || '') === param);
+      // A child gated out for the current persona (data-optimize-hidden, set by
+      // App()'s submenu effect — e.g. Summarize/Rules on a no-data persona, #671)
+      // stays hidden regardless of the active section, so re-running this on a
+      // route change can't reveal a child the persona has no content for.
+      const gated = el.dataset.optimizeHidden === '1';
+      el.style.display = (!gated && v === view) ? 'flex' : 'none';
+      el.classList.toggle('active', !gated && v === view && (el.dataset.param || '') === param);
     } else {
       // A parent yields the highlight to a child that matches the current param.
       const childActive = v === view && param !== '' &&
@@ -13538,21 +13552,51 @@ function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // Analyzer names that have a real finding → one Optimize nav-child each
-  // (#/optimize/<name>), in rank order. Read from the SAME stored /optimize
-  // artifact every other surface reads (fast=true skips the heavy Trim pass —
-  // the nav only needs which analyzers have a finding, not the full report), so
-  // the submenu, the summary landing, and the Dashboard tiles cannot disagree
-  // about which analyzers have a page. Best-effort: a failed read leaves the
-  // submenu with just Summarize + Rules, never an error.
-  const [optimizeChildren, setOptimizeChildren] = useState([]);
+  // The Optimize submenu must mirror what the Optimize VIEW shows for the
+  // CURRENTLY SELECTED persona, not a mount-time snapshot of the data-dominant
+  // one (#671). Two things make it persona-aware:
+  //   1. It re-derives whenever `persona` changes (the toggle is client-side,
+  //      so nothing else re-triggers this).
+  //   2. When the selected persona has NO data on this machine (the same
+  //      `usePersonaHasNoData` signal the view's empty gate uses), the submenu
+  //      is EMPTY — no analyzer children and no Summarize/Rules — because "you
+  //      have no SDK workflows here" is a different statement from "your SDK
+  //      workflows cost nothing", and every child would otherwise assert the
+  //      second. This also covers analyzers gated for the persona (e.g. Subagent
+  //      under SDK), since a no-data persona yields no children at all.
+  // The dynamic analyzer children come from the SAME stored /optimize artifact
+  // every other surface reads (optimizeDetailAnalyzers already drops
+  // persona_disabled_analyzers + non-actionable findings), so the submenu, the
+  // summary landing, and the Dashboard tiles cannot disagree. Best-effort: a
+  // failed read leaves an empty dynamic set, never an error.
+  const personaHasNoData = personaInfo.known && personaInfo.counts
+    ? (personaInfo.counts[persona] || 0) === 0
+    : null;
+  const [optNav, setOptNav] = useState({ dynamic: [], showSummarize: false, showRules: false });
   useEffect(() => {
+    // No data for the selected persona → empty submenu. Wait for the persona
+    // read to answer (personaHasNoData === null) before deciding, so we don't
+    // blank a real submenu on the first paint.
+    if (personaHasNoData === true) { setOptNav({ dynamic: [], showSummarize: false, showRules: false }); return; }
     let cancelled = false;
     api('/optimize', { fast: 'true' })
-      .then(d => { if (!cancelled && d) setOptimizeChildren(optimizeDetailAnalyzers(d)); })
-      .catch(() => {});
+      .then(d => {
+        if (cancelled || !d) return;
+        // Summarize earns its child only when the scan found candidates;
+        // Rules is gated on the persona having data (its own /rules content is
+        // fetched by RulesView — the nav only needs "does this persona have a
+        // page"). A no-data persona was already handled above.
+        const sf = d.findings && d.findings.summarize;
+        const hasSummarize = !!(sf && sf.candidates && sf.candidates.length);
+        setOptNav({
+          dynamic: optimizeDetailAnalyzers(d),
+          showSummarize: hasSummarize,
+          showRules: personaHasNoData === false,
+        });
+      })
+      .catch(() => { if (!cancelled) setOptNav({ dynamic: [], showSummarize: false, showRules: false }); });
     return () => { cancelled = true; };
-  }, []);
+  }, [persona, personaHasNoData]);
 
   // Inject/refresh the analyzer nav-children in the sidebar (before the static
   // Summarize/Rules children). The sidebar is server-rendered static HTML, so we
@@ -13567,7 +13611,7 @@ function App() {
     sidebar.querySelectorAll('a.nav-child[data-optimize-dyn]').forEach(el => el.remove());
     const anchorBefore = sidebar.querySelector('a.nav-child[data-optimize-static="1"]');
     if (!anchorBefore) return;
-    optimizeChildren.forEach(name => {
+    optNav.dynamic.forEach(name => {
       const meta = ANALYZER_META[name] || { title: capitalize(name) };
       const a = document.createElement('a');
       a.href = '#/optimize/' + name;
@@ -13583,12 +13627,20 @@ function App() {
       a.appendChild(document.createTextNode(' ' + meta.title));
       sidebar.insertBefore(a, anchorBefore);
     });
+    // Gate the two STATIC children (Summarize, Rules) on having content for the
+    // selected persona rather than injecting them unconditionally (#671). The
+    // gate is a data-optimize-hidden flag that syncNavState honors, so a route
+    // change can't reveal a child the persona has no content for.
+    sidebar.querySelectorAll('a.nav-child[data-optimize-static="1"]').forEach(el => {
+      const show = el.dataset.param === 'summarize' ? optNav.showSummarize : optNav.showRules;
+      el.dataset.optimizeHidden = show ? '0' : '1';
+    });
     // Re-apply active-highlight + show/hide to the freshly-injected children,
     // which the route-sync effect below computes but only over the DOM as it was
     // when it last ran. Cheap and idempotent; keeps a newly-injected child from
     // flashing in the wrong state until the next route change.
     syncNavState(route.view, route.param || '', persona);
-  }, [optimizeChildren]);
+  }, [optNav, persona]);
 
   useEffect(() => {
     const handler = () => setRoute(getRoute());
