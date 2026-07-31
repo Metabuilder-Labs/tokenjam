@@ -13582,6 +13582,21 @@ function App() {
     api('/optimize', { fast: 'true' })
       .then(d => {
         if (cancelled || !d) return;
+        // The stored /optimize report is gated for its OWN dominant persona
+        // (d.persona), NOT the client-side toggle — the endpoint keys off the
+        // window's data, not the selected persona. On a machine with data for
+        // BOTH personas, deriving the submenu from a report whose persona
+        // doesn't match the selection would surface the wrong persona's gates
+        // (Greptile, #671). We can't trust it, so show an EMPTY submenu (the
+        // detail pages stay reachable from the Optimize page itself) rather than
+        // wrong entries. On a single-persona machine d.persona equals the
+        // selected persona and this is a no-op; the SDK-on-a-CC-machine case is
+        // already covered by the personaHasNoData gate above. The full fix
+        // (thread the selected persona to /optimize) is deferred.
+        if (d.persona && d.persona !== persona) {
+          setOptNav({ dynamic: [], showSummarize: false, showRules: false });
+          return;
+        }
         // Summarize earns its child only when the scan found candidates;
         // Rules is gated on the persona having data (its own /rules content is
         // fetched by RulesView — the nav only needs "does this persona have a
