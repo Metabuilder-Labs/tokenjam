@@ -238,16 +238,19 @@ def test_find_persistent_install_both_pipx_and_uv_tool():
     assert all(i.auto for i in installs)
 
 
-def test_find_persistent_install_pip_fallback_suppressed_when_auto_manager_found():
-    """Belt-and-suspenders (#669): if `_pip_tj_on_path` still leaks a pipx
-    shim, the non-auto `pip` fallback must not be offered alongside an
-    auto-removable install — otherwise pipx removes the package first, then the
-    user is told to `pip uninstall` a package that no longer exists."""
+def test_find_persistent_install_reports_a_genuinely_separate_pip_alongside_pipx():
+    """A machine can carry BOTH a pipx install AND a separate plain-pip install.
+    `_pip_tj_on_path` returns only a `tj` that survived the pipx/uv shim
+    exclusion (a genuinely distinct install — here `/usr/local/bin/tj`), so it
+    must be reported ALONGSIDE the pipx one, never suppressed. Suppressing it
+    would silently leave a real install behind (#669, Greptile). The realpath
+    resolution in `_pip_tj_on_path` — not a fallback guard here — is what stops a
+    pipx SHIM from being mistaken for a pip install in the first place."""
     with patch.object(uninstall_mod, "_pipx_has_tokenjam", return_value=True), \
          patch.object(uninstall_mod, "_uv_tool_has_tokenjam", return_value=False), \
          patch.object(uninstall_mod, "_pip_tj_on_path", return_value="/usr/local/bin/tj"):
         installs = uninstall_mod._find_persistent_install()
-    assert [i.manager for i in installs] == ["pipx"]
+    assert [i.manager for i in installs] == ["pipx", "pip"]
 
 
 def test_find_persistent_install_ephemeral_current_process_still_detects_pipx():

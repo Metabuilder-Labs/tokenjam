@@ -262,14 +262,14 @@ def _find_persistent_install() -> list[PersistentInstall]:
             argv=["uv", "tool", "uninstall", "tokenjam"],
             display="uv tool uninstall tokenjam",
         ))
-    # Belt-and-suspenders (#669): the non-auto `pip` fallback prints a "can't
-    # auto-remove; run `pip uninstall tokenjam` yourself" block. Only offer it
-    # when NO auto-removable (pipx / uv-tool) install was found for the same
-    # package — otherwise a single install detected through two managers would
-    # be removed by pipx first, then told the user to pip-uninstall a package
-    # that no longer exists. `_pip_tj_on_path()` already excludes symlinked
-    # pipx/uv shims; this guards the residual case.
-    if not installs and _pip_tj_on_path():
+    # The realpath resolution in `_pip_tj_on_path` is what fixes the double-count:
+    # a pipx / uv shim now resolves into its managed venv and is excluded there,
+    # so a pipx-only install never reaches this branch. A `tj` that survives the
+    # exclusion is a GENUINELY separate plain-pip / editable install, and it must
+    # be reported even when a pipx/uv install also exists — a machine can carry
+    # both, and suppressing this one would silently leave a real install behind
+    # (#669, Greptile).
+    if _pip_tj_on_path():
         installs.append(PersistentInstall(
             manager="pip", auto=False, argv=None,
             display="pip uninstall tokenjam",
