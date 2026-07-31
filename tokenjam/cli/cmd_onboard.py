@@ -2011,7 +2011,7 @@ def _onboard_claude_code(
     # clean restart "restarted to pick up ..."; a skip "daemon already running".
     # Anything else off the restart path (could-not-auto-restart / stopped-stale
     # / restart-attempted-verify) means the server may not be up — surface it.
-    daemon_needs_attention = bool(daemon_result) and daemon_result.startswith(
+    daemon_needs_attention = daemon_result is not None and daemon_result.startswith(
         ("could not", "stopped stale server", "restart attempted")
     )
     if daemon_needs_attention:
@@ -2133,7 +2133,7 @@ def _onboard_claude_code(
     # #675). A skipped reinstall ("daemon already running"), a pure restart, or a
     # failed install registers no new item, so no notification fires and the
     # heads-up would be a lie.
-    daemon_installed_new = bool(daemon_result) and daemon_result.startswith(
+    daemon_installed_new = daemon_result is not None and daemon_result.startswith(
         "Daemon installed"
     )
     if daemon_installed_new:
