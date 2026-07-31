@@ -506,6 +506,9 @@ table.archive-list td { padding: var(--pad-row-y) var(--inset-x); border-bottom:
 table.archive-list tr:last-child td { border-bottom: none; }
 table.archive-list tr.clickable:hover td { background: rgba(var(--accent-rgb),0.04); }
 table.archive-list .a-id { color: var(--text); }
+/* Agent id can be long (claude-code-agent-<hash>); cap it and ellipsize, full
+   value on hover, so it identifies the project without widening the table. */
+table.archive-list td.a-agent { max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); }
 
 /* SDK services panel (Prometheus-style rows) */
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
@@ -3357,8 +3360,10 @@ function StatusView({ params, persona }) {
     const endedLabel = (s.status === 'stale' ? 'last activity ' : 'ended ') + fmtAgo(s.last_span_time || s.started_at);
     return html`
       <tr class=${s.session_id ? 'clickable' : ''} onClick=${() => { if (s.session_id) location.hash = '#/sessions/' + s.session_id; }}>
-        <td><span class="status-dot ${s.status}"></span></td>
+        ${/* The status dot was redundant beside the badge that already spells the
+              status out; the badge stays (it carries the word), the dot is gone. */ ''}
         <td class="a-id">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')} <span class="badge badge-${s.status}" style="margin-left:4px">${s.status}</span></td>
+        <td class="a-agent" title=${s.agent_id || ''}>${s.agent_id || '-'}</td>
         <td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
         <td>${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
         <td>${dur}</td>
@@ -3415,7 +3420,7 @@ function StatusView({ params, persona }) {
             <span class="a-hint"></span>
           </summary>
           <div class="table-wrap"><table class="archive-list">
-            <thead><tr><th></th><th>Session</th><th>Cost</th><th>Tokens (in / out)</th><th>Duration</th><th>Tool calls</th><th>Ended</th><th></th></tr></thead>
+            <thead><tr><th>Session</th><th>Agent</th><th>Cost</th><th>Tokens (in / out)</th><th>Duration</th><th>Tool calls</th><th>Ended</th><th></th></tr></thead>
             <tbody>
               ${codingArchived.map(archRow)}
             </tbody>
@@ -5417,8 +5422,17 @@ function SessionDetailView({ sessionId }) {
 
     ${tab === 'traces' ? html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Traces</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Click a trace row to drill into its waterfall</div>
-    ${traces.length === 0 ? html`<div class="empty">No traces recorded for this session yet.</div>` : html`
+    ${/* A backfilled Claude Code session usually rolls its whole conversation
+          under ONE trace_id, so the trace list would be a single row you have to
+          click through. When there's exactly one trace, show its span waterfall
+          right here (embedded, no extra hop); a session with several traces
+          (multiple conversations, or live per-call ingest) keeps the list. */ ''}
+    ${traces.length === 0 ? html`<div class="empty">No traces recorded for this session yet.</div>`
+      : traces.length === 1 ? html`
+        <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 4px;font-family:'Geist Mono',monospace">One trace · ${traces[0].span_count} spans. Click a span for details.</div>
+        <${TraceDetailView} traceId=${traces[0].trace_id} embedded=${true} />`
+      : html`
+      <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Click a trace row to drill into its waterfall</div>
       <div class="table-wrap"><table>
         <thead><tr><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th><th>Result</th><th>Spans</th><th></th></tr></thead>
         <tbody>
@@ -5857,7 +5871,7 @@ function dedup(traces) {
 // ============================
 // Trace Detail + Waterfall
 // ============================
-function TraceDetailView({ traceId }) {
+function TraceDetailView({ traceId, embedded }) {
   // Back navigation with a deterministic in-app fallback. A bare history.back()
   // dead-ends on a direct deep-link entry (a fresh tab opened straight on
   // #/traces/<id> has nothing to go back to and leaves the app). Prefer in-app
@@ -5952,7 +5966,7 @@ function TraceDetailView({ traceId }) {
   // timed-out load, show a clear message + retry instead of the shimmer.
   if (loadState === 'error') return html`
     <div>
-      <button class="btn btn-back" onClick=${goBack}>← Back</button>
+      ${embedded ? null : html`<button class="btn btn-back" onClick=${goBack}>← Back</button>`}
       <div class="empty-state" style="padding:32px 0">
         <div style="font-size:14px;margin-bottom:8px">${loadErr || 'Could not load this trace.'}</div>
         <div class="meta" style="margin-bottom:16px">The trace may be very large, or the server may be busy.</div>
@@ -6055,9 +6069,13 @@ function TraceDetailView({ traceId }) {
   const agentName = rootSpan ? (rootSpan.agent_id || traceId.slice(0, 12)) : traceId.slice(0, 12);
 
   return html`
-    <button class="btn btn-back" onClick=${goBack}>\u2190 Back</button>
-    <div class="page-title">Trace details for ${agentName}</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
+    ${/* embedded: rendered inside a session's Traces tab when the session has a
+          single trace, so the page-level Back button + "Trace details for X"
+          title are suppressed (the session page already frames them). */ ''}
+    ${embedded ? null : html`
+      <button class="btn btn-back" onClick=${goBack}>\u2190 Back</button>
+      <div class="page-title">Trace details for ${agentName}</div>`}
+    <div style="font-size:12px;color:var(--text-dim);margin:${embedded ? '0' : '-14px'} 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
     <div class="wf-summary">
       <span>Total cost (tokens) <b>${wfTotalCostFramed}</b></span>
       <span>Tokens <b>${fmtTokens(wfTotalTokens)}</b></span>
