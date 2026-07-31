@@ -1252,20 +1252,24 @@ def _print_next_steps_nudge(
     persona: str = "sdk",
     daemon_running: bool = False,
     port: int = 7391,
+    show_restart: bool = False,
 ) -> None:
     """Curated post-onboard nudge (#240), persona-aware.
 
-    Commands that work on the just-backfilled data *immediately* — no Claude
-    Code restart required. The Claude Code list is deliberately down to TWO
-    action rows (founder review, demo trim): View the Web UI (Lens) and View
-    your Token Efficiency Card (``tj tokenmaxx``) — each an action label plus a
-    concrete instruction. ``tj context`` / ``tj quota-audit`` still exist as
-    commands; they are just not what a fresh user should be sent to first.
-    ``tjb`` is an SDK-persona workflow (re-run your own agent on a cheaper
-    model) so it only appears on the generic (non-Claude-Code) list. On that
-    list, when onboarding just installed the daemon, the dashboard is already
-    serving — suggesting ``tj serve`` there invites a port conflict, so that
-    line says "already running" instead. Copy stays honest (no promised
+    Commands that work on the just-backfilled data *immediately*. The Claude
+    Code list is View the Web UI (Lens) and View your Token Efficiency Card
+    (``tj tokenmaxx``) — each an action label plus a concrete instruction —
+    followed, when ``show_restart`` is set (a ``claude`` session is currently
+    running), by an optional grey "restart Claude Code" line as the third item
+    (#675). Restarting is NOT required for completeness: the daemon's transcript
+    catch-up ingests running sessions from disk on its interval regardless, so
+    the line is stated as optional. ``tj context`` / ``tj quota-audit`` still
+    exist as commands; they are just not what a fresh user should be sent to
+    first. ``tjb`` is an SDK-persona workflow (re-run your own agent on a
+    cheaper model) so it only appears on the generic (non-Claude-Code) list. On
+    that list, when onboarding just installed the daemon, the dashboard is
+    already serving — suggesting ``tj serve`` there invites a port conflict, so
+    that line says "already running" instead. Copy stays honest (no promised
     savings — Critical Rule 14).
     """
     console.print()
@@ -1282,6 +1286,12 @@ def _print_next_steps_nudge(
             "  [label]View your Token Efficiency Card[/label]  "
             "[go]run tj tokenmaxx[/go]"
         )
+        if show_restart:
+            console.print(
+                "  [muted]Optional: restart Claude Code to stream today's "
+                "active sessions live -- otherwise tj picks them up from disk "
+                "within a few minutes.[/muted]"
+            )
         console.print()
         _warn_if_tj_path_unresolved()
         return
@@ -1537,25 +1547,6 @@ def _wire_claude_statusline(settings: dict) -> str:
     return "skipped"
 
 
-def _print_statusline_status(status: str) -> None:
-    """Render the statusLine wiring outcome in the onboard summary block."""
-    if status in ("written", "updated", "kept"):
-        verb = {"written": "wired", "updated": "updated", "kept": "already set"}[status]
-        console.print(
-            f"  Statusline:          {verb} "
-            f"([accent]tj statusline[/accent][muted], zero token cost[/muted])"
-        )
-    elif status == "skipped":
-        # Not yellow: this is one row inside a field list where every other row
-        # is plain, and a single coloured row there reads as a failure rather
-        # than as the "kept your config, here's how to opt in" note it is.
-        console.print(
-            "  Statusline:          left your existing statusLine untouched "
-            "[muted](set it to[/muted] [accent]tj statusline[/accent] "
-            "[muted]to enable tj's line).[/muted]"
-        )
-
-
 # --- zshrc OTEL export block (harness observability) ----------------------
 # Installed into ~/.zshrc so harness (Docker) sessions pick up the OTLP env
 # vars automatically. Delimited by a STABLE, content-based sentinel pair that
@@ -1770,7 +1761,7 @@ def _onboard_claude_code(
         _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
         console.print(
-            f"[ok]\u2713[/ok] Config written to "
+            f"[check]\u2713[/check] Config written to "
             f"[accent]{display_path(config_path)}[/accent]",
             soft_wrap=True,
         )
@@ -1796,6 +1787,7 @@ def _onboard_claude_code(
     backfill_msg: str | None = None
     backfill_has_data = False
     backfill_span_days: int | None = None
+    backfill_sessions_total = 0
     try:
         from tokenjam.cli.backfill_progress import backfill_progress
         from tokenjam.core.backfill import (
@@ -1844,6 +1836,7 @@ def _onboard_claude_code(
                     if result.earliest and result.latest:
                         days = (result.latest - result.earliest).days
                     backfill_span_days = days
+                    backfill_sessions_total = result.sessions_total
                     # Report new / already-present / total so a re-run reads as
                     # "13 total" rather than "1 session" (#238).
                     total = result.sessions_total
@@ -2006,6 +1999,10 @@ def _onboard_claude_code(
         secret_rotated=False,
         no_daemon=no_daemon,
         force=force,
+        # --claude-code completion (#675): the payoff screen reports via three
+        # `✓` lines, so suppress the internal Daemon/Server-restart status lines
+        # and defer the macOS "Background Items Added" heads-up to the bottom.
+        quiet_daemon=True,
     )
 
     # ── Completion screen (founder review, 2026-07): what got wired → the one
@@ -2016,30 +2013,45 @@ def _onboard_claude_code(
     # "after restarting" pointer, and a "verify after restarting" line near
     # Connection details); consolidated back into one panel below.
     console.print()
-    # Lean success screen (#643): one "you're set up" signal, the statusline
-    # note once, the capture note in one line, then the conditional restart
-    # block and the curated next-steps (which surfaces the dashboard URL and
-    # `tj tokenmaxx`). The dashboard URL, the "N sessions" figure, and the
-    # statusline all appeared multiple times before; each is stated once now.
-    # Connection details + internal mechanics are moved behind `--verbose`
-    # (and always available via `tj doctor`).
-    console.print("[ok]\u2713 Claude Code observability configured.[/ok]")
-    _print_statusline_status(statusline_status)
-    if backfill_msg:
-        console.print(f"  Backfilled:          {backfill_msg}")
+    # Lean payoff screen (#675): three green `\u2713` status lines (config written /
+    # observability configured / sessions backfilled), then the privacy note,
+    # then Next steps (with the optional restart as its third item), and the
+    # macOS "Background Items Added" heads-up last of all. The Daemon / Server-
+    # restart / Statusline / verbose "Backfilled: N new \u00b7 N total" status lines
+    # that used to interleave here are gone from the default screen; the
+    # connection-details block behind `--verbose` (and `tj doctor`) still has
+    # the mechanics for anyone who wants them.
+    console.print("[check]\u2713[/check] Claude Code observability configured.")
+    if backfill_has_data and backfill_sessions_total > 0:
+        # Omit the span for a same-day corpus (0 days or unknown) — "over 0
+        # days" reads odd and adds nothing.
+        span = (
+            f", over {backfill_span_days} day"
+            f"{'s' if backfill_span_days != 1 else ''}"
+            if backfill_span_days else ""
+        )
+        console.print(
+            f"[check]\u2713[/check] "
+            f"[bold]Claude Code sessions backfilled[/bold]: "
+            f"{backfill_sessions_total} session"
+            f"{'s' if backfill_sessions_total != 1 else ''}{span}."
+        )
+    elif backfill_msg:
+        # Backfill ran but found no sessions, or was skipped (lock / error).
+        # Surface the reason as one plain line rather than a bare `\u2713`.
+        console.print(f"  [muted]Backfill: {backfill_msg}[/muted]")
     _print_capture_disclosure(config.capture.prompts, config.capture.tool_inputs)
-    console.print()
-    # Restart block is CONDITIONAL (#643): running sessions keep exporting to
-    # the pre-onboard endpoint until relaunched, but a fresh terminal with none
-    # open needs no restart, so only show it when `claude` is actually running.
-    if _claude_code_is_running():
-        _print_claude_code_restart_panel()
-    if not want_daemon:
-        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
+    # (`_print_next_steps_nudge` prints its own leading blank line.)
     _print_next_steps_nudge(
         has_data=backfill_has_data, days=backfill_span_days,
         persona="claude-code", daemon_running=want_daemon, port=port,
+        # The optional "restart Claude Code" line is now the third Next-steps
+        # item (#675); shown only when `claude` is actually running, since a
+        # fresh terminal with no open session needs no restart.
+        show_restart=_claude_code_is_running(),
     )
+    if not want_daemon:
+        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
     # --verbose (#643): the connection-details block + internal mechanics.
     # Off by default -- this is debug/reference noise on the first-run payoff
     # moment, and `tj doctor` surfaces the same information on demand.
@@ -2097,11 +2109,19 @@ def _onboard_claude_code(
 
     _maybe_verify_onboarding(config, persona="claude-code", verify=verify)
 
+    # macOS "Background Items Added" heads-up last of all (#675): it was
+    # suppressed at daemon-install time (`quiet_daemon`) so it lands here, after
+    # Next steps, at the very bottom of the payoff screen. Only prints on macOS,
+    # and only when a daemon was actually installed.
+    if want_daemon:
+        console.print()
+        _print_background_items_headsup()
+
     # The Claude Code flow ends right after the Next steps block (founder
     # review, demo trim): no "Recurring mistakes" pointer and no "You're set up
     # / full command list" footer. The other onboard paths keep those via
-    # `_print_setup_complete_home`. The backfilled-session count is still
-    # reported on the "Backfilled: N total sessions" line printed above.
+    # `_print_setup_complete_home`. The backfilled-session count is reported on
+    # the "✓ Claude Code sessions backfilled" line above.
 
 
 def _onboard_codex(
@@ -2717,6 +2737,22 @@ def _print_claude_code_restart_panel() -> None:
     )
 
 
+def _print_background_items_headsup() -> None:
+    """The macOS "Background Items Added" heads-up (#675).
+
+    Only macOS surfaces this OS-level notification (launchd LaunchAgents), so
+    the line is gated on Darwin. Printed at the very bottom of the completion
+    screen — after Next steps — rather than mid daemon-install, so the payoff
+    screen reads top-to-bottom.
+    """
+    if platform.system() != "Darwin":
+        return
+    console.print(
+        "[warn]Heads up:[/warn] macOS will show a 'Background Items Added' "
+        "notification -- this is normal."
+    )
+
+
 def _warn_manual_serve_restart(*, stopped_for_db: bool, no_daemon: bool) -> None:
     """Tell the user to restart serve when onboard stopped it without daemon mode."""
     if stopped_for_db and no_daemon:
@@ -2735,8 +2771,16 @@ def _finish_onboard_serve(
     secret_rotated: bool,
     no_daemon: bool,
     force: bool,
+    quiet_daemon: bool = False,
 ) -> str | None:
-    """Install or restart ``tj serve`` after onboard DB/config writes."""
+    """Install or restart ``tj serve`` after onboard DB/config writes.
+
+    ``quiet_daemon`` (the --claude-code completion, #675) suppresses the
+    internal "Daemon: installing.../already running" and "Server restart:"
+    status lines — the completion screen reports success via three `✓` lines
+    instead — and withholds the macOS "Background Items Added" heads-up so it
+    can print at the bottom of the payoff screen.
+    """
     if not config_path or not Path(config_path).exists():
         return None
 
@@ -2750,13 +2794,15 @@ def _finish_onboard_serve(
             and not stopped_for_db
             and not need_restart
         ):
-            console.print(
-                "  Daemon:              already running (skipped reinstall)"
-            )
+            if not quiet_daemon:
+                console.print(
+                    "  Daemon:              already running (skipped reinstall)"
+                )
             restart_msg = "daemon already running"
         else:
-            console.print("  Daemon:              installing...")
-            install_msg = _install_daemon(config_path)
+            if not quiet_daemon:
+                console.print("  Daemon:              installing...")
+            install_msg = _install_daemon(config_path, suppress_headsup=quiet_daemon)
             if install_msg:
                 restart_msg = install_msg
 
@@ -2767,8 +2813,11 @@ def _finish_onboard_serve(
             reason = "plan"
         else:
             reason = "db_update"
-        restart_msg = _restart_tj_server(config_path, no_daemon, reason=reason)
-        console.print(f"  Server restart:      {restart_msg}")
+        restart_msg = _restart_tj_server(
+            config_path, no_daemon, reason=reason, suppress_headsup=quiet_daemon,
+        )
+        if not quiet_daemon:
+            console.print(f"  Server restart:      {restart_msg}")
 
     return restart_msg
 
@@ -2816,6 +2865,7 @@ def _restart_tj_server(
     no_daemon: bool,
     *,
     reason: str = "secret",
+    suppress_headsup: bool = False,
 ) -> str:
     """Restart running tj serve to pick up config changes.
 
@@ -2840,7 +2890,7 @@ def _restart_tj_server(
             return f"stopped stale server; {hint}"
         return f"could not auto-restart in --no-daemon mode; {hint}"
 
-    daemon_msg = _install_daemon(config_path)
+    daemon_msg = _install_daemon(config_path, suppress_headsup=suppress_headsup)
     if daemon_msg:
         if reason == "secret":
             return "restarted to pick up new ingest secret"
@@ -3368,12 +3418,17 @@ def _daemon_already_running() -> bool:
     return False
 
 
-def _install_daemon(config_path: str) -> str | None:
-    """Install background daemon. Returns success message or None."""
+def _install_daemon(config_path: str, *, suppress_headsup: bool = False) -> str | None:
+    """Install background daemon. Returns success message or None.
+
+    ``suppress_headsup`` (macOS only) withholds the inline "Background Items
+    Added" heads-up so the --claude-code completion can print it at the bottom
+    of the payoff screen instead (#675).
+    """
     system = platform.system()
     try:
         if system == "Darwin":
-            return _install_launchd(config_path)
+            return _install_launchd(config_path, suppress_headsup=suppress_headsup)
         elif system == "Linux":
             return _install_systemd(config_path)
         else:
@@ -3458,7 +3513,7 @@ def _warn_no_durable_daemon_entrypoint(unit_kind: str) -> None:
     )
 
 
-def _install_launchd(config_path: str) -> str | None:
+def _install_launchd(config_path: str, *, suppress_headsup: bool = False) -> str | None:
     program_args = _daemon_program_args(config_path)
     if program_args is None:
         _warn_no_durable_daemon_entrypoint("launchd")
@@ -3510,10 +3565,12 @@ def _install_launchd(config_path: str) -> str | None:
         console.print("[dim]Or run the server directly:[/dim]")
         console.print("  tj serve &")
         return None
-    console.print(
-        "[warn]Heads up:[/warn] macOS will show a 'Background Items Added' "
-        "notification -- this is normal."
-    )
+    # The --claude-code completion (#675) moves this heads-up to the very BOTTOM
+    # of the payoff screen (after Next steps) so it reads top-to-bottom, hence
+    # `suppress_headsup` there; every other onboard path prints it inline here as
+    # before.
+    if not suppress_headsup:
+        _print_background_items_headsup()
     return f"Daemon installed at {plist_path}"
 
 

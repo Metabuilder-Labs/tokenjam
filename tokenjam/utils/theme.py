@@ -58,6 +58,14 @@ TJ_THEME = Theme(
         "muted": "dim",
         # genuine state only
         "ok": "bold",  # success is bold + ✓, never green
+        # The three completion `✓` status lines at the end of onboarding
+        # (`--claude-code`). A deliberate FOUNDER OVERRIDE of the usual
+        # "success is a glyph + bold, never green" rule (Anil, 2026-07): the
+        # payoff screen leads with three green checks so the "you're wired up"
+        # moment reads at a glance. Kept a distinct role from `ok` so the
+        # override is scoped to that one screen and `ok` stays weight-only
+        # everywhere else.
+        "check": "bold green",
         # A CALL-TO-ACTION the user should do next (green = go). Distinct from
         # `ok` success: this is "do this now", not "this worked" — so it earns a
         # colour where success does not (Anil, 2026-07-30).

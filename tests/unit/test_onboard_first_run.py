@@ -259,18 +259,19 @@ def test_claude_code_asks_plan_before_budget(_isolated_claude_code, tmp_path):
     assert out.index("How do you pay for Claude?") < out.index("Daily budget in USD"), out
 
 
-def test_claude_code_restart_banner_precedes_nudge(_isolated_claude_code, tmp_path):
-    """Founder-review order: the restart note comes before Next steps. #643:
-    connection details moved behind --verbose, so the default screen ends on
-    next steps. Demoted to one OPTIONAL line (2026-07-30) — the daemon catch-up
-    ingests running sessions regardless, so a restart is not required."""
+def test_claude_code_restart_banner_is_third_next_step(_isolated_claude_code, tmp_path):
+    """#675: the optional restart note is now the THIRD item UNDER Next steps
+    (it used to print above the Next-steps header). Still one OPTIONAL line —
+    the daemon catch-up ingests running sessions regardless, so a restart is not
+    required. #643: connection details moved behind --verbose."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     out = res.output
     assert "Next steps" in out
     assert "restart Claude Code" in out
     assert "Action required" not in out
-    assert out.index("restart Claude Code") < out.index("Next steps"), out
+    # Now inside Next steps, so it follows the header rather than preceding it.
+    assert out.index("Next steps") < out.index("restart Claude Code"), out
     # #643: connection details are no longer on the default success screen.
     assert "Connection details" not in out
     # No backfill happened here, so no "already loaded" over-claim.

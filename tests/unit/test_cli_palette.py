@@ -155,6 +155,23 @@ def test_ok_role_carries_no_colour():
     assert style.color is None
 
 
+def test_check_role_is_the_deliberate_green_check(capsys):
+    """#675: the three `✓` status lines at the end of the --claude-code payoff
+    screen are GREEN — a deliberate founder override of the usual "success is a
+    glyph + bold, never green" rule. It lives on its own `check` role (distinct
+    from `ok`, which stays weight-only) so the override is scoped to that screen
+    and still goes through a named theme role rather than raw `[green]` markup.
+    """
+    style = TJ_THEME.styles["check"]
+    assert style.bold is True
+    assert style.color is not None
+    assert "green" in str(style)
+    # And it renders as green when applied to a `✓`.
+    out = _render("[check]✓[/check] Config written")
+    assert "✓" in out
+    assert _sgr_codes(out), "the check role should emit styling"
+
+
 @pytest.mark.parametrize("role", ["warn", "warn.strong", "error", "error.strong"])
 def test_state_roles_keep_a_colour(role):
     # These are the two cases where colour still earns its place: a blocker the

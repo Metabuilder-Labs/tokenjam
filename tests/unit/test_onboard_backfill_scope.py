@@ -114,7 +114,9 @@ def test_non_interactive_derives_backfill_from_default_span(
     assert "Backfilling the last 90 days" in flat
     assert "tj backfill claude-code" in flat
     # The old session (2020) is outside the 90-day span, only the recent one.
-    assert "1 new" in res.output or "1 total session" in res.output
+    # #675: the completion line is now the simplified "✓ ... : N sessions, over
+    # M days." (the verbose "N new · N total" detail was dropped).
+    assert "1 session" in _flat(res.output)
 
 
 # --- Single "how far back" question (#643) ------------------------------------
@@ -153,7 +155,8 @@ def test_all_span_backfills_everything_uncapped(
     # count on the result line below is what the user sees instead.
     assert "Backfilling all available Claude Code history" not in flat
     # Both sessions (recent + old) should be backfilled with no window.
-    assert "2 total session" in flat
+    # #675: simplified completion line — "N sessions, over M days."
+    assert "2 sessions" in flat
 
 
 # --- Explicit scripting flags -------------------------------------------------
@@ -175,7 +178,7 @@ def test_backfill_all_flag_skips_prompt_and_note(
     flat = _flat(res.output)
     assert "Backfill your Claude Code history:" not in flat
     assert "afterwards for your full history" not in flat
-    assert "2 total session" in flat
+    assert "2 sessions" in flat  # #675: simplified completion line
 
 
 def test_backfill_days_and_backfill_all_are_mutually_exclusive(
@@ -220,28 +223,36 @@ def test_default_window_actually_filters_old_session(
     assert res.exit_code == 0, res.output
     # Only the recent (5-days-ago) session is within a 30-day-from-now window;
     # the 2020 session must be excluded from the backfilled total.
-    assert "1 total session" in res.output
+    # #675: simplified completion line — "N sessions, over M days."
+    assert "1 session" in _flat(res.output)
 
 
-# --- Backfill summary dollar line is plan-gated (framing discipline) ----------
+# --- Backfill completion line carries no dollar figure (#675) -----------------
+# The old "N total sessions ... $N total spend" summary was simplified to a
+# single "✓ Claude Code sessions backfilled: N sessions, over M days." line,
+# which drops the spend detail entirely — so it can never leak a dollar figure
+# on any plan tier, subscription or api alike.
 
 
-def test_backfill_summary_hides_spend_for_subscription_plan(
+def test_backfill_completion_line_hides_spend_for_subscription_plan(
     _isolated_claude_code_with_history, tmp_path,
 ):
-    """A Pro/Max user just declared a flat-fee subscription — the backfill
-    summary must not answer with "$N total spend" (core/framing.py suppresses
-    dollar figures for subscription tiers on every other surface)."""
+    """A Pro/Max user just declared a flat-fee subscription — the completion
+    line must not answer with "$N total spend" (core/framing.py suppresses
+    dollar figures for subscription tiers on every surface)."""
     res = _run_claude_code(tmp_path, "--plan", "max_20x", input_str="")
     assert res.exit_code == 0, res.output
-    assert "total session" in res.output  # backfill itself still reported
+    assert "session" in _flat(res.output)  # backfill itself still reported
     assert "total spend" not in res.output
 
 
-def test_backfill_summary_keeps_spend_for_api_plan(
+def test_backfill_completion_line_hides_spend_for_api_plan_too(
     _isolated_claude_code_with_history, tmp_path,
 ):
-    """Per-token billing keeps the dollar line — it's their real marginal cost."""
+    """#675: the simplified completion line drops the dollar detail for EVERY
+    plan tier — an api user's spend is now surfaced by `tj cost` / `tj optimize`,
+    not on the onboarding payoff screen."""
     res = _run_claude_code(tmp_path, "--plan", "api", input_str="0\n")
     assert res.exit_code == 0, res.output
-    assert "total spend" in res.output
+    assert "session" in _flat(res.output)  # backfill still reported
+    assert "total spend" not in res.output
