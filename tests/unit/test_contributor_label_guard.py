@@ -354,9 +354,13 @@ def test_handle_claim_issue_not_found_logs_distinguishable_noop(monkeypatch, cap
 
 
 def test_handle_claim_auth_failure_logs_distinguishable_noop(monkeypatch, capsys):
-    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (403, None))
+    monkeypatch.setattr(
+        guard,
+        "fetch_issue",
+        lambda repo, number, token: (403, {"message": "Forbidden"}),
+    )
     guard._handle_claim(REPO, 12, "token")
-    assert "no-op: issue #12 not found (status 403)" in capsys.readouterr().out
+    assert "no-op: issue #12 API error (status 403)" in capsys.readouterr().out
 
 
 def test_handle_claim_payload_missing_labels_key_does_not_crash(monkeypatch, capsys):
