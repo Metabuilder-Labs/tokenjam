@@ -185,6 +185,21 @@ def cmd_optimize(
     requested = list(findings) if findings else None
     analyzer_findings = _resolve_analyzer_names(requested)
 
+    if export_templates:
+        # --export-templates only makes sense when the reuse analyzer runs.
+        # findings=None runs every registered analyzer (including reuse).
+        selected = (
+            set(analyzer_findings)
+            if analyzer_findings is not None
+            else set(ANALYZER_REGISTRY.keys())
+        )
+        if "reuse" not in selected:
+            raise click.ClickException(
+                "--export-templates requires the reuse finding. Run "
+                "`tj optimize reuse --export-templates`, or include "
+                "`reuse` in the finding list."
+            )
+
     # Two paths depending on whether the daemon holds the DB lock.
     #
     # Local DB available (no daemon, or we got handed a real DuckDBBackend) →
@@ -327,6 +342,15 @@ def cmd_optimize(
     pricing_mode = pricing_mode_for(dominant)
     declared_plan = config_declared_plan(config)
     persona = dominant_persona(agent_mix, declared_plan=declared_plan)
+
+    if export_templates and "reuse" in _disabled_analyzers(persona):
+        # Persona gating drops `reuse` inside build_report even when the user
+        # names it explicitly — fail here instead of the misleading "nothing to
+        # export" path in _export_reuse_templates.
+        raise click.ClickException(
+            "--export-templates is not available for the "
+            f"{persona} persona (reuse is disabled for this window)."
+        )
 
     # --export-config branch: write the snippet to disk and exit. Skips
     # the normal rendering path. The user reads the snippet file and
