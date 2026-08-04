@@ -1805,6 +1805,42 @@ def test_optimize_export_templates_requires_reuse_finding(runner, db, config):
     assert "No repeated planning detected" not in result.output
 
 
+def test_optimize_export_templates_reuse_disabled_for_claude_code_persona(
+    runner, db, tmp_path, monkeypatch,
+):
+    """#578 follow-up: on a claude-code-dominant window, reuse is persona-
+    gated out of build_report even when named explicitly — must fail fast
+    instead of printing the misleading nothing-to-export message."""
+    from datetime import timedelta
+
+    monkeypatch.setenv("TOKENJAM_REPORT_DIR", str(tmp_path))
+
+    for i in range(6):
+        started = utcnow() - timedelta(days=i + 1)
+        db.upsert_session(make_session(
+            agent_id="claude-code-x", session_id=f"cc-{i}", plan_tier="api",
+            started_at=started,
+        ))
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", provider="anthropic", model="claude-opus-4-7",
+            input_tokens=4000, output_tokens=800, cost_usd=0.12,
+            session_id=f"cc-{i}", start_time=started,
+        ))
+
+    result = _invoke(runner, db, _reuse_config(completions=True),
+                     ["optimize", "reuse", "--export-templates"])
+    assert result.exit_code != 0, result.output
+    assert "not available for the claude-code persona" in result.output
+    assert "No repeated planning detected" not in result.output
+    assert list(tmp_path.glob("reuse-*.md")) == []
+
+    result = _invoke(runner, db, _reuse_config(completions=True),
+                     ["optimize", "--export-templates"])
+    assert result.exit_code != 0, result.output
+    assert "not available for the claude-code persona" in result.output
+    assert "No repeated planning detected" not in result.output
+
+
 def test_report_reuse_api_mode_writes_artifacts(runner, db, tmp_path, monkeypatch):
     """#154: with the daemon holding the DB lock, `tj report --reuse` fetches
     the finding + skeleton text from /api/v1/reuse/clusters via ApiBackend and

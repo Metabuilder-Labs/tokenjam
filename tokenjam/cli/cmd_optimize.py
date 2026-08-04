@@ -342,6 +342,15 @@ def cmd_optimize(
     declared_plan = config_declared_plan(config)
     persona = dominant_persona(agent_mix, declared_plan=declared_plan)
 
+    if export_templates and "reuse" in _disabled_analyzers(persona):
+        # Persona gating drops `reuse` inside build_report even when the user
+        # names it explicitly — fail here instead of the misleading "nothing to
+        # export" path in _export_reuse_templates.
+        raise click.ClickException(
+            "--export-templates is not available for the "
+            f"{persona} persona (reuse is disabled for this window)."
+        )
+
     # --export-config branch: write the snippet to disk and exit. Skips
     # the normal rendering path. The user reads the snippet file and
     # copies the routing block into their routing layer manually.
