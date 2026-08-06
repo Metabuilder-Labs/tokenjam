@@ -13,6 +13,7 @@ import tempfile
 import threading
 import uuid
 import weakref
+from contextlib import ExitStack
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol, Sequence, cast, runtime_checkable
@@ -2464,6 +2465,41 @@ def handle_if_fatal(exc: BaseException, *, what: str) -> bool:
     return True
 
 
+def recover_if_fatal_noted(*, what: str) -> bool:
+    """Recover if a fatal was recorded anywhere in this process, however it was
+    caught. Returns whether a recovery ran.
+
+    **The swallow-proof backstop, and the reason it has to exist.**
+    `handle_if_fatal` only fires when the exception REACHES the handler that
+    calls it, and in this codebase a fatal from an analyzer's database write
+    crosses several broad `except Exception` handlers on its way out — the
+    per-analyzer one that records a failure and continues with the rest, and
+    the store one that keeps a pass alive. Any of them can absorb it, and
+    adding the classification to each is a game nobody wins: the next handler
+    someone writes reopens the hole silently.
+
+    Exception propagation is therefore the wrong channel. `note_fatal_db_error`
+    is called at the point the fatal is RECOGNISED, before it is re-raised, so
+    the process-wide record survives every handler that swallows the exception
+    itself. Call this from the `finally` of any long-running job and the
+    recovery happens whether or not the exception ever escaped.
+    """
+    if fatal_db_error() is None:
+        return False
+    logger.error(
+        "%s: a fatal DuckDB error was recorded during this pass; the exception "
+        "may have been absorbed by an intermediate handler. Recovering.", what,
+    )
+    if recover_invalidated_database():
+        logger.warning("%s: database connections re-established", what)
+    else:
+        logger.error(
+            "%s: the database could not be re-established; /health reports "
+            "unhealthy until `tj serve` is restarted.", what,
+        )
+    return True
+
+
 def recover_invalidated_database(*, repair: bool = True) -> bool:
     """Re-establish every connection in this process; returns whether it worked.
 
@@ -2489,29 +2525,42 @@ def recover_invalidated_database(*, repair: bool = True) -> bool:
     """
     with _FATAL_LOCK:
         backends = [b for b in _LIVE_BACKENDS if b.recoverable]
-        for backend in backends:
-            backend._teardown_connections()
         ok = True
-        for backend in backends:
-            if not backend._reopen():
-                ok = False
         rebuilt: list[str] = []
-        if ok and repair:
-            # One rebuild per database, not per backend: every registered
-            # backend on this path shares the instance we just reopened.
+        # Hold every backend's connection lock across teardown AND reopen, so
+        # no thread can be handed a cursor from the window in between. Without
+        # this, `conn` on another thread sees the bumped generation, calls
+        # `.cursor()` on the already-closed root connection, and either raises
+        # into a 500 or drops a write -- which would make the recovery path
+        # itself do the thing this whole change exists to prevent. `conn`
+        # blocks for the duration instead, which is the right trade: recovery
+        # is sub-second and the alternative is serving a dead handle.
+        with ExitStack() as locks:
             for backend in backends:
-                try:
-                    faults, _unproven = check_index_divergence(backend.conn)
-                    if faults:
-                        logger.error(
-                            "index damage found while recovering: %s",
-                            "; ".join(f"{n} on {t} {r}" for n, t, r in faults),
-                        )
-                    rebuilt = repair_explicit_indexes(backend.conn)
-                except duckdb.Error as exc:
-                    logger.error("index repair failed after recovery: %s", exc)
+                locks.enter_context(backend._conn_lock)
+            for backend in backends:
+                backend._teardown_connections()
+            for backend in backends:
+                if not backend._reopen():
                     ok = False
-                break
+            if ok and repair:
+                # One rebuild per database, not per backend: every registered
+                # backend on this path shares the instance we just reopened.
+                # Still under the locks: a half-repaired index set is no safer
+                # to hand out than a closed connection.
+                for backend in backends:
+                    try:
+                        faults, _unproven = check_index_divergence(backend.conn)
+                        if faults:
+                            logger.error(
+                                "index damage found while recovering: %s",
+                                "; ".join(f"{n} on {t} {r}" for n, t, r in faults),
+                            )
+                        rebuilt = repair_explicit_indexes(backend.conn)
+                    except duckdb.Error as exc:
+                        logger.error("index repair failed after recovery: %s", exc)
+                        ok = False
+                    break
         if ok:
             clear_fatal_db_error()
             logger.warning(

@@ -540,6 +540,12 @@ def start_catch_up(
             if not handle_if_fatal(exc, what="transcript catch-up"):
                 logger.warning("transcript catch-up failed", exc_info=True)
         finally:
+            # Swallow-proof backstop, same reasoning as the analyzer cycle's:
+            # recovery keys off the process-wide record, not off this frame
+            # having caught the exception.
+            from tokenjam.core.db import recover_if_fatal_noted
+
+            recover_if_fatal_noted(what="transcript catch-up")
             if backend is not None:
                 try:
                     backend.close()

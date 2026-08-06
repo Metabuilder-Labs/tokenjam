@@ -268,6 +268,50 @@ def test_recovery_rebuilds_every_index_not_only_the_flagged_ones(backend, monkey
     assert repaired == [None], "recovery must not scope the repair to the faults"
 
 
+def test_no_thread_gets_a_cursor_from_a_half_torn_down_backend(backend, monkeypatch):
+    """The window between teardown and reopen must not be observable.
+
+    Recovery closes every connection and only then reopens them. Between those
+    two steps `conn` used to be reachable with the root connection already
+    closed, so a request or ingest thread arriving mid-recovery got a cursor
+    from a dead handle — a 500 or a dropped write caused BY the recovery. That
+    would make this change do the very thing it exists to prevent.
+
+    Driven under a genuinely widened window rather than by luck: `_reopen` is
+    slowed so the racing thread is guaranteed to arrive inside it.
+    """
+    import threading as _t
+
+    backend.conn.execute("SELECT 1").fetchone()
+    real_reopen = type(backend)._reopen
+    inside = _t.Event()
+
+    def slow_reopen(self):
+        inside.set()
+        time.sleep(0.4)
+        return real_reopen(self)
+
+    monkeypatch.setattr(type(backend), "_reopen", slow_reopen)
+
+    errors: list[str] = []
+    results: list = []
+
+    def racer():
+        inside.wait(5)
+        try:
+            results.append(backend.conn.execute("SELECT 1").fetchone())
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    t = _t.Thread(target=racer)
+    t.start()
+    assert recover_invalidated_database() is True
+    t.join(10)
+
+    assert errors == [], f"a thread was handed a dead connection: {errors}"
+    assert results == [(1,)]
+
+
 def test_in_memory_backend_is_not_torn_down_by_recovery():
     """Its database IS its connection — 'recovering' it would delete the data."""
     from tokenjam.core.db import InMemoryBackend
@@ -356,6 +400,79 @@ def test_scan_cycle_does_not_swallow_a_fatal(backend, monkeypatch):
             break
         time.sleep(0.05)
     assert seen == ["analyzer scan cycle"]
+
+
+def test_recovery_runs_even_when_every_handler_swallowed_the_fatal(backend):
+    """The swallow-proof backstop.
+
+    A fatal from an analyzer's write crosses several broad `except Exception`
+    handlers before any of ours — the per-analyzer one in the optimize runner
+    records it and continues with the rest, so the exception never reaches the
+    scan cycle's handler at all. Recovery therefore cannot depend on catching
+    it: `note_fatal_db_error` records the fatal where it is RECOGNISED, and
+    this keys off that record.
+    """
+    from tokenjam.core.db import recover_if_fatal_noted
+
+    backend._teardown_connections()
+    note_fatal_db_error(duckdb.FatalException("FATAL Error: simulated"))
+    # Nobody re-raised; the exception was absorbed. Recovery must still happen.
+    assert recover_if_fatal_noted(what="a pass") is True
+    assert backend.check_health() is True
+    assert fatal_db_error() is None
+
+
+def test_backstop_is_a_no_op_when_nothing_was_recorded(backend):
+    from tokenjam.core.db import recover_if_fatal_noted
+
+    assert recover_if_fatal_noted(what="a pass") is False
+
+
+def test_optimize_runner_does_not_absorb_a_fatal_as_one_analyzer_failing(backend, monkeypatch):
+    """The finding the review bot raised, driven through the REAL runner.
+
+    The runner isolates each analyzer so one failure cannot lose the others.
+    For a fatal that isolation is wrong twice over: every analyzer after it
+    runs against a dead database, and the report ends up carrying a "did not
+    complete" note per analyzer for a reason that has nothing to do with them.
+    Worse, absorbing it here is why the fatal never reached the scan cycle's
+    handler, so nothing recovered the connection.
+
+    Asserted by BEHAVIOUR: `build_report` must propagate, and must not go on to
+    run the analyzers queued behind the one that died.
+    """
+    from datetime import timedelta
+
+    from tokenjam.core.optimize import runner
+    from tokenjam.core.config import TjConfig
+
+    ran: list[str] = []
+
+    def fatal_analyzer(_ctx):
+        ran.append("fatal-one")
+        raise duckdb.FatalException(
+            "FATAL Error: Invalid Input Error: Failed to delete all rows from index."
+        )
+
+    def innocent_analyzer(_ctx):
+        ran.append("innocent")
+
+    monkeypatch.setattr(
+        runner, "ANALYZER_REGISTRY",
+        {"fatal-one": fatal_analyzer, "innocent": innocent_analyzer},
+    )
+    monkeypatch.setattr(runner, "ANALYZER_ORDER", ["fatal-one", "innocent"])
+
+    with pytest.raises(duckdb.FatalException):
+        runner.build_report(
+            backend, TjConfig(version="1"),
+            since=utcnow() - timedelta(days=1), until=utcnow(),
+        )
+
+    assert ran == ["fatal-one"], (
+        "the runner must stop on a fatal, not keep running analyzers against a "
+        f"database that is already dead (ran: {ran})"
+    )
 
 
 # --- the health surface ----------------------------------------------------

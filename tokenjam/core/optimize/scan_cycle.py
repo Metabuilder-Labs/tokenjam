@@ -344,6 +344,13 @@ def _trigger_analyzer_pass(
 
             handle_if_fatal(exc, what="analyzer scan cycle")
         finally:
+            # Swallow-proof: a fatal raised by an analyzer's write crosses
+            # several broad handlers on its way here and any of them can absorb
+            # it, so recovery keys off the process-wide record rather than off
+            # this frame having seen the exception.
+            from tokenjam.core.db import recover_if_fatal_noted
+
+            recover_if_fatal_noted(what="analyzer scan cycle")
             # Cleared here and NOWHERE else on the success path: the flag has to
             # outlive the report write, since the two stores built after it are
             # exactly the ones a report-only flag went silent about.

@@ -336,6 +336,23 @@ def build_report(
         try:
             analyzer(ctx)
         except Exception as exc:  # noqa: BLE001 - recorded, not hidden
+            from tokenjam.core.db import is_fatal_db_error
+
+            if is_fatal_db_error(exc):
+                # NOT survivable, and not this analyzer's failure. A fatal
+                # invalidates the whole database instance, so every analyzer
+                # after this one would fail too and the "did not complete"
+                # note would be attached to all of them for the wrong reason.
+                # Recording it as one analyzer's problem and continuing is how
+                # this fatal reached the end of a pass without anything
+                # recovering the connection.
+                report.analyzer_errors[name] = f"{type(exc).__name__}: {exc}"
+                report.notes.append(
+                    f"The database became unusable while running `{name}`, so "
+                    f"this report is incomplete. Nothing here says an analyzer "
+                    f"found nothing."
+                )
+                raise
             log.exception("analyzer %s failed; continuing with the rest", name)
             report.analyzer_errors[name] = f"{type(exc).__name__}: {exc}"
             report.notes.append(
