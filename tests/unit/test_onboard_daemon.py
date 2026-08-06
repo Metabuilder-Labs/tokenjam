@@ -194,6 +194,47 @@ class TestLaunchdInstallUsesWFlag:
             f"load should use -w; calls were {calls}"
         )
 
+    def test_written_but_unloaded_plist_is_detected(self, tmp_path, monkeypatch, capsys):
+        """Regression for #614: `launchctl load` can return zero while the
+        label is still absent. Onboard must verify residency before claiming
+        the daemon was installed."""
+        from tokenjam.cli.cmd_onboard import _install_launchd
+
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
+        results = iter([
+            MagicMock(returncode=0),  # unload: an absent prior job is fine
+            MagicMock(returncode=0),  # load accepted
+            MagicMock(returncode=3),  # but the label is not resident
+        ])
+
+        with patch("tokenjam.cli.cmd_onboard.subprocess.run", side_effect=results):
+            installed = _install_launchd("/tmp/cfg.toml")
+
+        assert installed is None
+        assert (tmp_path / "Library/LaunchAgents/com.tokenjam.serve.plist").exists()
+        output = capsys.readouterr().out
+        assert "did not load com.tokenjam.serve" in output
+
+
+class TestSystemdInstallVerification:
+    def test_written_but_disabled_unit_is_detected(self, tmp_path, monkeypatch, capsys):
+        from tokenjam.cli.cmd_onboard import _install_systemd
+
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
+        results = iter([
+            MagicMock(returncode=0),  # enable --now accepted
+            MagicMock(returncode=1, stdout="disabled\n"),
+        ])
+
+        with patch("tokenjam.cli.cmd_onboard.subprocess.run", side_effect=results):
+            installed = _install_systemd("/tmp/cfg.toml")
+
+        assert installed is None
+        assert (tmp_path / ".config/systemd/user/tokenjam.service").exists()
+        assert "did not enable tokenjam" in capsys.readouterr().out
+
 
 class TestTjBinaryResolution:
     """The daemon installers must point launchd/systemd at a real `tj` binary.

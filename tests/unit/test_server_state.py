@@ -11,7 +11,13 @@ shape so a regression back to substring matching is caught for real.
 """
 from __future__ import annotations
 
-from tokenjam.core.server_state import _looks_like_serve
+import subprocess
+
+from tokenjam.core.server_state import (
+    _looks_like_serve,
+    inspect_daemon_unit,
+    list_serve_processes,
+)
 
 
 class TestMatchesRealDaemonInvocations:
@@ -54,3 +60,63 @@ class TestDoesNotMatchUnrelatedProcesses:
         # "tj" must be a bare token (or a path basename), not a substring
         # of some unrelated word.
         assert _looks_like_serve("/usr/bin/notjserve --serve") is False
+
+
+class TestDaemonUnitInspection:
+    def test_written_launchd_plist_is_not_mistaken_for_a_loaded_job(
+        self, tmp_path, monkeypatch,
+    ):
+        plist = tmp_path / "Library/LaunchAgents/com.tokenjam.serve.plist"
+        plist.parent.mkdir(parents=True)
+        plist.write_text("<plist/>")
+        monkeypatch.setattr(
+            "tokenjam.core.server_state.subprocess.run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 3, "", "not found"),
+        )
+
+        state = inspect_daemon_unit(system="Darwin", home=tmp_path)
+
+        assert state.installed is True
+        assert state.loaded is False
+        assert state.manager == "launchd"
+
+    def test_systemd_reports_enabled_and_active_separately(self, tmp_path, monkeypatch):
+        unit = tmp_path / ".config/systemd/user/tokenjam.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\n")
+
+        def _run(argv, **kwargs):
+            if "is-enabled" in argv:
+                return subprocess.CompletedProcess(argv, 0, "enabled\n", "")
+            return subprocess.CompletedProcess(argv, 0, "active\n", "")
+
+        monkeypatch.setattr("tokenjam.core.server_state.subprocess.run", _run)
+        state = inspect_daemon_unit(system="Linux", home=tmp_path)
+
+        assert state.loaded is True
+        assert state.active is True
+
+
+class TestServeProcessInventory:
+    def test_lists_every_tj_serve_instance_and_ignores_unrelated_processes(self, monkeypatch):
+        output = (
+            " 101 /usr/local/bin/tj --config /tmp/a.toml serve\n"
+            " 202 /opt/venv/bin/tj serve --port 9341\n"
+            " 303 python manage.py serve\n"
+        )
+        monkeypatch.setattr(
+            "tokenjam.core.server_state.subprocess.run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, output, ""),
+        )
+
+        processes = list_serve_processes()
+
+        assert processes is not None
+        assert [process.pid for process in processes] == [101, 202]
+
+    def test_process_inventory_is_unknown_when_ps_cannot_run(self, monkeypatch):
+        def _denied(*args, **kwargs):
+            raise PermissionError("ps denied")
+
+        monkeypatch.setattr("tokenjam.core.server_state.subprocess.run", _denied)
+        assert list_serve_processes() is None

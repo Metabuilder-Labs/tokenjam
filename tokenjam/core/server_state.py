@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,129 @@ class ServerState:
     pid: int
     port: int | None
     config_path: str | None
+
+
+@dataclass(frozen=True)
+class DaemonUnitState:
+    """Observed registration state of TokenJam's per-user service unit."""
+
+    manager: str | None
+    path: Path | None
+    installed: bool
+    loaded: bool | None
+    active: bool | None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class ServeProcess:
+    """One machine-visible process whose argv is a ``tj serve`` invocation."""
+
+    pid: int
+    command: str
+
+
+_SYSTEMD_ENABLED_STATES = {
+    "enabled", "enabled-runtime", "linked", "linked-runtime", "alias",
+}
+_SYSTEMD_LIVE_STATES = {"active", "activating", "reloading"}
+
+
+def inspect_daemon_unit(
+    *,
+    system: str | None = None,
+    home: Path | None = None,
+) -> DaemonUnitState:
+    """Inspect the service manager, not merely the unit file on disk.
+
+    A launchd plist or systemd unit is only an installation artifact. It does
+    not prove the job was loaded/enabled, which is the distinction that leaves
+    a machine looking configured while no daemon will start at login.
+    """
+    current_system = system or platform.system()
+    home_dir = home or Path.home()
+
+    if current_system == "Darwin":
+        path = home_dir / "Library/LaunchAgents/com.tokenjam.serve.plist"
+        if not path.exists():
+            return DaemonUnitState("launchd", path, False, False, None)
+        try:
+            result = subprocess.run(
+                ["launchctl", "list", "com.tokenjam.serve"],
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            return DaemonUnitState("launchd", path, True, None, None, str(exc))
+        return DaemonUnitState(
+            "launchd", path, True, result.returncode == 0, None,
+        )
+
+    if current_system == "Linux":
+        path = home_dir / ".config/systemd/user/tokenjam.service"
+        if not path.exists():
+            return DaemonUnitState("systemd", path, False, False, False)
+        try:
+            enabled = subprocess.run(
+                ["systemctl", "--user", "is-enabled", "tokenjam"],
+                capture_output=True,
+                text=True,
+            )
+            active = subprocess.run(
+                ["systemctl", "--user", "is-active", "tokenjam"],
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            return DaemonUnitState("systemd", path, True, None, None, str(exc))
+        enabled_state = enabled.stdout.strip()
+        is_enabled = (
+            enabled.returncode == 0
+            and (not enabled_state or enabled_state in _SYSTEMD_ENABLED_STATES)
+        )
+        return DaemonUnitState(
+            "systemd",
+            path,
+            True,
+            is_enabled,
+            active.stdout.strip() in _SYSTEMD_LIVE_STATES,
+        )
+
+    return DaemonUnitState(None, None, False, None, None)
+
+
+def list_serve_processes() -> list[ServeProcess] | None:
+    """Return every machine-visible ``tj serve`` process.
+
+    ``server.state`` deliberately scopes destructive commands to one install,
+    but doctor needs the inverse, read-only view: a second venv or foreground
+    server is exactly the conflict it must disclose. ``None`` means the process
+    table could not be inspected; an empty list is a successful observation.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+
+    processes: list[ServeProcess] = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        command = parts[1]
+        if pid != os.getpid() and _looks_like_serve(command):
+            processes.append(ServeProcess(pid=pid, command=command))
+    return processes
 
 
 def read_server_state(path: Path | None = None) -> ServerState | None:

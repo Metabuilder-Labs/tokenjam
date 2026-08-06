@@ -3696,6 +3696,22 @@ def _install_launchd(config_path: str, *, suppress_headsup: bool = False) -> str
         console.print("[dim]Or run the server directly:[/dim]")
         console.print("  tj serve &")
         return None
+    # A zero exit from `launchctl load` proves only that launchctl accepted the
+    # request. Verify the label is actually resident: the failure behind #614
+    # left a valid RunAtLoad/KeepAlive plist on disk while `launchctl list`
+    # showed no job, so onboarding reported a daemon that would never restart.
+    loaded = subprocess.run(
+        ["launchctl", "list", "com.tokenjam.serve"],
+        capture_output=True,
+        text=True,
+    )
+    if loaded.returncode != 0:
+        console.print(
+            f"[warn]Daemon plist written to {plist_path}, but launchd did not "
+            "load com.tokenjam.serve.[/warn]"
+        )
+        console.print("[dim]Re-run `tj onboard` or run `tj serve` manually.[/dim]")
+        return None
     # The --claude-code completion (#675) moves this heads-up to the very BOTTOM
     # of the payoff screen (after Next steps) so it reads top-to-bottom, hence
     # `suppress_headsup` there; every other onboard path prints it inline here as
@@ -3729,4 +3745,16 @@ WantedBy=default.target"""
         ["systemctl", "--user", "enable", "--now", "tokenjam"],
         check=True,
     )
+    enabled = subprocess.run(
+        ["systemctl", "--user", "is-enabled", "tokenjam"],
+        capture_output=True,
+        text=True,
+    )
+    if enabled.returncode != 0:
+        console.print(
+            f"[warn]Daemon unit written to {service_path}, but systemd did not "
+            "enable tokenjam.[/warn]"
+        )
+        console.print("[dim]Re-run `tj onboard` or run `tj serve` manually.[/dim]")
+        return None
     return f"Daemon installed at {service_path}"
