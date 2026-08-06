@@ -83,6 +83,12 @@ def _isolate_real_world_side_effects(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._stop_serve_for_db_write", lambda: False
     )
+    # Doctor's duplicate-instance check is intentionally machine-wide. Keep
+    # this integration file hermetic instead of letting a developer's real
+    # foreground/managed serve processes change its exit-code assertions.
+    monkeypatch.setattr(
+        "tokenjam.core.server_state.list_serve_processes", lambda: []
+    )
     # Storage paths resolve via os.path.expanduser($HOME); redirect them at the
     # default ``~/.tj/telemetry.duckdb`` so any stray open_db lands in tmp.
     monkeypatch.setenv("HOME", str(iso))

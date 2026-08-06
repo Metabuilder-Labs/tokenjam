@@ -3856,4 +3856,16 @@ WantedBy=default.target"""
         ["systemctl", "--user", "enable", "--now", "tokenjam"],
         check=True,
     )
+    enabled = subprocess.run(
+        ["systemctl", "--user", "is-enabled", "tokenjam"],
+        capture_output=True,
+        text=True,
+    )
+    if enabled.returncode != 0:
+        console.print(
+            f"[warn]Daemon unit written to {service_path}, but systemd did not "
+            "enable tokenjam.[/warn]"
+        )
+        console.print("[dim]Re-run `tj onboard` or run `tj serve` manually.[/dim]")
+        return None
     return f"Daemon installed at {service_path}"

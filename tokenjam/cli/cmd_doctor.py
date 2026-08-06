@@ -42,7 +42,11 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     # 3. Ingest secret set
     checks.append(_check_ingest_secret(config))
 
-    # 3b. OTLP endpoint reachability — resolve, connect, authenticate. Replaces
+    # 3b. Daemon lifecycle — the unit must be registered, server.state must
+    #     name a live serve process, and one machine must not run several.
+    checks.extend(_check_daemon_lifecycle(config))
+
+    # 3c. OTLP endpoint reachability — resolve, connect, authenticate. Replaces
     #     the per-invocation stderr warning that used to fire on a static file
     #     diff while nothing was listening at all.
     checks.append(_check_otlp_endpoint(config))
@@ -261,6 +265,154 @@ def _check_ingest_secret(config: object) -> dict:
 
     return {"name": "Ingest secret", "level": "ok",
             "message": "Ingest secret is configured."}
+
+
+def _check_daemon_lifecycle(config: object) -> list[dict]:
+    """Report the three lifecycle facts that files alone cannot prove."""
+    from tokenjam.core.server_state import (
+        inspect_daemon_unit,
+        is_pid_alive,
+        is_serve_process,
+        list_serve_processes,
+        read_server_state,
+        server_state_path,
+    )
+
+    checks: list[dict] = []
+    unit = inspect_daemon_unit()
+    if unit.manager is None:
+        checks.append({
+            "name": "Daemon service",
+            "level": "info",
+            "message": "This platform has no managed TokenJam daemon; run `tj serve` manually.",
+        })
+    elif unit.error is not None:
+        checks.append({
+            "name": "Daemon service",
+            "level": "warning",
+            "message": f"Could not inspect the {unit.manager} unit: {unit.error}.",
+        })
+    elif not unit.installed:
+        checks.append({
+            "name": "Daemon service",
+            "level": "info",
+            "message": f"No {unit.manager} unit is installed. Run `tj onboard` to install it.",
+        })
+    elif not unit.loaded:
+        action = "loaded" if unit.manager == "launchd" else "enabled"
+        checks.append({
+            "name": "Daemon service",
+            "level": "warning",
+            "message": (
+                f"The {unit.manager} unit exists at {unit.path} but is not {action}; "
+                "it will not start or restart automatically. Re-run `tj onboard`."
+            ),
+        })
+    elif unit.manager == "systemd" and unit.active is False:
+        checks.append({
+            "name": "Daemon service",
+            "level": "warning",
+            "message": (
+                f"The systemd unit is enabled at {unit.path} but is not active. "
+                "Re-run `tj onboard` or inspect `systemctl --user status tokenjam`."
+            ),
+        })
+    else:
+        service_state = "loaded" if unit.manager == "launchd" else "enabled and active"
+        checks.append({
+            "name": "Daemon service",
+            "level": "ok",
+            "message": f"The {unit.manager} unit is {service_state}: {unit.path}",
+        })
+
+    processes = list_serve_processes()
+    if processes is None:
+        checks.append({
+            "name": "Daemon instances",
+            "level": "info",
+            "message": "Could not inspect the process table for tj serve instances.",
+        })
+    elif len(processes) > 1:
+        pids = ", ".join(str(process.pid) for process in processes)
+        checks.append({
+            "name": "Daemon instances",
+            "level": "warning",
+            "message": (
+                f"Multiple tj serve instances are running (PIDs {pids}). Stop the "
+                "extra foreground/venv instances, then run `tj onboard` so one "
+                "managed daemon owns the configured endpoint."
+            ),
+        })
+    elif len(processes) == 1:
+        checks.append({
+            "name": "Daemon instances",
+            "level": "ok",
+            "message": f"One tj serve instance is running (PID {processes[0].pid}).",
+        })
+    else:
+        level = "warning" if unit.installed and unit.loaded else "info"
+        message = (
+            "The daemon unit is registered but no tj serve process is running. "
+            "Re-run `tj onboard` and inspect the daemon logs."
+            if level == "warning"
+            else "No tj serve process is running."
+        )
+        checks.append({"name": "Daemon instances", "level": level, "message": message})
+
+    state_path = server_state_path()
+    if not state_path.exists():
+        checks.append({
+            "name": "Server state",
+            "level": "info",
+            "message": f"No server state file found at {state_path}.",
+        })
+        return checks
+
+    server_state = read_server_state(state_path)
+    if server_state is None:
+        checks.append({
+            "name": "Server state",
+            "level": "warning",
+            "message": f"The server state file at {state_path} is malformed or incomplete.",
+        })
+    elif not is_pid_alive(server_state.pid):
+        checks.append({
+            "name": "Server state",
+            "level": "warning",
+            "message": (
+                f"The server state file points at dead PID {server_state.pid}"
+                f"{f' on port {server_state.port}' if server_state.port is not None else ''}. "
+                "It is stale; start the managed daemon with `tj onboard`."
+            ),
+        })
+    elif not is_serve_process(server_state.pid):
+        checks.append({
+            "name": "Server state",
+            "level": "warning",
+            "message": (
+                f"The server state file points at PID {server_state.pid}, but that PID is not "
+                "a tj serve process. Start the managed daemon with `tj onboard`."
+            ),
+        })
+    elif server_state.port is not None and server_state.port != config.api.port:
+        checks.append({
+            "name": "Server state",
+            "level": "warning",
+            "message": (
+                f"The live server state names port {server_state.port}, but config expects "
+                f"{config.api.port}. Re-run `tj onboard` to reconcile the daemon."
+            ),
+        })
+    else:
+        checks.append({
+            "name": "Server state",
+            "level": "ok",
+            "message": (
+                f"server.state points at live tj serve PID {server_state.pid}"
+                f"{f' on port {server_state.port}' if server_state.port is not None else ''}."
+            ),
+        })
+    return checks
 
 
 #: How long a reachability probe waits before calling the endpoint dead. Short

@@ -332,6 +332,24 @@ class TestLaunchdInstallSurvivesRegistration:
 
         assert result is None
 
+class TestSystemdInstallVerification:
+    def test_written_but_disabled_unit_is_detected(self, tmp_path, monkeypatch, capsys):
+        from tokenjam.cli.cmd_onboard import _install_systemd
+
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
+        results = iter([
+            MagicMock(returncode=0),  # enable --now accepted
+            MagicMock(returncode=1, stdout="disabled\n"),
+        ])
+
+        with patch("tokenjam.cli.cmd_onboard.subprocess.run", side_effect=results):
+            installed = _install_systemd("/tmp/cfg.toml")
+
+        assert installed is None
+        assert (tmp_path / ".config/systemd/user/tokenjam.service").exists()
+        assert "did not enable tokenjam" in capsys.readouterr().out
+
 
 class TestTjBinaryResolution:
     """The daemon installers must point launchd/systemd at a real `tj` binary.
