@@ -297,6 +297,17 @@ def cmd_optimize(
                 budget_usd_override=budget_usd,
             )
 
+            # The Review inbox reads this finding from relearn_store rather
+            # than recomputing it on every request. A direct CLI run has just
+            # computed the full finding, so publish that exact result before
+            # rendering it. In daemon mode the CLI only reads a stored report,
+            # and analyzer subsets that omit relearn leave the cache untouched.
+            relearn_finding = (report.findings or {}).get("relearn")
+            if relearn_finding is not None:
+                from tokenjam.core.optimize import relearn_store
+
+                relearn_store.write_cache(relearn_finding, config=config)
+
             plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
             agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
 

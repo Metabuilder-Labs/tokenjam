@@ -1486,6 +1486,94 @@ def test_optimize_recomputes_cost_proposals_and_points_at_them(runner, db, confi
     assert "tj relearn cost-proposals" in " ".join(result.output.split())
 
 
+@pytest.mark.parametrize(
+    "finding_args",
+    [(), ("relearn",)],
+    ids=["full-optimize", "relearn-only"],
+)
+def test_optimize_persists_its_relearn_finding_for_the_review_inbox(
+    runner, db, config, tmp_path, monkeypatch, finding_args,
+):
+    """A locally-computed relearn finding and the Review inbox are one result.
+
+    Before this regression guard, both a full ``tj optimize`` and ``tj
+    optimize relearn`` rendered the fresh in-process finding but left the
+    file-backed inbox on its previous cluster set.  The cost-proposal refresh
+    even changed that shared file's mtime while preserving the stale
+    ``finding`` key, which made the divergence especially hard to spot.
+    """
+    from datetime import timedelta
+
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+    from tokenjam.core.optimize import relearn_store
+    from tokenjam.core.optimize.analyzers.relearn import RelearnCluster, RelearnFinding
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+    from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
+    config.storage.path = str(tmp_path / "optimize-relearn.duckdb")
+    now = utcnow()
+    db.insert_span(make_llm_span(
+        agent_id="test-agent",
+        model="claude-sonnet-5",
+        provider="anthropic",
+        session_id="fresh-session",
+        start_time=now - timedelta(days=1),
+    ))
+
+    def cluster(signature: str) -> RelearnCluster:
+        return RelearnCluster(
+            signature=signature,
+            family_key=signature,
+            title=signature,
+            sessions=3,
+            occurrences=4,
+            repos=["tokenjam"],
+            delivery=DELIVERY_CLAUDE_MD_RULE,
+            scope="project",
+            proposed_fix="Review the repeated failure.",
+            past_overspend_tokens=1_500,
+            past_overspend_usd=0.01,
+        )
+
+    relearn_store.write_cache(
+        RelearnFinding(clusters=[cluster("stale-cluster")], sessions_scanned=47),
+        config=config,
+    )
+    fresh_finding = RelearnFinding(
+        clusters=[cluster("fresh-a"), cluster("fresh-b")],
+        sessions_scanned=55,
+    )
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=now - timedelta(days=30),
+            until=now,
+            days=30.0,
+            sessions=1,
+            spans=1,
+            total_tokens=1_000,
+            total_cost_usd=0.01,
+            thin_data=True,
+        ),
+        findings={"relearn": fresh_finding},
+    )
+    monkeypatch.setattr("tokenjam.cli.cmd_optimize.build_report", lambda **_kwargs: report)
+    # Keep this test on the relearn cache contract; cost-proposal recomputation
+    # has its own end-to-end guard immediately above.
+    monkeypatch.setattr(
+        cost_proposals_mod, "recompute_cost_proposals", lambda *_args, **_kwargs: [],
+    )
+
+    result = _invoke(runner, db, config, ["optimize", *finding_args, "--json"])
+    assert result.exit_code == 0, result.output
+
+    cached = relearn_store.read_cache(config=config)
+    assert cached is not None
+    assert cached["finding"]["sessions_scanned"] == 55
+    assert [c["signature"] for c in cached["finding"]["clusters"]] == [
+        "fresh-a", "fresh-b",
+    ]
+
+
 def test_optimize_json_reports_cost_proposals_available(runner, db, config):
     _seed_low_cache_efficacy_window(db)
 
