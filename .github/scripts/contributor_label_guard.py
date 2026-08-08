@@ -253,6 +253,9 @@ def _handle_claim(repo: str, number: int, token: str) -> None:
     if status == 404 or not isinstance(issue, dict):
         print(f"no-op: issue #{number} not found (status {status})")
         return
+    if status != 200:
+        print(f"no-op: issue #{number} API error (status {status})")
+        return
     if _is_pull_request(issue):
         print(f"no-op: #{number} is a pull request, not an issue")
         return
@@ -280,6 +283,9 @@ def _handle_release(repo: str, number: int, token: str, actor_login: str) -> Non
     status, issue = fetch_issue(repo, number, token)
     if status == 404 or not isinstance(issue, dict):
         print(f"no-op: issue #{number} not found (status {status})")
+        return
+    if status != 200:
+        print(f"no-op: issue #{number} API error (status {status})")
         return
     if _is_pull_request(issue):
         print(f"no-op: #{number} is a pull request, not an issue")
