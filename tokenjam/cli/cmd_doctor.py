@@ -269,6 +269,9 @@ def _check_ingest_secret(config: object) -> dict:
 
 def _check_daemon_lifecycle(config: object) -> list[dict]:
     """Report the three lifecycle facts that files alone cannot prove."""
+    from typing import cast
+
+    from tokenjam.core.config import TjConfig
     from tokenjam.core.server_state import (
         inspect_daemon_unit,
         is_pid_alive,
@@ -277,6 +280,8 @@ def _check_daemon_lifecycle(config: object) -> list[dict]:
         read_server_state,
         server_state_path,
     )
+
+    typed_config = cast("TjConfig", config)
 
     checks: list[dict] = []
     unit = inspect_daemon_unit()
@@ -394,24 +399,47 @@ def _check_daemon_lifecycle(config: object) -> list[dict]:
                 "a tj serve process. Start the managed daemon with `tj onboard`."
             ),
         })
-    elif server_state.port is not None and server_state.port != config.api.port:
-        checks.append({
-            "name": "Server state",
-            "level": "warning",
-            "message": (
-                f"The live server state names port {server_state.port}, but config expects "
-                f"{config.api.port}. Re-run `tj onboard` to reconcile the daemon."
-            ),
-        })
     else:
-        checks.append({
-            "name": "Server state",
-            "level": "ok",
-            "message": (
-                f"server.state points at live tj serve PID {server_state.pid}"
-                f"{f' on port {server_state.port}' if server_state.port is not None else ''}."
-            ),
-        })
+        port_mismatch = (
+            server_state.port is not None and server_state.port != typed_config.api.port
+        )
+        # A live daemon on the right port but a DIFFERENT config file is not
+        # healthy: it's validating the wrong database and ingest secret. Port
+        # alone can't see this — two configs can legitimately share a port
+        # across separate installs/worktrees.
+        config_mismatch = (
+            server_state.config_path is not None
+            and typed_config.config_path is not None
+            and server_state.config_path != str(typed_config.config_path)
+        )
+        if port_mismatch or config_mismatch:
+            details = []
+            if port_mismatch:
+                details.append(
+                    f"port {server_state.port} (config expects {typed_config.api.port})"
+                )
+            if config_mismatch:
+                details.append(
+                    f"config {server_state.config_path} "
+                    f"(this process resolved {typed_config.config_path})"
+                )
+            checks.append({
+                "name": "Server state",
+                "level": "warning",
+                "message": (
+                    "The live server state doesn't match this install's config: "
+                    f"{'; '.join(details)}. Re-run `tj onboard` to reconcile the daemon."
+                ),
+            })
+        else:
+            checks.append({
+                "name": "Server state",
+                "level": "ok",
+                "message": (
+                    f"server.state points at live tj serve PID {server_state.pid}"
+                    f"{f' on port {server_state.port}' if server_state.port is not None else ''}."
+                ),
+            })
     return checks
 
 

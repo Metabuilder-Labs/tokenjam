@@ -53,8 +53,14 @@ class ServeProcess:
 
 
 _SYSTEMD_ENABLED_STATES = {
-    "enabled", "enabled-runtime", "linked", "linked-runtime", "alias",
+    "enabled", "enabled-runtime",
 }
+# `linked`/`linked-runtime`/`alias` are deliberately excluded: systemd reports
+# those for a unit that is registered but NOT attached to the login target, so
+# it will not autostart at the next login. We only ever install via `enable
+# --now` (cmd_onboard.py's `_install_systemd`), so this can't fire today, but
+# treating them as enabled would tell the user something untrue if the unit
+# ever ends up in one of those states by other means.
 _SYSTEMD_LIVE_STATES = {"active", "activating", "reloading"}
 
 

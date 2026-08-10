@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from tokenjam.cli.cmd_doctor import _check_daemon_lifecycle
 from tokenjam.core.config import ApiConfig, TjConfig
@@ -99,3 +100,36 @@ def test_doctor_reports_live_state_on_the_wrong_port(tmp_path, monkeypatch):
     assert state["level"] == "warning"
     assert "port 9341" in state["message"]
     assert "expects 7391" in state["message"]
+
+
+def test_doctor_reports_live_state_under_a_different_config(tmp_path, monkeypatch):
+    """A same-port daemon running under a DIFFERENT config file is not
+    healthy — it validates the wrong database and ingest secret, and port
+    matching alone can't see this (two configs can legitimately share a port
+    across separate installs/worktrees)."""
+    state_path = tmp_path / "server.state"
+    state_path.write_text(json.dumps({
+        "pid": 555, "port": 7391, "config_path": "/other/project/.tj/config.toml",
+    }))
+    monkeypatch.setattr(
+        "tokenjam.core.server_state.inspect_daemon_unit",
+        lambda: DaemonUnitState(None, None, False, None, None),
+    )
+    monkeypatch.setattr(
+        "tokenjam.core.server_state.list_serve_processes",
+        lambda: [ServeProcess(555, "/opt/venv/bin/tj serve")],
+    )
+    monkeypatch.setattr("tokenjam.core.server_state.is_pid_alive", lambda pid: True)
+    monkeypatch.setattr("tokenjam.core.server_state.is_serve_process", lambda pid: True)
+    _patch_state_path(monkeypatch, state_path)
+
+    config = TjConfig(
+        version="1", api=ApiConfig(port=7391),
+        config_path=Path("/this/project/.tj/config.toml"),
+    )
+    checks = _check_daemon_lifecycle(config)
+    state = next(check for check in checks if check["name"] == "Server state")
+
+    assert state["level"] == "warning"
+    assert "/other/project/.tj/config.toml" in state["message"]
+    assert "/this/project/.tj/config.toml" in state["message"]

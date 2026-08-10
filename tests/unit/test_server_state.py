@@ -96,6 +96,28 @@ class TestDaemonUnitInspection:
         assert state.loaded is True
         assert state.active is True
 
+    def test_systemd_linked_or_aliased_unit_does_not_count_as_enabled(
+        self, tmp_path, monkeypatch,
+    ):
+        """`linked`/`linked-runtime`/`alias` are unit states `is-enabled`
+        reports successfully (returncode 0) for a unit that is registered but
+        NOT attached to the login target — it will not autostart at the next
+        login. Reporting these as enabled would tell the user something
+        untrue."""
+        unit = tmp_path / ".config/systemd/user/tokenjam.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\n")
+
+        def _run(argv, **kwargs):
+            if "is-enabled" in argv:
+                return subprocess.CompletedProcess(argv, 0, "linked\n", "")
+            return subprocess.CompletedProcess(argv, 0, "active\n", "")
+
+        monkeypatch.setattr("tokenjam.core.server_state.subprocess.run", _run)
+        state = inspect_daemon_unit(system="Linux", home=tmp_path)
+
+        assert state.loaded is False
+
 
 class TestServeProcessInventory:
     def test_lists_every_tj_serve_instance_and_ignores_unrelated_processes(self, monkeypatch):
