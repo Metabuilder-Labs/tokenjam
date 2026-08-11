@@ -44,7 +44,18 @@ tj.toml
 .tj/
 
 # Claude Code
-.claude/
+# Everything under .claude/ is local/internal (strategy docs, settings.local.json,
+# scratch data) and must NEVER be published. The ONE exception is .claude/rules/,
+# which holds the path-scoped subsystem guides split out of CLAUDE.md — those are
+# shared contributor documentation and have to be tracked to reach anyone else.
+# Keep this as `.claude/*` (not `.claude/`): git does not descend into an ignored
+# DIRECTORY, so a bare `.claude/` makes the un-ignore below unreachable.
+.claude/*
+!.claude/rules/
+# Belt and braces: only markdown may ever be tracked under rules/, so a stray
+# note, key, or data file dropped in there stays ignored.
+.claude/rules/*
+!.claude/rules/*.md
 .omc/
 .mcp.json
 
