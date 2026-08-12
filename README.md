@@ -59,6 +59,23 @@ tj rules list        # the fixes that came out of it, and the files they'd land 
 
 ---
 
+### Claude Code plugin
+
+TokenJam also ships as a Claude Code plugin — see [`plugin/`](plugin/) for the plugin source (`plugin/.claude-plugin/plugin.json`) and install instructions. It adds slash commands that wrap the `tj` CLI; it does not install anything on its own, so `tj` still needs to be on your `PATH` (`npx tokenjam@latest` or `pipx install tokenjam`).
+
+```
+/plugin install tokenjam
+/onboard    # wires the statusline, resume-brief hook, and local telemetry ingest — same as `tj onboard --claude-code`
+/status     # tj status
+/optimize   # tj optimize
+/doctor     # tj doctor
+/uninstall  # tj uninstall --yes
+```
+
+The plugin deliberately does not ship its own hooks or an `.mcp.json`: the statusline and hooks are wired by `/onboard` calling the existing, idempotent `tj onboard --claude-code`, so there's exactly one writer of `~/.claude/settings.json`. TokenJam's MCP server (`tj mcp`) also stays opt-in and out of this plugin's default install — it's built for SDK/API integrations that already sit in the request path, not for Claude Code, where an in-loop MCP measurably taxes every turn.
+
+---
+
 ## Which path are you?
 
 `tj onboard` is the entry point for everyone; the table is what it wires for each answer. Your answer
