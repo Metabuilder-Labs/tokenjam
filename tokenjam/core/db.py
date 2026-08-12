@@ -3671,11 +3671,11 @@ class DuckDBBackend:
 
         # Cache-read + cache-write are summed alongside in/out so callers can
         # show the full token picture (cache-write is often the dominant cost
-        # driver yet was invisible above the DB — issue #17). call_count is
-        # the only genuinely honest metric for the "tool" grouping: tool-call
-        # spans carry no cost/tokens of their own — cost is attributed to the
-        # LLM completion span the tool call accompanied, not the tool
-        # invocation itself.
+        # driver yet was invisible above the DB before this column existed).
+        # call_count is the only genuinely honest metric for the "tool"
+        # grouping: tool-call spans carry no cost/tokens of their own — cost
+        # is attributed to the LLM completion span the tool call accompanied,
+        # not the tool invocation itself.
         token_cols = (
             "COALESCE(SUM(input_tokens), 0), "
             "COALESCE(SUM(output_tokens), 0), "

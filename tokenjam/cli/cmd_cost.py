@@ -92,7 +92,8 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
         return _cost_cell(value)
 
     # CACHE R / CACHE W columns make cost reconcilable from the shown tokens —
-    # cache-write is often the dominant driver and was previously invisible (#17).
+    # cache-write is often the dominant driver and was previously invisible
+    # before this column existed.
     cache_r = sum(r.cache_tokens for r in rows)
     cache_w = sum(r.cache_write_tokens for r in rows)
     if group_by == "day":
