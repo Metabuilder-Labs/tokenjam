@@ -82,6 +82,38 @@ def _resolve_analyzer_names(requested: list[str] | None) -> list[str] | None:
     ))
 
 
+def _guard_export_templates(selected: set[str], persona: str) -> None:
+    """Fail `--export-templates` when `reuse` will not produce a finding.
+
+    Two ways it cannot, and the order matters. The persona skip gate
+    (`PERSONA_DISABLED_ANALYZERS`, Critical Rule 26) drops `reuse` inside
+    `build_report` even when the user names it explicitly, so on a gated
+    window "add `reuse` to the finding list" names a command that cannot
+    work — check the gate first and say so. The disabled set is read from
+    `disabled_analyzers_for_persona`, never re-declared here.
+
+    Both cases previously fell through to `_export_reuse_templates`, which
+    printed "No repeated planning detected" — a claim about the DATA, made
+    when the analyzer that would have looked never ran (#578).
+    """
+    if "reuse" in _disabled_analyzers(persona):
+        raise click.ClickException(
+            "--export-templates exports the reuse finding, and reuse did not "
+            f"run on this window: it is skipped for the {persona} persona, "
+            "so it never queried your data and nothing was measured to "
+            "export. `tj optimize reuse` prints the same note. If you also "
+            "run SDK or API agents, scope the window to "
+            "one of them: tj --agent <agent_id> optimize reuse "
+            "--export-templates."
+        )
+    if "reuse" not in selected:
+        raise click.ClickException(
+            "--export-templates requires the reuse finding. Run "
+            "`tj optimize reuse --export-templates`, or include "
+            "`reuse` in the finding list."
+        )
+
+
 @click.command("optimize")
 @click.argument(
     "findings",
@@ -184,20 +216,13 @@ def cmd_optimize(
     requested = list(findings) if findings else None
     analyzer_findings = _resolve_analyzer_names(requested)
 
-    if export_templates:
-        # --export-templates only makes sense when the reuse analyzer runs.
-        # findings=None runs every registered analyzer (including reuse).
-        selected = (
-            set(analyzer_findings)
-            if analyzer_findings is not None
-            else set(ANALYZER_REGISTRY.keys())
-        )
-        if "reuse" not in selected:
-            raise click.ClickException(
-                "--export-templates requires the reuse finding. Run "
-                "`tj optimize reuse --export-templates`, or include "
-                "`reuse` in the finding list."
-            )
+    # --export-templates only makes sense when the reuse analyzer runs.
+    # findings=None runs every registered analyzer (including reuse).
+    selected_analyzers = (
+        set(analyzer_findings)
+        if analyzer_findings is not None
+        else set(ANALYZER_REGISTRY.keys())
+    )
 
     # Two paths depending on whether the daemon holds the DB lock.
     #
@@ -255,6 +280,13 @@ def cmd_optimize(
             return
 
         report = report_from_dict(report_dict)
+        # Daemon mode learns the persona only from the payload — `report.persona`
+        # is the value the runner actually gated on, so read it rather than
+        # re-deriving one here. Checked before the export branch below, whose
+        # "stop the daemon and re-run" advice would be false when the real
+        # blocker is the persona gate.
+        if export_templates:
+            _guard_export_templates(selected_analyzers, report.persona or "unknown")
         # Plan-tier mix is included in the /api/v1/optimize payload as of
         # #68 §12 follow-up #29, so the CLI can render subscription /
         # local / unknown framings correctly under daemon mode.
@@ -264,6 +296,18 @@ def cmd_optimize(
         # daemon is up.
         agent_mix = report_dict.get("agent_persona_mix") or {}
     else:
+        # Resolved before build_report — and before the no-data return below,
+        # so an unusable `--export-templates` still fails loudly on an empty
+        # window instead of exiting 0 — using the same window read
+        # build_report makes for itself (`agent_persona_mix` /
+        # `dominant_persona` are the one derivation both sides call).
+        agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
+        if export_templates:
+            _guard_export_templates(
+                selected_analyzers,
+                dominant_persona(agent_mix, declared_plan=config_declared_plan(config)),
+            )
+
         row = conn.execute(
             "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
         ).fetchone()
@@ -295,7 +339,6 @@ def cmd_optimize(
         )
 
         plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
-        agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
 
         # Opportunistic adoption detection: with a direct DuckDB connection in
         # hand, resolve any ripe past config exports into measured
@@ -341,15 +384,6 @@ def cmd_optimize(
     pricing_mode = pricing_mode_for(dominant)
     declared_plan = config_declared_plan(config)
     persona = dominant_persona(agent_mix, declared_plan=declared_plan)
-
-    if export_templates and "reuse" in _disabled_analyzers(persona):
-        # Persona gating drops `reuse` inside build_report even when the user
-        # names it explicitly — fail here instead of the misleading "nothing to
-        # export" path in _export_reuse_templates.
-        raise click.ClickException(
-            "--export-templates is not available for the "
-            f"{persona} persona (reuse is disabled for this window)."
-        )
 
     # --export-config branch: write the snippet to disk and exit. Skips
     # the normal rendering path. The user reads the snippet file and

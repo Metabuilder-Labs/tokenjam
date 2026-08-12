@@ -1827,18 +1827,31 @@ def test_optimize_export_templates_reuse_disabled_for_claude_code_persona(
             session_id=f"cc-{i}", start_time=started,
         ))
 
+    # Named explicitly — the case build_report silently drops.
     result = _invoke(runner, db, _reuse_config(completions=True),
                      ["optimize", "reuse", "--export-templates"])
     assert result.exit_code != 0, result.output
-    assert "not available for the claude-code persona" in result.output
+    assert "skipped for the claude-code persona" in result.output
     assert "No repeated planning detected" not in result.output
     assert list(tmp_path.glob("reuse-*.md")) == []
 
+    # No finding list at all — the same hole, since findings=None selects
+    # every analyzer and the persona gate then removes reuse.
     result = _invoke(runner, db, _reuse_config(completions=True),
                      ["optimize", "--export-templates"])
     assert result.exit_code != 0, result.output
-    assert "not available for the claude-code persona" in result.output
+    assert "skipped for the claude-code persona" in result.output
     assert "No repeated planning detected" not in result.output
+
+    # A finding list WITHOUT reuse, on this same gated window: the advice must
+    # be the persona reason, never "add `reuse` to the finding list" — that
+    # command is itself the broken path here.
+    result = _invoke(runner, db, _reuse_config(completions=True),
+                     ["optimize", "downsize", "--export-templates"])
+    assert result.exit_code != 0, result.output
+    assert "skipped for the claude-code persona" in result.output
+    assert "include" not in result.output.lower()
+    assert list(tmp_path.glob("reuse-*.md")) == []
 
 
 def test_report_reuse_api_mode_writes_artifacts(runner, db, tmp_path, monkeypatch):
