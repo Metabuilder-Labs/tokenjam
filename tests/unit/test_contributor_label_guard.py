@@ -347,20 +347,121 @@ def test_fetch_issue_timeline_non_200_returns_empty(monkeypatch):
     assert guard.fetch_issue_timeline(REPO, 42, "token") == []
 
 
-def test_handle_claim_issue_not_found_logs_distinguishable_noop(monkeypatch, capsys):
-    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (404, {"message": "Not Found"}))
-    guard._handle_claim(REPO, 999, "token")
+# Both handlers open by fetching the issue and share every precondition check
+# before they diverge, so each case below is run against BOTH. The bug this
+# guards against lived in both handlers and was noticed in only one.
+def _run_handler(name: str, number: int) -> None:
+    if name == "claim":
+        guard._handle_claim(REPO, number, "token")
+    else:
+        guard._handle_release(REPO, number, "token", guard.DEFAULT_ACTOR_LOGIN)
+
+
+HANDLERS = ["claim", "release"]
+
+# What GitHub actually puts in the body of an error response. A 4xx/5xx from
+# the REST API carries JSON, so the handler receives (status, dict) and every
+# `isinstance(payload, dict)` check passes — which is exactly why the status
+# has to be inspected first.
+FORBIDDEN_BODY = {
+    "message": "Forbidden",
+    "documentation_url": "https://docs.github.com/rest",
+}
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_issue_not_found_logs_distinguishable_noop(monkeypatch, capsys, handler):
+    monkeypatch.setattr(
+        guard, "fetch_issue", lambda repo, number, token: (404, {"message": "Not Found"})
+    )
+    _run_handler(handler, 999)
     assert "no-op: issue #999 not found (status 404)" in capsys.readouterr().out
 
 
-def test_handle_claim_auth_failure_logs_distinguishable_noop(monkeypatch, capsys):
+@pytest.mark.parametrize("handler", HANDLERS)
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+def test_handler_api_error_is_never_reported_as_a_closed_issue(
+    monkeypatch, capsys, handler, status
+):
+    """The #608 core: an API failure must not be logged as a closed issue.
+
+    With the realistic JSON error body GitHub returns, the payload IS a dict,
+    so a handler that checks only `isinstance(payload, dict)` sails past its
+    error branch, reads no `state` off the error body, and falls through to
+    "already closed" — the same line a genuinely-closed issue produces. The
+    workflow no-ops either way, so that line is the operator's entire signal:
+    it is the difference between "nothing to do" and "our token lost its
+    permissions and this guard has silently stopped working".
+    """
     monkeypatch.setattr(
-        guard,
-        "fetch_issue",
-        lambda repo, number, token: (403, {"message": "Forbidden"}),
+        guard, "fetch_issue", lambda repo, number, token: (status, dict(FORBIDDEN_BODY))
     )
-    guard._handle_claim(REPO, 12, "token")
-    assert "no-op: issue #12 API error (status 403)" in capsys.readouterr().out
+    _run_handler(handler, 12)
+    out = capsys.readouterr().out
+    assert f"no-op: issue #12 API error (status {status})" in out
+    assert "already closed" not in out
+    assert "not found" not in out
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_api_error_with_non_json_body_is_not_reported_as_not_found(
+    monkeypatch, capsys, handler
+):
+    """A 403 whose body isn't JSON must still read as an API error.
+
+    `_api_request` yields `(status, None)` for an unparseable error body —
+    GitHub serves HTML from its secondary-rate-limit and abuse walls, as can
+    any proxy in front of the API. Diagnosing that by payload shape rather
+    than by status reports a deleted issue when the truth is a rejected
+    request, which sends an operator looking in the wrong place.
+    """
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (403, None))
+    _run_handler(handler, 12)
+    out = capsys.readouterr().out
+    assert "no-op: issue #12 API error (status 403)" in out
+    assert "not found" not in out
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_unreadable_200_payload_is_distinct_from_both_error_and_not_found(
+    monkeypatch, capsys, handler
+):
+    # A 200 carrying something that isn't an object is a fourth distinct
+    # outcome: the call succeeded, so it is neither an API error nor a
+    # missing issue, but there is still no issue to read a state off.
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, ["surprise"]))
+    _run_handler(handler, 12)
+    out = capsys.readouterr().out
+    assert "no-op: issue #12 returned an unreadable payload (status 200)" in out
+    assert "already closed" not in out
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_pull_request_number_logs_distinguishable_noop(monkeypatch, capsys, handler):
+    issue = {"number": 12, "state": "open", "labels": [], "pull_request": {"url": "..."}}
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    _run_handler(handler, 12)
+    assert "no-op: #12 is a pull request, not an issue" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_genuinely_closed_issue_still_logs_the_closed_line(monkeypatch, capsys, handler):
+    # The other half of the distinguishability pin: tightening the error
+    # branches must not have swallowed the real closed-issue no-op, which is
+    # the ordinary outcome the error lines had been masquerading as.
+    issue = {"number": 12, "state": "closed", "labels": [{"name": "good first issue"}]}
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(guard, "fetch_issue_timeline", lambda repo, number, token: [])
+    monkeypatch.setattr(
+        guard, "remove_label", lambda *a, **k: pytest.fail("must not write to a closed issue")
+    )
+    monkeypatch.setattr(
+        guard, "add_labels", lambda *a, **k: pytest.fail("must not write to a closed issue")
+    )
+    _run_handler(handler, 12)
+    out = capsys.readouterr().out
+    assert "no-op: issue #12 is already closed" in out
+    assert "API error" not in out
 
 
 def test_handle_claim_payload_missing_labels_key_does_not_crash(monkeypatch, capsys):
