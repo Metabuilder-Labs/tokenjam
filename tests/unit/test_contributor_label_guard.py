@@ -1,7 +1,7 @@
 """
 Unit tests for `.github/scripts/contributor_label_guard.py` — the closing-
-keyword parser and the remove/restore decision logic behind the outside-
-contribution label guard. Pure logic only, no network calls.
+keyword parser, remove/restore decision logic, and mocked-HTTP coverage for
+the GitHub API I/O layer behind the outside-contribution label guard.
 
 The module under test lives outside the `tokenjam` package (it's a workflow
 helper script, following the `archive_traffic.py` convention), so it's
@@ -9,8 +9,14 @@ imported by path rather than as a normal package import.
 """
 from __future__ import annotations
 
+import io
+import json
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+import urllib.error
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / ".github" / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -243,3 +249,288 @@ def test_is_pull_request_true_when_payload_has_pull_request_key():
 
 def test_is_pull_request_false_for_plain_issue():
     assert guard._is_pull_request({"number": 1}) is False
+
+
+# ---------------------------------------------------------------------------
+# Network I/O — mocked HTTP (issue #608)
+# ---------------------------------------------------------------------------
+
+
+def _mock_http_ok(payload: object | None, status: int = 200) -> MagicMock:
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_resp.status = status
+    mock_resp.read.return_value = json.dumps(payload).encode() if payload is not None else b""
+    return mock_resp
+
+
+def _mock_http_error(
+    url: str, status: int, payload: object | None = None, headers: dict[str, str] | None = None
+) -> urllib.error.HTTPError:
+    raw = json.dumps(payload).encode() if payload is not None else b""
+    return urllib.error.HTTPError(url, status, "error", headers or {}, io.BytesIO(raw))
+
+
+def test_api_request_success_returns_status_and_payload(monkeypatch):
+    issue = {"number": 1, "state": "open", "labels": []}
+
+    def fake_urlopen(req, timeout=30):
+        assert req.get_method() == "GET"
+        assert req.full_url.endswith("/repos/Metabuilder-Labs/tokenjam/issues/1")
+        return _mock_http_ok(issue)
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    status, payload = guard._api_request("GET", "/repos/Metabuilder-Labs/tokenjam/issues/1", "token")
+    assert status == 200
+    assert payload == issue
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_api_request_http_auth_and_rate_limit_errors_do_not_raise(monkeypatch, status):
+    headers = {"X-RateLimit-Remaining": "0"} if status == 429 else {}
+
+    def fake_urlopen(req, timeout=30):
+        raise _mock_http_error(req.full_url, status, {"message": "nope"}, headers)
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    returned_status, payload = guard._api_request(
+        "GET", "/repos/Metabuilder-Labs/tokenjam/issues/1", "token"
+    )
+    assert returned_status == status
+    assert payload == {"message": "nope"}
+
+
+def test_api_request_http_error_with_non_json_body_returns_none_payload(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        err = urllib.error.HTTPError(req.full_url, 500, "error", {}, io.BytesIO(b"not-json"))
+        raise err
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    status, payload = guard._api_request("GET", "/repos/Metabuilder-Labs/tokenjam/issues/1", "token")
+    assert status == 500
+    assert payload is None
+
+
+def test_fetch_issue_404_does_not_raise(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        raise _mock_http_error(req.full_url, 404, {"message": "Not Found"})
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    status, payload = guard.fetch_issue(REPO, 999, "token")
+    assert status == 404
+    assert payload == {"message": "Not Found"}
+
+
+def test_fetch_issue_timeline_paginates_until_short_page(monkeypatch):
+    page_one = [{"event": "labeled", "label": {"name": "bug"}, "created_at": "t1"}] * 100
+    page_two = [{"event": "unlabeled", "label": {"name": "bug"}, "created_at": "t2"}]
+    responses = iter([_mock_http_ok(page_one), _mock_http_ok(page_two)])
+    seen_pages: list[int] = []
+
+    def fake_urlopen(req, timeout=30):
+        page = int(req.full_url.rsplit("page=", 1)[-1])
+        seen_pages.append(page)
+        return next(responses)
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    events = guard.fetch_issue_timeline(REPO, 42, "token")
+    assert seen_pages == [1, 2]
+    assert len(events) == 101
+
+
+def test_fetch_issue_timeline_non_200_returns_empty(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        raise _mock_http_error(req.full_url, 403, {"message": "Forbidden"})
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    assert guard.fetch_issue_timeline(REPO, 42, "token") == []
+
+
+# Both handlers open by fetching the issue and share every precondition check
+# before they diverge, so each case below is run against BOTH. The bug this
+# guards against lived in both handlers and was noticed in only one.
+def _run_handler(name: str, number: int) -> None:
+    if name == "claim":
+        guard._handle_claim(REPO, number, "token")
+    else:
+        guard._handle_release(REPO, number, "token", guard.DEFAULT_ACTOR_LOGIN)
+
+
+HANDLERS = ["claim", "release"]
+
+# What GitHub actually puts in the body of an error response. A 4xx/5xx from
+# the REST API carries JSON, so the handler receives (status, dict) and every
+# `isinstance(payload, dict)` check passes — which is exactly why the status
+# has to be inspected first.
+FORBIDDEN_BODY = {
+    "message": "Forbidden",
+    "documentation_url": "https://docs.github.com/rest",
+}
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_issue_not_found_logs_distinguishable_noop(monkeypatch, capsys, handler):
+    monkeypatch.setattr(
+        guard, "fetch_issue", lambda repo, number, token: (404, {"message": "Not Found"})
+    )
+    _run_handler(handler, 999)
+    assert "no-op: issue #999 not found (status 404)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+def test_handler_api_error_is_never_reported_as_a_closed_issue(
+    monkeypatch, capsys, handler, status
+):
+    """The #608 core: an API failure must not be logged as a closed issue.
+
+    With the realistic JSON error body GitHub returns, the payload IS a dict,
+    so a handler that checks only `isinstance(payload, dict)` sails past its
+    error branch, reads no `state` off the error body, and falls through to
+    "already closed" — the same line a genuinely-closed issue produces. The
+    workflow no-ops either way, so that line is the operator's entire signal:
+    it is the difference between "nothing to do" and "our token lost its
+    permissions and this guard has silently stopped working".
+    """
+    monkeypatch.setattr(
+        guard, "fetch_issue", lambda repo, number, token: (status, dict(FORBIDDEN_BODY))
+    )
+    _run_handler(handler, 12)
+    out = capsys.readouterr().out
+    assert f"no-op: issue #12 API error (status {status})" in out
+    assert "already closed" not in out
+    assert "not found" not in out
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_api_error_with_non_json_body_is_not_reported_as_not_found(
+    monkeypatch, capsys, handler
+):
+    """A 403 whose body isn't JSON must still read as an API error.
+
+    `_api_request` yields `(status, None)` for an unparseable error body —
+    GitHub serves HTML from its secondary-rate-limit and abuse walls, as can
+    any proxy in front of the API. Diagnosing that by payload shape rather
+    than by status reports a deleted issue when the truth is a rejected
+    request, which sends an operator looking in the wrong place.
+    """
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (403, None))
+    _run_handler(handler, 12)
+    out = capsys.readouterr().out
+    assert "no-op: issue #12 API error (status 403)" in out
+    assert "not found" not in out
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_unreadable_200_payload_is_distinct_from_both_error_and_not_found(
+    monkeypatch, capsys, handler
+):
+    # A 200 carrying something that isn't an object is a fourth distinct
+    # outcome: the call succeeded, so it is neither an API error nor a
+    # missing issue, but there is still no issue to read a state off.
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, ["surprise"]))
+    _run_handler(handler, 12)
+    out = capsys.readouterr().out
+    assert "no-op: issue #12 returned an unreadable payload (status 200)" in out
+    assert "already closed" not in out
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_pull_request_number_logs_distinguishable_noop(monkeypatch, capsys, handler):
+    issue = {"number": 12, "state": "open", "labels": [], "pull_request": {"url": "..."}}
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    _run_handler(handler, 12)
+    assert "no-op: #12 is a pull request, not an issue" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+def test_handler_genuinely_closed_issue_still_logs_the_closed_line(monkeypatch, capsys, handler):
+    # The other half of the distinguishability pin: tightening the error
+    # branches must not have swallowed the real closed-issue no-op, which is
+    # the ordinary outcome the error lines had been masquerading as.
+    issue = {"number": 12, "state": "closed", "labels": [{"name": "good first issue"}]}
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(guard, "fetch_issue_timeline", lambda repo, number, token: [])
+    monkeypatch.setattr(
+        guard, "remove_label", lambda *a, **k: pytest.fail("must not write to a closed issue")
+    )
+    monkeypatch.setattr(
+        guard, "add_labels", lambda *a, **k: pytest.fail("must not write to a closed issue")
+    )
+    _run_handler(handler, 12)
+    out = capsys.readouterr().out
+    assert "no-op: issue #12 is already closed" in out
+    assert "API error" not in out
+
+
+def test_handle_claim_payload_missing_labels_key_does_not_crash(monkeypatch, capsys):
+    monkeypatch.setattr(
+        guard,
+        "fetch_issue",
+        lambda repo, number, token: (200, {"number": 7, "state": "open"}),
+    )
+    guard._handle_claim(REPO, 7, "token")
+    assert "no-op: issue #7 has none of the guarded labels" in capsys.readouterr().out
+
+
+def test_handle_claim_remove_failure_logs_warn_to_stderr(monkeypatch, capsys):
+    issue = {
+        "number": 5,
+        "state": "open",
+        "labels": [{"name": "good first issue"}],
+    }
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(guard, "remove_label", lambda repo, number, label, token: 403)
+    guard._handle_claim(REPO, 5, "token")
+    captured = capsys.readouterr()
+    assert "removed label 'good first issue' from issue #5" not in captured.out
+    assert "warn: failed to remove label 'good first issue' from issue #5 (status 403)" in captured.err
+
+
+def test_handle_claim_success_removes_present_guarded_labels(monkeypatch, capsys):
+    issue = {
+        "number": 8,
+        "state": "open",
+        "labels": [{"name": "good first issue"}, {"name": "help wanted"}],
+    }
+    removed: list[str] = []
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(
+        guard,
+        "remove_label",
+        lambda repo, number, label, token: removed.append(label) or 204,
+    )
+    guard._handle_claim(REPO, 8, "token")
+    assert removed == ["good first issue", "help wanted"]
+    out = capsys.readouterr().out
+    assert "removed label 'good first issue' from issue #8" in out
+    assert "removed label 'help wanted' from issue #8" in out
+
+
+def test_handle_release_restore_failure_logs_warn_to_stderr(monkeypatch, capsys):
+    issue = {"number": 3, "state": "open", "labels": []}
+    events = [_unlabeled_event("help wanted")]
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(guard, "fetch_issue_timeline", lambda repo, number, token: events)
+    monkeypatch.setattr(guard, "add_labels", lambda repo, number, labels, token: 429)
+    guard._handle_release(REPO, 3, "token", guard.DEFAULT_ACTOR_LOGIN)
+    captured = capsys.readouterr()
+    assert "restored labels ['help wanted'] on issue #3" not in captured.out
+    assert "warn: failed to restore labels ['help wanted'] on issue #3 (status 429)" in captured.err
+
+
+def test_handle_release_success_restores_labels(monkeypatch, capsys):
+    issue = {"number": 4, "state": "open", "labels": []}
+    events = [_unlabeled_event("good first issue")]
+    added: list[list[str]] = []
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(guard, "fetch_issue_timeline", lambda repo, number, token: events)
+    monkeypatch.setattr(
+        guard,
+        "add_labels",
+        lambda repo, number, labels, token: added.append(list(labels)) or 201,
+    )
+    guard._handle_release(REPO, 4, "token", guard.DEFAULT_ACTOR_LOGIN)
+    assert added == [["good first issue"]]
+    assert "restored labels ['good first issue'] on issue #4" in capsys.readouterr().out

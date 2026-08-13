@@ -44,6 +44,13 @@ Every network call is isolated in its own function and reports a normal
 callers decide what a given status means for their case, so a missing
 issue, a missing label, a closed issue, or an issue-number-that's-really-a-PR
 never fails the workflow run.
+
+Because none of those outcomes raises, the LOG LINE is the only diagnosis an
+operator ever gets, so each must be distinguishable from the others: a
+permissions failure, a rate limit, a deleted issue, a PR number and a
+genuinely-closed issue all end in the same silent no-op, and only the wording
+says which one happened. `_unusable_issue_reason` is the single place that
+decides, shared by both handlers.
 """
 from __future__ import annotations
 
@@ -248,13 +255,36 @@ def _is_pull_request(issue_payload: dict[str, Any]) -> bool:
     return "pull_request" in issue_payload
 
 
+def _unusable_issue_reason(number: int, status: int, issue: Any) -> str | None:
+    """The log line explaining why `issue` can't be acted on, or None if it can.
+
+    Shared by both handlers so the two can never diagnose the same response
+    differently — the misdiagnosis this exists to prevent was present in
+    both, and was noticed in only one.
+
+    Order matters, and is the whole point. The STATUS is checked before the
+    payload's shape, because `_api_request` returns `(status, None)` for any
+    error response whose body isn't valid JSON (GitHub serves HTML from its
+    secondary-rate-limit and abuse walls, as can any proxy in front of the
+    API). Testing the shape first collapses "we were forbidden" into "the
+    issue doesn't exist" — two different operator actions behind one line.
+    """
+    if status == 404:
+        return f"no-op: issue #{number} not found (status {status})"
+    if status != 200:
+        return f"no-op: issue #{number} API error (status {status})"
+    if not isinstance(issue, dict):
+        return f"no-op: issue #{number} returned an unreadable payload (status {status})"
+    if _is_pull_request(issue):
+        return f"no-op: #{number} is a pull request, not an issue"
+    return None
+
+
 def _handle_claim(repo: str, number: int, token: str) -> None:
     status, issue = fetch_issue(repo, number, token)
-    if status == 404 or not isinstance(issue, dict):
-        print(f"no-op: issue #{number} not found (status {status})")
-        return
-    if _is_pull_request(issue):
-        print(f"no-op: #{number} is a pull request, not an issue")
+    reason = _unusable_issue_reason(number, status, issue)
+    if reason is not None:
+        print(reason)
         return
     if issue.get("state") != "open":
         print(f"no-op: issue #{number} is already closed")
@@ -278,11 +308,9 @@ def _handle_claim(repo: str, number: int, token: str) -> None:
 
 def _handle_release(repo: str, number: int, token: str, actor_login: str) -> None:
     status, issue = fetch_issue(repo, number, token)
-    if status == 404 or not isinstance(issue, dict):
-        print(f"no-op: issue #{number} not found (status {status})")
-        return
-    if _is_pull_request(issue):
-        print(f"no-op: #{number} is a pull request, not an issue")
+    reason = _unusable_issue_reason(number, status, issue)
+    if reason is not None:
+        print(reason)
         return
     if issue.get("state") != "open":
         print(f"no-op: issue #{number} is already closed — leaving labels as-is")
