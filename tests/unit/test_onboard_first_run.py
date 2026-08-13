@@ -20,8 +20,8 @@ def test_welcome_banner_shows_brand_version_and_value_prop(capsys):
     out = capsys.readouterr().out
     assert "TokenJam" in out
     assert __version__ in out
-    # One-line value prop; honest framing, no promised savings (Rule 14).
-    assert "cost-saving utility for AI agents" in out
+    # Trimmed one-line tagline (#643); honest framing, no promised savings (Rule 14).
+    assert "token efficiency for AI agents" in out
     assert "saves you" not in out.lower()
 
 
@@ -60,19 +60,21 @@ def test_nudge_with_data_but_unknown_days_avoids_bogus_count(capsys):
 
 
 def test_nudge_claude_code_persona_is_exactly_two_entries(capsys):
-    """The CC list is the web dashboard plus tokenmaxx, in that order. The
-    per-command diagnosis rows (`tj context`, `tj quota-audit`) are gone: the
-    dashboard is where that diagnosis is read. tjb is an SDK workflow and must
-    not appear here either."""
+    """The CC list is exactly two action rows (founder review, demo trim):
+    "View the Web UI (Lens)" then "View your Token Efficiency Card". The
+    per-command diagnosis rows (`tj context`, `tj quota-audit`), `tj optimize`,
+    and the `tjb` SDK workflow must not appear here."""
     _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=True,
+        has_data=True, days=30, persona="claude-code", daemon_running=True,
     )
     out = capsys.readouterr().out
-    assert "web dashboard" in out
+    assert "View the Web UI (Lens)" in out
+    assert "View your Token Efficiency Card" in out
     assert "tj tokenmaxx" in out
-    assert out.index("web dashboard") < out.index("tj tokenmaxx")
+    assert out.index("View the Web UI (Lens)") < out.index("View your Token Efficiency Card")
     assert "tj context" not in out
     assert "tj quota-audit" not in out
+    assert "tj optimize" not in out
     assert "tjb" not in out
     assert "tokenjam-bench" not in out
     # Exactly two command rows: the indented block that follows the
@@ -90,37 +92,32 @@ def test_nudge_claude_code_persona_is_exactly_two_entries(capsys):
     assert len(rows) == 2, rows
 
 
-def test_nudge_claude_code_never_says_lens(capsys):
-    """The web UI entry is named "web dashboard" on this list, not "Lens"."""
+def test_nudge_claude_code_header_is_plain(capsys):
+    """The CC "Next steps" header is bare — no trailing "already loaded /
+    these work right now" muted text (founder review, demo trim)."""
     _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=True,
-    )
-    assert "Lens" not in capsys.readouterr().out
-    _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=False,
-    )
-    assert "Lens" not in capsys.readouterr().out
-
-
-def test_nudge_daemon_running_never_suggests_tj_serve(capsys):
-    """Onboarding just installed the daemon — the dashboard is already up;
-    suggesting `tj serve` invites a port conflict."""
-    _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=True,
+        has_data=True, days=30, persona="claude-code", daemon_running=True,
     )
     out = capsys.readouterr().out
-    assert "tj serve" not in out
-    assert "already running" in out
-    assert "http://127.0.0.1:7391/" in out
+    assert "Next steps" in out
+    assert "already loaded" not in out
+    assert "these work right now" not in out
 
 
-def test_nudge_no_daemon_still_points_at_tj_serve(capsys):
-    _print_next_steps_nudge(
-        has_data=False, persona="claude_code", daemon_running=False,
-    )
-    out = capsys.readouterr().out
-    assert "tj serve" in out
-    assert "already running" not in out
+def test_nudge_claude_code_points_at_dashboard_url(capsys):
+    """The CC list names the dashboard URL as a concrete instruction and runs
+    `tj tokenmaxx` — regardless of daemon state (no daemon branch on this
+    list anymore)."""
+    for daemon in (True, False):
+        _print_next_steps_nudge(
+            has_data=True, days=30, persona="claude-code", daemon_running=daemon,
+        )
+        out = capsys.readouterr().out
+        assert "http://127.0.0.1:7391/" in out
+        assert "tj tokenmaxx" in out
+        # No `tj serve` / "already running" churn on this trimmed list.
+        assert "tj serve" not in out
+        assert "already running" not in out
 
 
 # --- Bare `tj` home screen --------------------------------------------------
@@ -135,9 +132,21 @@ def test_home_when_not_configured_points_at_onboarding(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "TokenJam" in out                     # banner
     assert "Not set up yet" in out
+    # Get Started section (#643): all three onboard variants, each with a
+    # "run this if..." one-liner, plus a Learn more section.
+    assert "Get Started:" in out
     assert "tj onboard" in out
-    # No longer implies `--claude-code` is a separate/recommended setup.
-    assert "tj onboard --claude-code" not in out
+    assert "tj onboard --claude-code" in out
+    assert "tj onboard --codex" in out
+    assert "run this if you only use Claude Code" in out
+    assert "run this if you only use Codex" in out
+    assert "more than one agent client" in out
+    assert "Learn more:" in out
+    assert "tj --help" in out
+    assert "tokenjam.dev/docs" in out
+    # #643: the stale "run it once inside each project" line is gone —
+    # onboarding aggregates all projects automatically.
+    assert "inside each project" not in out
 
 
 def test_home_when_configured_shows_next_best_actions(monkeypatch, capsys, tmp_path):
@@ -165,7 +174,14 @@ def test_home_when_db_populated_but_no_config_is_set_up(monkeypatch, capsys, tmp
     db = tmp_path / ".tj" / "telemetry.duckdb"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"\x00" * 4096)
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    # `_db_has_data()` resolves the default "~/.tj/telemetry.duckdb" via
+    # `Path.expanduser()`, which reads the `HOME` env var directly rather
+    # than going through `pathlib.Path.home()` — so patching `Path.home`
+    # (as this test used to) is a no-op here and the assertion only passed
+    # by accident, off a DB left behind under the session-wide fake HOME by
+    # an earlier test. Set `HOME` itself so this test's own db is what gets
+    # found, independent of suite order.
+    monkeypatch.setenv("HOME", str(tmp_path))
     print_home()
     out = capsys.readouterr().out
     assert "You're set up" in out, out
@@ -212,15 +228,23 @@ def _isolated_claude_code(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._try_apply_declared_plans", lambda *a, **k: None,
     )
+    # #643: the restart panel is now conditional on `claude` actually running.
+    # These tests assert panel CONTENT/ORDER, so force it on deterministically
+    # (whether the machine running the suite has a `claude` process is
+    # irrelevant to what the panel says). The conditional behavior itself is
+    # covered by test_restart_panel_conditional_on_claude_running below.
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard._claude_code_is_running", lambda: True,
+    )
 
 
 def _run_claude_code(tmp_path, plan_choice: str):
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        # --project skips the interactive project-name prompt; then plan_choice
-        # then daily budget "0".
+        # The project name is derived automatically (no prompt); the input
+        # sequence is just plan_choice then daily budget "0".
         return runner.invoke(
-            cmd_onboard, ["--claude-code", "--no-daemon", "--project", "testproj"],
+            cmd_onboard, ["--claude-code", "--no-daemon"],
             input=f"{plan_choice}\n0\n", obj={},
         )
 
@@ -232,7 +256,7 @@ def test_claude_code_asks_plan_before_budget(_isolated_claude_code, tmp_path):
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
         res = runner.invoke(
-            cmd_onboard, ["--claude-code", "--no-daemon", "--project", "testproj"],
+            cmd_onboard, ["--claude-code", "--no-daemon"],
             input="1\n0\n0\n", obj={},
         )
     assert res.exit_code == 0, res.output
@@ -242,98 +266,105 @@ def test_claude_code_asks_plan_before_budget(_isolated_claude_code, tmp_path):
     assert out.index("How do you pay for Claude?") < out.index("Daily budget in USD"), out
 
 
-def test_claude_code_restart_banner_precedes_nudge(_isolated_claude_code, tmp_path):
-    """Founder-review order (2026-07): the one REQUIRED action (restart) is the
-    visually primary element, next steps come after it, connection details
-    are a dim footer at the end."""
+def test_claude_code_restart_banner_is_third_next_step(_isolated_claude_code, tmp_path):
+    """#675: the optional restart note is now the THIRD item UNDER Next steps
+    (it used to print above the Next-steps header). Still one OPTIONAL line —
+    the daemon catch-up ingests running sessions regardless, so a restart is not
+    required. #643: connection details moved behind --verbose."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     out = res.output
     assert "Next steps" in out
-    assert "Action required" in out
-    assert out.index("Action required") < out.index("Next steps"), out
-    assert out.index("Next steps") < out.index("Connection details"), out
+    assert "restart Claude Code" in out
+    assert "Action required" not in out
+    # Now inside Next steps, so it follows the header rather than preceding it.
+    assert out.index("Next steps") < out.index("restart Claude Code"), out
+    # #643: connection details are no longer on the default success screen.
+    assert "Connection details" not in out
     # No backfill happened here, so no "already loaded" over-claim.
     assert "already loaded" not in out
 
 
-def test_claude_code_restart_panel_is_why_first_and_consolidated(
-    _isolated_claude_code, tmp_path,
+def test_restart_panel_conditional_on_claude_running(
+    _isolated_claude_code, tmp_path, monkeypatch,
 ):
-    """One consolidated Action-required panel (2026-07 restructure): the WHY
-    (stale telemetry endpoint) leads, then numbered steps; no more scattering
-    across a panel + a stray "open a new terminal" paragraph + an "after
-    restarting, run" pointer + a duplicate verify line near Connection
-    details."""
+    """#643: the optional restart line only shows when a `claude` process is
+    actually running. A fresh terminal with none open needs no restart, so the
+    line is suppressed."""
+    # Force "not running" — the line must be absent.
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard._claude_code_is_running", lambda: False,
+    )
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
-    out = res.output
-    flat = " ".join(out.split())
-    assert "Action required" in flat
-    assert "restart Claude Code" in flat
-    # Why leads the panel, before the numbered steps.
-    assert flat.index("old endpoint") < flat.index("Quit Claude Code"), flat
-    assert "Quit Claude Code in every terminal" in flat
-    assert "Relaunch claude in the same folder" in flat
-    # The now-redundant scattered pieces are gone.
-    assert "Open a new terminal" not in out
-    assert "After restarting, run:" not in out
-    assert "tj status --agent" not in out
-    # Folded into one dim footnote instead.
-    assert "own dashboard tile" in flat
-    assert "claude --as <name>" in flat
+    assert "restart Claude Code" not in res.output
+    # ... but the rest of the success screen is intact.
+    assert "Claude Code observability configured" in res.output
+    assert "Next steps" in res.output
 
 
-def test_claude_code_restart_panel_states_honest_resume_semantics(
+def test_verbose_shows_connection_details(_isolated_claude_code, tmp_path):
+    """#643: --verbose restores the connection-details block on the success
+    screen for debugging/harness setups."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        res = runner.invoke(
+            cmd_onboard,
+            ["--claude-code", "--no-daemon", "--verbose"],
+            input="3\n0\n", obj={},
+        )
+    assert res.exit_code == 0, res.output
+    assert "Connection details" in res.output
+    assert "Agent ID:" in res.output
+
+
+def test_claude_code_restart_note_is_one_optional_line(
     _isolated_claude_code, tmp_path,
 ):
-    """The old copy claimed `claude --resume` "picks up exactly where you left
-    off", which is inaccurate: --resume opens a picker you must pick from; -c
-    only reopens the CURRENT project's latest conversation. Pin the corrected,
-    honest phrasing (Critical Rule 14: no promised outcomes)."""
+    """Demo trim (2026-07-30): the old "Action required" panel (numbered steps +
+    resume semantics) is replaced by ONE optional line, because the daemon's
+    transcript catch-up ingests running sessions from disk regardless — a
+    restart only affects live-stream immediacy, so it is not an action gate."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     flat = " ".join(res.output.split())
-    assert "claude -c" in flat
-    assert "reopen this project's latest conversation" in flat
-    assert "claude --resume" in flat
-    assert "pick any earlier one from a list" in flat
-    assert "resuming is optional" in flat
-    # The inaccurate old claims must not resurface.
-    assert "pick up exactly where you left off" not in flat
-    assert "conversation survives" not in flat
+    assert "Optional: restart Claude Code" in flat
+    assert "picks them up from disk" in flat
+    # The old scary panel, numbered steps, resume copy and footnote are gone.
+    assert "Action required" not in flat
+    assert "Quit Claude Code in every terminal" not in flat
+    assert "claude --resume" not in flat
+    assert "own dashboard tile" not in flat
+    assert "claude --as <name>" not in flat
 
 
 def test_claude_code_no_pre_restart_verify_prompt(_isolated_claude_code, tmp_path):
     """The interactive 'verify now?' poll can only time out before the restart
-    it depends on; CC gets the verify pointer as step 3 of the restart panel
-    instead, and only there (no duplicate near Connection details)."""
+    it depends on, so it must never appear. The demo trim (2026-07-30) also
+    dropped the --verify-only pointer — the restart is one optional line now."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     out = res.output
     assert "Verify tj is receiving telemetry now?" not in out
-    assert "--verify-only" in out
-    assert out.count("--verify-only") == 1
     assert "Verify after restarting:" not in out
 
 
-def test_claude_code_asks_project_name_after_agent_questions(
+def test_claude_code_never_prompts_for_a_project_name(
     _isolated_claude_code, tmp_path,
 ):
-    """Prompt order: usage/plan questions first, THEN project name (2026-07
-    direction — the project-name question wedged between the two agent
-    questions broke their grouping)."""
+    """--project (and the interactive prompt it fed) were removed — the
+    project/dashboard-namespace name is now always derived from the repo/
+    folder name, never asked for."""
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        # plan(3=max_5x, no ceiling/budget prompts) → project name (default).
+        # plan(3=max_5x, no ceiling/budget prompts) — nothing else to answer.
         res = runner.invoke(
-            cmd_onboard, ["--claude-code", "--no-daemon"], input="3\n\n", obj={},
+            cmd_onboard, ["--claude-code", "--no-daemon"], input="3\n", obj={},
         )
     assert res.exit_code == 0, res.output
     out = res.output
     assert "How do you pay for Claude?" in out
-    assert "Project name" in out
-    assert out.index("How do you pay for Claude?") < out.index("Project name"), out
+    assert "Project name" not in out
 
 
 def test_claude_code_shows_welcome_banner(_isolated_claude_code, tmp_path):

@@ -137,6 +137,17 @@ def test_build_computes_err_rate_and_req_per_min():
 
 
 def test_build_excludes_beyond_discovery_window():
+    """The live panel is bounded by SDK_DISCOVERY_WINDOW, and that stays.
+
+    DO NOT "fix" this by widening the window. `live` / `went_quiet` /
+    `long_dormant` are all defined against it, so widening changes what those
+    three words mean and only moves the cliff further out. An SDK agent that
+    ages out of this panel must DEGRADE INTO HISTORY instead — see
+    `test_an_sdk_agent_past_the_discovery_window_is_still_reachable_as_history`,
+    which pins the other half. Half of this behaviour on its own is the bug:
+    the SDK persona's only session surface rendered this panel and nothing
+    else, so an agent quiet for longer than the window left the product.
+    """
     db = InMemoryBackend()
     try:
         now = utcnow()
@@ -319,3 +330,84 @@ async def test_status_zone_split_by_lifecycle_status(_db, _client):
 
     assert tile_agents == {"claude-code-live"}
     assert archived_ids == {"closed-1", "completed-1"}
+
+
+# ── The SDK persona's HISTORY surface ───────────────────────────────────────
+# The live panel above is bounded by SDK_DISCOVERY_WINDOW. This is the other
+# half: what a reader sees once an agent falls outside it. Without this pair,
+# the Sessions page for the SDK persona rendered one sentence ("No SDK services
+# live right now") and nothing else, on the only session surface that persona
+# has — so a workload that last ran twelve days ago read as never having been
+# recorded at all.
+
+async def test_an_sdk_agent_past_the_discovery_window_is_still_reachable_as_history(
+    _db, _client,
+):
+    """The exact reported case, end to end.
+
+    An SDK agent last seen well beyond SDK_DISCOVERY_WINDOW is correctly ABSENT
+    from `/status`'s live discovery AND correctly PRESENT in the persona-scoped
+    session list the history surface reads. Both halves in one test, because
+    either alone is a state that shipped: the first alone is the defect, and the
+    second alone would mean the live panel had started including dormant
+    services.
+    """
+    now = utcnow()
+    stale_at = now - timedelta(days=12)
+    for i, agent in enumerate((
+        "sdk-workload-tool-heavy-chain",
+        "sdk-workload-oversized-model",
+        "demo-surprise-cost",
+    )):
+        _db.upsert_session(make_session(
+            agent_id=agent, session_id=f"sdkhist-{i}", status="closed",
+            input_tokens=5000, output_tokens=900, tool_call_count=7,
+            started_at=stale_at, ended_at=stale_at + timedelta(minutes=4),
+        ))
+        _db.insert_span(make_llm_span(
+            agent_id=agent, session_id=f"sdkhist-{i}",
+            start_time=stale_at, cost_usd=0.25,
+        ))
+
+    status = (await _client.get("/api/v1/status")).json()
+    live_ids = {s["agent_id"] for s in status.get("sdk_services") or []}
+    assert not (live_ids & {
+        "sdk-workload-tool-heavy-chain", "sdk-workload-oversized-model",
+        "demo-surprise-cost",
+    }), "dormant SDK agents must stay out of the LIVE panel"
+
+    history = (await _client.get("/api/v1/sessions?persona=sdk&limit=50")).json()
+    by_agent = {s["agent_id"] for s in history["sessions"]}
+    assert {
+        "sdk-workload-tool-heavy-chain", "sdk-workload-oversized-model",
+        "demo-surprise-cost",
+    } <= by_agent, (
+        "an SDK agent outside the live-discovery window must remain reachable "
+        "as history"
+    )
+    # The rows carry what the history table renders, so a column cannot silently
+    # become a dash for every row.
+    row = next(s for s in history["sessions"] if s["agent_id"] == "demo-surprise-cost")
+    for field in ("session_id", "started_at", "total_cost_usd", "input_tokens",
+                  "output_tokens", "tool_call_count", "error_count"):
+        assert field in row, field
+    assert row["started_at"] is not None
+
+
+async def test_a_coding_session_never_leaks_into_the_sdk_history(_db, _client):
+    """The history list is persona-scoped by the SAME agent_id-prefix rule the
+    analyzer gate uses. A coding session appearing here would put thousands of
+    rows under an SDK heading."""
+    now = utcnow()
+    _db.upsert_session(make_session(
+        agent_id="claude-code-proj", session_id="cc-leak", status="closed",
+        started_at=now - timedelta(days=12), ended_at=now - timedelta(days=12),
+    ))
+    _db.upsert_session(make_session(
+        agent_id="billing-service", session_id="sdk-keep", status="closed",
+        started_at=now - timedelta(days=12), ended_at=now - timedelta(days=12),
+    ))
+    history = (await _client.get("/api/v1/sessions?persona=sdk&limit=50")).json()
+    ids = {s["session_id"] for s in history["sessions"]}
+    assert "sdk-keep" in ids
+    assert "cc-leak" not in ids

@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+
 from rich.console import Console
 from rich.table import Table
 from rich import box
@@ -52,3 +56,76 @@ def make_table(*headers: str, box_style=box.SIMPLE) -> Table:
     for h in headers:
         t.add_column(h)
     return t
+
+
+#: Rows a capped table shows before the trailer takes over. Ten fits on one
+#: screen alongside a header block and a trailer, which is the whole point:
+#: the reader should never have to scroll to reach the line telling them how
+#: to see the rest.
+CAPPED_ROW_LIMIT = 10
+
+
+def print_capped_table(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    *,
+    more_command: str,
+    limit: int = CAPPED_ROW_LIMIT,
+    summary: str | None = None,
+    more_lead: str = "See the rest with",
+    noun: str = "row",
+    empty_note: str | None = None,
+) -> int:
+    """Print at most ``limit`` rows of an aligned table, then say what was cut.
+
+    The shape every per-entity listing in this CLI needs and several still
+    lack: a screen whose length is bounded by the terminal rather than by how
+    long the user has been running tj. An uncapped listing degrades with use
+    and degrades WORST for the heaviest user, who is exactly the one with
+    something to find in it.
+
+    Three parts, in this order, because the order is the fix:
+
+    * ``summary`` — the totals line, printed ABOVE the rows. A total that
+      lands after the rows has already been scrolled past.
+    * the rows, capped at ``limit`` and rendered through :func:`make_table`
+      so the columns align.
+    * the trailer — ``+N more`` plus ``more_command``, the LITERAL string the
+      user types to reach what was cut. A cap without a named way past it is
+      just missing data.
+
+    ``more_command`` is required rather than optional: a caller that cannot
+    name the drill-down has no business capping its output in the first place.
+
+    ``empty_note`` prints instead of the table when there are no rows at all,
+    so a caller never renders a bare header over nothing. Callers stay
+    responsible for the honesty of the cells themselves: no bare ``0`` and no
+    empty cell where "none" or "unknown" is meant (Critical Rule 35 in
+    tokenjam/CLAUDE.md, root anti-pattern 22).
+
+    Returns the number of rows withheld, so a caller can branch on whether
+    anything was actually cut.
+    """
+    if summary:
+        console.print(f"  [dim]{summary}[/dim]\n")
+
+    if not rows:
+        if empty_note:
+            console.print(f"  [dim]{empty_note}[/dim]")
+        return 0
+
+    shown = list(rows)[:limit] if limit > 0 else list(rows)
+    hidden = len(rows) - len(shown)
+
+    table = make_table(*headers)
+    for row in shown:
+        table.add_row(*[str(cell) for cell in row])
+    console.print(table)
+
+    if hidden:
+        plural = noun if hidden == 1 else f"{noun}s"
+        console.print(
+            f"  [dim]+{hidden} more {plural}. {more_lead} "
+            f"[accent]{more_command}[/accent].[/dim]"
+        )
+    return hidden

@@ -84,6 +84,70 @@ def is_interactive_coding_agent(agent_id: str | None) -> bool:
     return any(agent_id.startswith(p) for p in _INTERACTIVE_AGENT_PREFIXES)
 
 
+def interactive_coding_agent_sql(column: str = "agent_id") -> str:
+    """SQL predicate equivalent to :func:`is_interactive_coding_agent`.
+
+    GENERATED from ``_INTERACTIVE_AGENT_PREFIXES``, never a second literal
+    list: the analyzers scope their POPULATION to one side of the dashboard's
+    persona picker inside SQL, where a hand-written ``LIKE 'claude-code%'``
+    would be a copy of the classifier above and free to drift from it. The
+    session list can afford to filter in Python (it fetches whole rows); an
+    analyzer aggregating over the whole ``spans`` table cannot.
+
+    ``starts_with`` rather than ``LIKE`` so a prefix is never re-read as a
+    pattern, and ``COALESCE(..., FALSE)`` so the predicate is NULL-safe and
+    total: a row with no ``agent_id`` is not an interactive coding agent, which
+    makes ``NOT (<this>)`` the correct SDK-side filter with no second guard.
+    Pinned against the Python twin by
+    ``tests/unit/test_alerts.py::test_sql_predicate_matches_the_python_classifier``.
+    """
+    ors = " OR ".join(
+        f"starts_with({column}, '{p}')" for p in _INTERACTIVE_AGENT_PREFIXES
+    )
+    return f"COALESCE({ors}, FALSE)"
+
+
+def agent_display_name(agent_id: str | None) -> str | None:
+    """The name to SHOW for an agent: the project, without the tool prefix.
+
+    ``claude-code-tokenjam`` renders as ``tokenjam``. Ingest stamps the tool
+    into the id (``core/backfill.py``'s ``_agent_id_from_cwd``), so every row on
+    a coding corpus otherwise repeats the same twelve characters before the only
+    part that differs, and the part that differs is the part being read.
+
+    **Display only.** The caller keeps ``agent_id`` for identity — filters,
+    links, query parameters, dedup keys — and this never travels in place of it.
+    It reads the SAME ``_INTERACTIVE_AGENT_PREFIXES`` that decides whether an
+    agent is an interactive coding agent at all, so the set cannot drift from
+    the classifier the way a second literal list in the UI would.
+
+    Three cases the corpus actually contains, each decided rather than left to
+    fall out of a ``removeprefix`` call:
+
+    * ``claude-code-tokenjam`` -> ``tokenjam``. The intended case.
+    * ``claude-code`` (no suffix at all, and common) -> ``claude-code``,
+      unchanged. There is no project to show, and the honest answer is the tool
+      that ran. Never the empty string: a blank cell reads as missing data.
+    * ``codex-app-server`` -> ``app-server``. The remainder is not a folder, but
+      it is still the specific thing that ran and it is what distinguishes the
+      row, so it is kept verbatim rather than special-cased into something
+      prettier and less true.
+
+    An SDK agent id is returned untouched: nothing prefixes it, and its id IS
+    its declared name.
+    """
+    if not agent_id:
+        return agent_id
+    for prefix in _INTERACTIVE_AGENT_PREFIXES:
+        if agent_id == prefix:
+            return agent_id
+        if agent_id.startswith(prefix + "-"):
+            # `or agent_id` covers a trailing-separator id (`claude-code-`),
+            # which would otherwise strip to nothing.
+            return agent_id[len(prefix) + 1:] or agent_id
+    return agent_id
+
+
 def _is_tool_execution(span: NormalizedSpan) -> bool:
     """True only for real tool-execution spans (``gen_ai.tool.call``).
 

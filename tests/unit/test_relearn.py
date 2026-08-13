@@ -14,6 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_INJECTING_HOOK,
+)
+
 from tokenjam.core.optimize.analyzers.relearn import (
     MIN_RECURRING_SESSIONS,
     FailureEpisode,
@@ -181,13 +186,13 @@ def test_classify_deferred_tool_cold_still_matches_non_offset_errors():
     assert classify_known_family("Monitor", text) == "deferred_tool_cold"
 
 
-def test_command_not_found_is_rung_one_with_real_guidance():
-    # Downgraded from rung 5 (no safe automatic config/env writer exists) to
-    # a rung-1 CLAUDE.md note with genuinely useful guidance — not a stub.
+def test_command_not_found_is_a_claude_md_rule_with_real_guidance():
+    # Downgraded from a config/env fix (no safe automatic config/env writer
+    # exists) to a CLAUDE.md rule with genuinely useful guidance — not a stub.
     from tokenjam.core.optimize.analyzers.relearn import _FAMILY_BY_KEY
 
     fam = _FAMILY_BY_KEY["command_not_found"]
-    assert fam["rung"] == 1
+    assert fam["delivery"] == DELIVERY_CLAUDE_MD_RULE
     assert "python3" in fam["fix"]
     assert "mapfile" in fam["fix"] or "shopt" in fam["fix"]
 
@@ -276,7 +281,9 @@ def test_recurring_cluster_surfaces_as_a_proposal(tmp_path):
     cluster = finding.clusters[0]
     assert cluster.family_key == "cwd_confusion"
     assert cluster.sessions == MIN_RECURRING_SESSIONS
-    assert cluster.rung == 3
+    # cwd_confusion is a PostToolUseFailure hook: it injects recovery context
+    # rather than blocking anything, which is what makes it prompt text.
+    assert cluster.delivery == DELIVERY_INJECTING_HOOK
     # Spread across 3 distinct repos -> user-global scope (§7).
     assert cluster.scope == "user-global"
     # The one canonical dollar field, no carve-out: a relearn cluster shows
@@ -288,7 +295,7 @@ def test_recurring_cluster_surfaces_as_a_proposal(tmp_path):
     assert finding.past_overspend_tokens == cluster.past_overspend_tokens
 
 
-def test_command_not_found_proposal_is_rung_one_note(tmp_path):
+def test_command_not_found_proposal_is_a_claude_md_rule(tmp_path):
     for i in range(MIN_RECURRING_SESSIONS):
         _command_not_found_session(tmp_path, f"-Users-test-cnf{i}", f"cnf-{i}")
     sessions = [(f"cnf-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
@@ -298,7 +305,7 @@ def test_command_not_found_proposal_is_rung_one_note(tmp_path):
     assert len(finding.clusters) == 1
     cluster = finding.clusters[0]
     assert cluster.family_key == "command_not_found"
-    assert cluster.rung == 1
+    assert cluster.delivery == DELIVERY_CLAUDE_MD_RULE
     assert "python3" in cluster.proposed_fix
 
 
@@ -481,17 +488,24 @@ def test_single_repo_cluster_scopes_to_project(tmp_path):
     assert finding.clusters[0].repos == ["onerepo"]
 
 
-# --- Persona gating on the rung-1/rung-2 write --------------------------------
+# --- Persona gating on the CLAUDE.md/skill write ------------------------------
 # Mirrors cost_proposals._persona_gated_write_fields's gate on the SAME class
 # of surface (a CLAUDE.md/skill write): only claude-code/mixed get the write.
 # A workspace-having (non-OTel) cluster used to be apply-capable regardless of
 # persona — see test_relearn_otel.test_workspace_cluster_is_not_advise_only,
 # which now has to opt back into "claude-code" to isolate the workspace seam
 # from this gate.
+#
+# Uses `_command_not_found_session`, NOT `_edit_before_read_session`: the
+# `edit_before_read` family is ADVISORY-ONLY (its own fix says no rule is
+# needed), which now folds into `advise_only` at construction regardless of
+# persona — exactly the "fixture stopped being a valid vehicle" trap. These
+# tests are about the PERSONA gate in isolation, so the family must not carry
+# a gate of its own.
 
 def _one_repo_sessions(tmp_path, label):
     for i in range(MIN_RECURRING_SESSIONS):
-        _edit_before_read_session(tmp_path, f"-Users-test-{label}", f"{label}-{i}")
+        _command_not_found_session(tmp_path, f"-Users-test-{label}", f"{label}-{i}")
     return [(f"{label}-{i}", label) for i in range(MIN_RECURRING_SESSIONS)]
 
 
@@ -667,6 +681,62 @@ def test_legit_evidence_is_not_too_thin(family, samples):
     assert _evidence_too_thin_for_distill(cluster) is False
 
 
+def test_name_fallback_evidence_is_too_thin_even_when_the_text_looks_substantive():
+    """A name-fallback failure's error_text is the span's own NAME (e.g.
+    ``gen_ai.tool.call``), which reads as ordinary words rather than noise —
+    ``_is_substantive_error_text`` alone would wave it through. The explicit
+    ``error_text_is_name_fallback`` check must reject it regardless, since
+    there is no diagnosis in it for distill to ground a fix in. This
+    exercises the SECOND, independent gate directly: `_failure_signature`
+    already keeps a real span-sourced cluster like this from ever recurring
+    (see test_relearn_otel.py), so this test bypasses that by building the
+    `_RawCluster` by hand, as if it had somehow reached this function."""
+    from tokenjam.core.optimize.analyzers.relearn import (
+        FailureEpisode,
+        _RawCluster,
+        _evidence_too_thin_for_distill,
+    )
+
+    cluster = _RawCluster(
+        signature="Bash:__no_error_text__", family_key=None, title="Bash: no error text captured",
+        failures=[
+            FailureEpisode(
+                f"s{i}", "repo", None, "Bash", "", "gen_ai.tool.call", "act", False, 0,
+                error_text_is_name_fallback=True,
+            )
+            for i in range(3)
+        ],
+    )
+    assert _evidence_too_thin_for_distill(cluster) is True
+
+
+def test_name_fallback_cluster_is_never_distilled(tmp_path):
+    """Same treatment as any other confidence-gate suppression (see
+    `test_confidence_gate_suppresses_confabulations_even_with_a_warm_cache`):
+    a cluster the gate rejects is dropped, not distilled and not passed
+    through with a fabricated title."""
+    from tokenjam.core.optimize.analyzers.relearn import (
+        FailureEpisode,
+        _RawCluster,
+        apply_distill_to_residual,
+    )
+
+    cluster = _RawCluster(
+        signature="Bash:__no_error_text__", family_key=None, title="Bash: no error text captured",
+        failures=[
+            FailureEpisode(
+                f"s{i}", "repo", None, "Bash", "", "gen_ai.tool.call", "act", False, 0,
+                error_text_is_name_fallback=True,
+            )
+            for i in range(3)
+        ],
+    )
+
+    result = apply_distill_to_residual([cluster], cache_dir=tmp_path / "distill_cache", enabled=True)
+
+    assert result == []
+
+
 def test_confidence_gate_suppresses_confabulations_even_with_a_warm_cache(tmp_path):
     """The gate runs BEFORE the cache is ever consulted — even a stale cache
     entry from before this fix (holding the exact real confabulated answer)
@@ -741,7 +811,7 @@ def test_relearn_in_click_choices_and_renderer():
 
 def test_render_relearn_shows_clusters_without_error(tmp_path, capsys):
     """The finding renders through the CLI dispatch path and surfaces the
-    cluster signature + occurrences + rung — not a generic empty state."""
+    cluster signature + occurrences + delivery — not a generic empty state."""
     from tokenjam.cli.cmd_optimize import _render_relearn
 
     for i in range(MIN_RECURRING_SESSIONS):
@@ -755,7 +825,9 @@ def test_render_relearn_shows_clusters_without_error(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "cwd_confusion" in out
     assert f"{finding.clusters[0].occurrences}" in out
-    assert "rung 3" in out
+    # Inverted: the row named a ladder number the reader had to translate.
+    # It now names the mechanism, which is the thing they can act on.
+    assert "hook (context nudge)" in out
     assert "No candidates flagged" not in out
 
 

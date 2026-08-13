@@ -1,7 +1,7 @@
 """Integration tests for the database layer."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -212,11 +212,76 @@ def test_delete_spans_before_cutoff(db):
     db.insert_span(span_new)
 
     cutoff = now - timedelta(days=90)
-    deleted = db.delete_spans_before(cutoff)
-    assert deleted == 1
+    spans_deleted, sessions_deleted = db.delete_spans_before(cutoff)
+    assert spans_deleted == 1
 
     remaining = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()
     assert remaining[0] == 1
+    # The session straddles the cutoff and still has a live span, so it stays:
+    # a session is orphaned by the delete only once it has NO spans left.
+    assert sessions_deleted == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+
+
+def test_delete_spans_before_cutoff_takes_the_sessions_it_orphans(db):
+    """Deleting only spans left the parent sessions asserting a day had data.
+
+    `core/data_span` unions `sessions.started_at` into the day set it measures
+    the available span from, so every orphan went on claiming a day carried data
+    after the data for that day was destroyed — the deletion skewed the measure
+    of what survived it.
+    """
+    _insert_agent(db)
+    now = utcnow()
+    old = now - timedelta(days=100)
+
+    aged_out = make_session(started_at=old, ended_at=old + timedelta(minutes=1))
+    db.upsert_session(aged_out)
+    db.insert_span(make_llm_span(session_id=aged_out.session_id, start_time=old))
+
+    live = make_session()
+    db.upsert_session(live)
+    db.insert_span(make_llm_span(
+        session_id=live.session_id, start_time=now - timedelta(days=1),
+    ))
+
+    spans_deleted, sessions_deleted = db.delete_spans_before(now - timedelta(days=90))
+    assert (spans_deleted, sessions_deleted) == (1, 1)
+
+    surviving = [
+        r[0] for r in db.conn.execute("SELECT session_id FROM sessions").fetchall()
+    ]
+    assert surviving == [live.session_id]
+
+
+def test_delete_spans_before_cutoff_takes_an_aged_out_session_with_no_spans(db):
+    """A pre-cutoff session with no spans is aged-out history like any other.
+
+    Left behind it would go on asserting, to `core/data_span`, that a day
+    beyond the retention horizon carried data.
+    """
+    _insert_agent(db)
+    now = utcnow()
+    empty = make_session(
+        started_at=now - timedelta(days=100),
+        ended_at=now - timedelta(days=100) + timedelta(minutes=1),
+    )
+    db.upsert_session(empty)
+
+    spans_deleted, sessions_deleted = db.delete_spans_before(now - timedelta(days=90))
+    assert (spans_deleted, sessions_deleted) == (0, 1)
+    assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+
+def test_delete_spans_before_cutoff_keeps_a_live_session_with_no_spans_yet(db):
+    """An open session that has not written a span is not aged out."""
+    _insert_agent(db)
+    now = utcnow()
+    db.upsert_session(make_session(started_at=now, ended_at=None))
+
+    spans_deleted, sessions_deleted = db.delete_spans_before(now - timedelta(days=90))
+    assert (spans_deleted, sessions_deleted) == (0, 0)
+    assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
 
 
 # -- Traces --
@@ -619,6 +684,33 @@ def test_get_cost_summary_tenant_equality_filter(db):
     assert len(results) == 1
     assert abs(results[0].cost_usd - 3.0) < 0.001
     assert results[0].model == "claude-haiku-4-5"
+
+
+@pytest.mark.parametrize("db_timezone", ["UTC", "Asia/Kolkata", "America/Los_Angeles"])
+def test_get_cost_summary_by_day_buckets_on_the_utc_date(db, db_timezone):
+    """``--group-by day`` must bucket by the UTC date, not the session's local
+    timezone.
+
+    A bare ``CAST(start_time AS DATE)`` resolves a TIMESTAMPTZ through the
+    connection's local timezone before truncating, so a span logged late in
+    the UTC day gets stamped with tomorrow's date on any machine running
+    ahead of UTC (e.g. Asia/Kolkata, +05:30) — the CLI's per-day total would
+    then disagree with anything computed on a UTC basis.
+    """
+    db.conn.execute(f"SET TimeZone='{db_timezone}'")
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+
+    late_utc = datetime(2026, 3, 14, 23, 30, tzinfo=timezone.utc)
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=5.0,
+        session_id=session.session_id, start_time=late_utc,
+    ))
+
+    results = db.get_cost_summary(CostFilters(group_by="day"))
+    assert len(results) == 1
+    assert results[0].group == "2026-03-14"
 
 
 def test_get_cost_summary_returns_empty_when_dimension_never_set(db):

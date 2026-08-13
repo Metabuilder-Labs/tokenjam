@@ -32,6 +32,12 @@ def _sample_finding() -> DowngradeFinding:
     )
 
 
+# `estimated_savings_usd_month` is written unconditionally (dollars are always
+# legitimate); pricing_mode/plan_tier only echo back as metadata text and no
+# longer gate which fields appear, so one representative mode covers all three
+# (product decision: tj no longer differentiates export output between
+# subscription and API users).
+
 def test_render_api_user_carries_usd_savings():
     snippet = render_claude_code_snippet(
         downgrade=_sample_finding(),
@@ -41,36 +47,6 @@ def test_render_api_user_carries_usd_savings():
     assert "estimated_savings_usd_month" in snippet
     assert "42.5" in snippet
     # Subscription-only field should NOT appear
-    assert "estimated_tokens_freed" not in snippet
-
-
-def test_render_subscription_user_carries_usd_savings_too():
-    """Subscription users now see the same `estimated_savings_usd_month`
-    field an API user would (product decision: dollars are always
-    legitimate, so tj no longer differentiates its export output between
-    subscription and API users). Previously this carried
-    `estimated_tokens_freed` instead."""
-    snippet = render_claude_code_snippet(
-        downgrade=_sample_finding(),
-        pricing_mode="subscription",
-        plan_tier="max_20x",
-    )
-    assert "estimated_savings_usd_month" in snippet
-    assert "42.5" in snippet
-    assert "estimated_tokens_freed" not in snippet
-
-
-def test_render_unknown_plan_carries_usd_savings_too():
-    """Unknown plan tier now also carries `estimated_savings_usd_month`
-    (previously a reconfigure-hint note with no figure at all), same
-    product-decision reasoning as the subscription case above."""
-    snippet = render_claude_code_snippet(
-        downgrade=_sample_finding(),
-        pricing_mode="unknown",
-        plan_tier="unknown",
-    )
-    assert "estimated_savings_usd_month" in snippet
-    assert "42.5" in snippet
     assert "estimated_tokens_freed" not in snippet
 
 

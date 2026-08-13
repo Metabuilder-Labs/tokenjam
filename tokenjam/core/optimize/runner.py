@@ -7,13 +7,21 @@ so downsize must run first when both are selected.
 """
 from __future__ import annotations
 
+import logging
+
 from dataclasses import asdict
 from datetime import datetime
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from tokenjam.core.config import TjConfig
 from tokenjam.core.framing import agent_persona_mix, config_declared_plan, dominant_persona
 from tokenjam.utils.time_parse import utcnow
+from tokenjam.core.persona_scope import (
+    SCOPING_PERSONAS,
+    add_persona_clause,
+    persona_scopes_population,
+)
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
 from tokenjam.core.optimize.scope import resolve_analyzer_scope
 from tokenjam.core.optimize.types import (
@@ -25,6 +33,8 @@ from tokenjam.core.optimize.types import (
 # Ensure analyzers are imported (triggers @register side effects).
 # Auto-discovery in analyzers/__init__.py walks the directory.
 from tokenjam.core.optimize import analyzers as _analyzers  # noqa: F401
+
+log = logging.getLogger(__name__)
 
 # Deterministic order. Adding a new analyzer? Append to this list. Analyzers
 # requested via positional are filtered against ANALYZER_REGISTRY but executed
@@ -67,8 +77,10 @@ ANALYZER_ORDER: list[str] = [
 # An analyzer that misses any one of those has no business spending query
 # time for that persona. Each entry below records which one it misses.
 #
-# `mixed` / `sdk` / `unknown` disable nothing: the conservative default is to
-# run everything, so an unclassified window never silently loses a finding.
+# `mixed` / `unknown` disable nothing: the conservative default is to run
+# everything, so an unclassified window never silently loses a finding.
+# `sdk` has its own key below, gating analyzers whose data source doesn't
+# exist for that persona.
 PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
     # An interactive coding agent's harness constructs the API request, picks
     # the model for its own main thread, and owns the prompt template. The
@@ -141,12 +153,13 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # finding: it stays enabled for `sdk` / `mixed` / `unknown`.
         "stream-usage",
     }),
-    # An SDK/API window has no on-disk Claude Code transcript and never
-    # populates `sub_agent_id` (no Task-tool subagent-dispatch concept in
-    # generic SDK telemetry) — both analyzers below are gated on a DATA
-    # SOURCE that structurally does not exist for this persona, not on a
-    # missing lever, so every dispatch would run a real query and still
-    # return nothing to act on.
+    # Every analyzer below is gated on an INPUT that structurally does not
+    # exist for this persona, not on a missing lever: an SDK/API window has no
+    # on-disk Claude Code transcript, never populates `sub_agent_id` (no
+    # Task-tool subagent-dispatch concept in generic SDK telemetry), and has no
+    # agent instruction files for the summarize catalog to scan. Each would do
+    # real work — a query, or a filesystem walk — and still return nothing to
+    # act on.
     "sdk": frozenset({
         # Reads project `.mcp.json` / `.claude/settings*.json` / on-disk
         # Claude Code `.jsonl` transcripts (see deadweight.py's module
@@ -158,6 +171,23 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # window can never have a row here, so this always renders a
         # permanently-empty card.
         "subagent",
+        # Summarize prices what a filesystem scan of AGENT INSTRUCTION FILES
+        # found. Its population is the catalog in
+        # `core/summarize/agent_files.toml` — `CLAUDE.md`, `AGENTS.md`,
+        # `GEMINI.md`, `.claude/rules/*.md` and the skill / command / agent
+        # markdown beside them, plus the `~/.claude`, `~/.codex` and
+        # `~/.gemini` equivalents. That is harness configuration; the scan has
+        # never read application source, and the only widening it offers (the
+        # user-invoked `tj summarize list --recursive`) adds `.md`/`.markdown`
+        # files, not the `.py`/`.ts` a prompt template lives in. So an SDK/API
+        # workload's prompt text is outside the population by construction and
+        # the scan returns nothing this persona can act on. NOTE this gate is
+        # `sdk`-only and does not touch Codex or Gemini CLI users: an
+        # interactive coding agent classifies as `claude-code`
+        # (`framing.dominant_persona` via `alerts.is_interactive_coding_agent`),
+        # never `sdk`. `tj summarize` itself stays available to everyone — the
+        # gate drops the analyzer from optimize reports, not the command.
+        "summarize",
     }),
 }
 
@@ -173,6 +203,45 @@ def disabled_analyzers_for_persona(persona: str) -> frozenset[str]:
     return PERSONA_DISABLED_ANALYZERS.get(persona, frozenset())
 
 
+#: The personas a stored report has to be able to ANSWER FOR, not just the one
+#: its corpus resolves to. The dashboard's "Viewing as" picker lets a reader ask
+#: for either side, and the report is computed once in the background — so the
+#: daemon's pass selects analyzers for all of these at once (see
+#: :func:`disabled_analyzers_for_personas`) and the route slices per request.
+#: Derived from the gate map so a third gated persona is covered automatically.
+GATED_PERSONAS: tuple[str, ...] = tuple(PERSONA_DISABLED_ANALYZERS)
+
+
+def disabled_analyzers_for_personas(personas: Sequence[str]) -> frozenset[str]:
+    """Analyzers no persona in ``personas`` has an applicable fix for.
+
+    The INTERSECTION, deliberately — a name only stays gated when *every*
+    requested persona lacks a lever for it. Anything one of them can act on has
+    to run, or the report cannot answer for that persona and a surface asking on
+    its behalf gets an absence it must not read as a result.
+
+    Empty ``personas`` disables nothing, matching the conservative default
+    :func:`disabled_analyzers_for_persona` already takes for an unclassified
+    window.
+    """
+    sets = [disabled_analyzers_for_persona(p) for p in personas]
+    if not sets:
+        return frozenset()
+    return frozenset(set.intersection(*(set(s) for s in sets)))
+
+
+def findings_for_persona(findings: Mapping[str, Any], persona: str) -> dict:
+    """``findings`` with the ones ``persona`` has no lever for removed.
+
+    The read-side counterpart of the dispatch-side skip gate, for a report that
+    was computed for a WIDER persona set than the one being served. Same map,
+    same reasons — a caller must never hand-roll this filter, or the two halves
+    of the gate drift (`ANALYZER-PERSONA-MATRIX.md` §6).
+    """
+    disabled = disabled_analyzers_for_persona(persona)
+    return {k: v for k, v in (findings or {}).items() if k not in disabled}
+
+
 THIN_DATA_DAYS = 7
 
 
@@ -186,17 +255,26 @@ def summarize_window(
     since: datetime,
     until: datetime,
     agent_id: str | None = None,
+    persona_scope: str | None = None,
 ) -> WindowSummary:
+    """Totals for the analyzed window.
+
+    ``persona_scope`` narrows the rows exactly as it narrows every analyzer's,
+    and it MUST: this summary is the denominator a finding's share-of-window is
+    quoted against, so a scoped numerator over an unscoped denominator publishes
+    two figures covering different populations as one ratio.
+    """
     clauses = ["start_time >= $1", "start_time < $2", "model IS NOT NULL"]
     params: list[Any] = [since, until]
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     row = conn.execute(
         f"SELECT COUNT(*) AS spans, "
         f"COUNT(DISTINCT session_id) AS sessions, "
-        f"COUNT(DISTINCT CAST(start_time AS DATE)) AS active_days, "
+        f"COUNT(DISTINCT CAST(start_time AT TIME ZONE 'UTC' AS DATE)) AS active_days, "
         f"COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0) + COALESCE(cache_tokens,0) + COALESCE(cache_write_tokens,0)), 0) AS tokens, "
         f"COALESCE(SUM(cost_usd), 0.0) AS cost "
         f"FROM spans WHERE {where}",
@@ -230,6 +308,8 @@ def build_report(
     findings: list[str] | None = None,
     budget_provider_filter: str | None = None,
     budget_usd_override: float | None = None,
+    personas: Sequence[str] | None = None,
+    persona_scope: str | None = None,
 ) -> OptimizeReport:
     """
     Build a complete OptimizeReport.
@@ -237,6 +317,26 @@ def build_report(
     `findings`:
       - None  -> run all registered analyzers in ANALYZER_ORDER
       - list  -> run only the named analyzers (must be keys in ANALYZER_REGISTRY)
+
+    `personas`:
+      - None  -> gate on the window's own dominant persona (the default, and
+        what every direct caller wants: one persona asked, one persona answered)
+      - list  -> gate on the INTERSECTION of those personas' disabled sets, so
+        the report can answer for any of them. This is for the DAEMON, whose one
+        stored artifact has to serve a UI that lets the reader switch persona.
+        The report still records its own dominant `persona`; what widens is only
+        which analyzers were dispatched, recorded on `computed_analyzers`.
+
+    `persona_scope` is the OTHER half of the gate and a different question.
+    `personas` decides WHICH ANALYZERS run; this decides WHICH ROWS they read.
+    `None` means the whole corpus. Set it and every analyzer's query, and the
+    window summary they quote shares against, narrow to that persona's sessions
+    through the one predicate `alerts.is_interactive_coding_agent` owns. A pass
+    may be widened over `personas` because a union of analyzer NAMES can be
+    sliced afterwards; it can never be widened over `persona_scope`, because a
+    dollar figure computed over two populations cannot be un-mixed on read.
+    That asymmetry is why the daemon runs one pass PER persona
+    (:func:`build_persona_reports`) rather than one pass for all of them.
 
     Analyzers are executed in ANALYZER_ORDER, never in caller-supplied order,
     so dependent analyzers (e.g. budget-projection reading the downgrade
@@ -250,7 +350,9 @@ def build_report(
     if conn is None:
         raise RuntimeError("optimize requires a direct DuckDB connection")
 
-    summary = summarize_window(conn, since, until, agent_id=agent_id)
+    summary = summarize_window(
+        conn, since, until, agent_id=agent_id, persona_scope=persona_scope,
+    )
     window_days = max(summary.days, 1.0 / 86400.0)
 
     # Dominant persona for this window, computed exactly once — see
@@ -261,7 +363,9 @@ def build_report(
     agent_mix = agent_persona_mix(conn, since, until, agent_id=agent_id)
     persona = dominant_persona(agent_mix, declared_plan=config_declared_plan(config))
 
-    report = OptimizeReport(window=summary, persona=persona)
+    report = OptimizeReport(
+        window=summary, persona=persona, persona_scope=persona_scope,
+    )
     if summary.thin_data:
         report.notes.append(
             "Window contains less than ~1 week of activity — projections shown "
@@ -270,6 +374,12 @@ def build_report(
 
     ctx = AnalyzerContext(
         conn=conn,
+        # The owning backend's write lock, so an analyzer that writes through
+        # the raw `conn` can serialize against the backend's own mutating
+        # methods (`.claude/rules/core-architecture.md`). `None` when the caller
+        # passed something without one; the agent-config store then relies on
+        # its retry path instead, which is slower under contention, not wrong.
+        write_lock=getattr(db, "write_lock", None),
         config=config,
         since=since,
         until=until,
@@ -280,6 +390,7 @@ def build_report(
         budget_provider_filter=budget_provider_filter,
         budget_usd_override=budget_usd_override,
         persona=persona,
+        persona_scope=persona_scope,
         # Resolved exactly once, here, for the same reason the persona is: an
         # analyzer that re-derives its own root from `Path.home()` or the env
         # var escapes whatever scope the caller drew, and `--db` stops meaning
@@ -303,20 +414,134 @@ def build_report(
     # COST_ANALYZERS recompute, the status teaser) funnels through this one
     # choke point, so none of them can reintroduce a finding this persona
     # cannot act on. See PERSONA_DISABLED_ANALYZERS for the per-name reasons.
-    selected -= disabled_analyzers_for_persona(persona)
+    #
+    # `personas` widens WHICH personas the gate is resolved for, never which
+    # persona the report claims to be: a pass asked to answer for both sides of
+    # the picker keeps only the names NEITHER side can act on. The read side
+    # narrows again per request (`findings_for_persona`), so the widening can
+    # only ever make an answer available, never leak an unactionable finding to
+    # a persona — every serving path still funnels through the same map.
+    gate_personas = list(personas) if personas else [persona]
+    selected -= disabled_analyzers_for_personas(gate_personas)
+    # WHAT ACTUALLY RAN, recorded before dispatch so a consumer can distinguish
+    # "ran and found nothing" from "never invoked" without re-deriving the gate
+    # against a persona that may not be the one it is serving.
+    report.computed_for_personas = list(gate_personas)
+    report.computed_analyzers = sorted(selected & set(ANALYZER_REGISTRY.keys()))
+
+    def _dispatch(name: str, analyzer: Any) -> None:
+        """Run one analyzer, and DISCLOSE it if it fails.
+
+        The loop used to be bare, so one analyzer raising took `build_report`
+        down with it and lost every other analyzer's findings — a report of
+        thirteen analyzers destroyed by one. That was survivable while every
+        analyzer was pure in-memory computation over already-fetched rows; it
+        stopped being survivable once one of them could hit a database write
+        conflict, which is a failure mode that simply did not exist before.
+
+        Isolation alone would be the WORSE bug, though. An analyzer that
+        vanishes silently reads as "this analyzer found nothing", which is a
+        positive claim the run has no evidence for — exactly the class of defect
+        (root anti-pattern 22) this file's own persona gate is careful about
+        when it drops an analyzer deliberately. So a swallowed failure is
+        recorded on the report, in a field surfaces render, and never merely
+        omitted.
+        """
+        try:
+            analyzer(ctx)
+        except Exception as exc:  # noqa: BLE001 - recorded, not hidden
+            from tokenjam.core.db import is_fatal_db_error
+
+            if is_fatal_db_error(exc):
+                # NOT survivable, and not this analyzer's failure. A fatal
+                # invalidates the whole database instance, so every analyzer
+                # after this one would fail too and the "did not complete"
+                # note would be attached to all of them for the wrong reason.
+                # Recording it as one analyzer's problem and continuing is how
+                # this fatal reached the end of a pass without anything
+                # recovering the connection.
+                report.analyzer_errors[name] = f"{type(exc).__name__}: {exc}"
+                report.notes.append(
+                    f"The database became unusable while running `{name}`, so "
+                    f"this report is incomplete. Nothing here says an analyzer "
+                    f"found nothing."
+                )
+                raise
+            log.exception("analyzer %s failed; continuing with the rest", name)
+            report.analyzer_errors[name] = f"{type(exc).__name__}: {exc}"
+            report.notes.append(
+                f"The `{name}` analyzer did not complete ({type(exc).__name__}), "
+                f"so this report says nothing about it. That is not the same as "
+                f"it finding nothing — re-run to try again."
+            )
 
     for name in ANALYZER_ORDER:
         if name in selected and name in ANALYZER_REGISTRY:
-            ANALYZER_REGISTRY[name](ctx)
+            _dispatch(name, ANALYZER_REGISTRY[name])
 
     # Analyzers not in ANALYZER_ORDER (future ones, registered but not yet
     # explicitly ordered) run last in arbitrary order. Maintainers should add
     # new analyzers to ANALYZER_ORDER when they land.
     for name, analyzer in ANALYZER_REGISTRY.items():
         if name in selected and name not in ANALYZER_ORDER:
-            analyzer(ctx)
+            _dispatch(name, analyzer)
 
     return report
+
+
+def build_persona_reports(
+    db,
+    config: TjConfig,
+    since: datetime,
+    until: datetime | None = None,
+    *,
+    personas: Sequence[str] = SCOPING_PERSONAS,
+    **kwargs: Any,
+) -> OptimizeReport:
+    """One analyzer pass PER persona, returned as one artifact.
+
+    The daemon's entry point. It returns the report for the corpus's own
+    dominant persona — what every persona-blind consumer (the CLI, a stored
+    report read without a persona) should see — with a fully-scoped report for
+    each of ``personas`` hanging off it under
+    :attr:`OptimizeReport.persona_reports`.
+
+    **Why not one widened pass.** The dispatch gate can be widened and sliced on
+    read because it selects analyzer NAMES, and a set of names is separable. A
+    population is not: an analyzer aggregating over Claude Code sessions and SDK
+    sessions together produces one number that contains both, and no read-time
+    filter can take one back out. So a persona-labelled figure has to be
+    computed under that persona's scope, which means a pass each. Each pass is
+    also gated to just that persona's analyzer set, so neither pass pays for
+    analyzers its persona cannot act on.
+
+    Cost is one corpus pass per scoping persona instead of one in total. That
+    is affordable precisely because no request path runs an analyzer — see
+    ``core/optimize/report_store.py``; it is background work, and the
+    alternative is a wrong number on every persona-scoped surface.
+
+    A persona whose scope is the whole corpus (``mixed`` / ``unknown``) is not
+    given its own pass: its scope IS the base report, and giving it a duplicate
+    entry would spend a second corpus scan to recompute an identical answer.
+    """
+    scoping = [p for p in personas if persona_scopes_population(p)]
+    per_persona: dict[str, OptimizeReport] = {
+        p: build_report(db, config, since, until, persona_scope=p, personas=[p], **kwargs)
+        for p in scoping
+    }
+    # The BASE report — unscoped, so it answers for the corpus rather than for
+    # either side of the picker. It is what the CLI and every persona-blind
+    # reader gets, and its `persona` is the corpus's dominant one exactly as
+    # before. Reusing a scoped pass here instead would silently make the
+    # persona-blind view mean "whichever persona happens to dominate", which is
+    # the confusion this whole split exists to end.
+    base = build_report(
+        db, config, since, until, personas=list(personas), **kwargs,
+    )
+    base.persona_reports = {
+        p: report_to_dict(r) for p, r in per_persona.items()
+    }
+    return base
 
 
 def report_to_dict(report: OptimizeReport) -> dict:
@@ -404,11 +629,60 @@ def hydrate_dataclass(cls: Any, d: Any) -> Any:
     for f in dataclasses.fields(cls):
         if f.name not in d:
             continue   # leave the dataclass default in place
-        kwargs[f.name] = _coerce(hints.get(f.name, f.type), d[f.name], ns)
+        kwargs[f.name] = _coerce(_field_hint(f, hints, d[f.name]), d[f.name], ns)
     # `is_dataclass(cls)` narrows to DataclassInstance for mypy, which it then
     # refuses to call; `cls` here is always the CLASS, never an instance.
     ctor: Any = cls
     return ctor(**kwargs)
+
+
+def _hydrate_target(f: Any) -> Any:
+    """The class named by a field's ``hydrate`` metadata, imported lazily.
+
+    A field whose real element type lives in a module the declaring module
+    must not import (an analyzer row inside ``types``, which is deliberately
+    analyzer-free) has no annotation the hydrator can dispatch on — it is
+    written ``list[Any]``, and `Any` coerces to "leave the dict alone". The
+    dict then travels as a correctly-shaped value with the TYPE missing, and
+    the failure surfaces far away as ``'dict' object has no attribute ...``
+    inside whichever consumer expected the row's attributes. That is the same
+    class of silent loss `hydrate_dataclass` was written to end, one layer
+    over: not a dropped field, a dropped type.
+
+    So the type is declared as data instead of as an import: the field carries
+    ``metadata={"hydrate": "package.module:ClassName"}``, and the class is
+    imported HERE, at hydration time, where importing an analyzer is
+    harmless. Unresolvable (a renamed class, a module that will not import)
+    degrades to the annotation the field already had, which is exactly the
+    old behaviour — this can restore a type, never break a load.
+    """
+    spec = (getattr(f, "metadata", None) or {}).get("hydrate")
+    if not spec:
+        return None
+    module_name, _, qualname = str(spec).partition(":")
+    if not module_name or not qualname:
+        return None
+    try:
+        import importlib
+        return getattr(importlib.import_module(module_name), qualname, None)
+    except Exception:
+        return None
+
+
+def _field_hint(f: Any, hints: dict, value: Any) -> Any:
+    """The type hint to coerce one field against, preferring its ``hydrate``
+    metadata over a loose annotation. Container-shaped values keep their
+    container (``list[Any]`` becomes ``list[Row]``, not ``Row``)."""
+    import dataclasses
+    import typing
+
+    hint = hints.get(f.name, f.type)
+    target = _hydrate_target(f)
+    if target is None or not dataclasses.is_dataclass(target):
+        return hint
+    if typing.get_origin(hint) in (list, tuple) or isinstance(value, list):
+        return list[target]      # type: ignore[valid-type]
+    return target
 
 
 def _resolve(hint: Any, ns: dict) -> Any:
@@ -530,6 +804,19 @@ def report_from_dict(d: dict) -> OptimizeReport:
         notes=list(d.get("notes") or []),
         findings=findings,
         persona=str(d.get("persona", "unknown")),
+        # WHAT RAN, and FOR WHOM, and OVER WHAT ROWS — the three facts that let
+        # a rehydrated report be served for a persona other than its own
+        # without lying. Dropping them (as this constructor used to) collapses
+        # "never invoked" into "found nothing" and lets a whole-corpus figure be
+        # published under a persona label, which are the two failure modes the
+        # fields exist to prevent. `persona_scope` absent means the artifact
+        # predates population scoping: `None`, i.e. unscoped, which is the
+        # truth about it and not a defect to paper over.
+        computed_analyzers=list(d.get("computed_analyzers") or []),
+        computed_for_personas=list(d.get("computed_for_personas") or []),
+        analyzer_errors=dict(d.get("analyzer_errors") or {}),
+        persona_scope=d.get("persona_scope") or None,
+        persona_reports=dict(d.get("persona_reports") or {}),
         # Round-tripped like every other report-level field: a report rebuilt
         # from the daemon's cache must still be able to say its filesystem
         # analyzers never scanned, or a served surface silently reads an

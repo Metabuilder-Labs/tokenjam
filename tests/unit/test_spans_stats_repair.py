@@ -15,7 +15,11 @@ import duckdb
 import pytest
 
 from tokenjam.core.db import (
+    SPANS_INDEX_SQL,
+    SPANS_INDEXES,
+    check_spans_index_corruption,
     check_spans_stats_corruption,
+    repair_spans_indexes,
     repair_spans_stats,
     run_migrations,
 )
@@ -175,3 +179,108 @@ class TestRepairPreservesSchema:
         finally:
             fresh.close()
         assert repaired == expected
+
+
+class TestCheckSpansIndexCorruption:
+    """The fault the column-statistics check next door is structurally blind to.
+
+    `check_spans_stats_corruption` asks exactly one question — is `trace_id`'s
+    row-group statistics fast-path lying — and answers "healthy" for a spans
+    table whose secondary indexes have been destroyed outright. That matters
+    because the retention job deletes user history through those indexes: DuckDB
+    maintains every one of them inside the deleting transaction, so a damaged
+    index can abort the DELETE part-way and leave it reporting fewer rows
+    removed than it matched.
+    """
+
+    def test_a_healthy_table_reports_no_faults(self, conn):
+        for i in range(5):
+            _insert_minimal_span(conn, trace_id=f"trace{i:02d}", span_id=f"span{i:02d}")
+        assert check_spans_index_corruption(conn) == []
+
+    def test_an_empty_table_reports_no_faults(self, conn):
+        """Nothing to demonstrate is not the same as something to report."""
+        assert check_spans_index_corruption(conn) == []
+
+    def test_a_missing_table_reports_no_faults(self, tmp_path):
+        c = duckdb.connect(str(tmp_path / "fresh.duckdb"))
+        try:
+            assert check_spans_index_corruption(c) == []
+        finally:
+            c.close()
+
+    def test_a_dropped_index_is_reported_by_name(self, conn):
+        _insert_minimal_span(conn, trace_id="t1", span_id="s1")
+        conn.execute("DROP INDEX idx_spans_start_time")
+        faults = check_spans_index_corruption(conn)
+        assert [name for name, _ in faults] == ["idx_spans_start_time"]
+        assert "absent" in faults[0][1]
+
+    def test_every_declared_index_is_probed(self, conn):
+        """A name added to SPANS_INDEXES must be checked without a second edit.
+
+        The guard that keeps this check from falling behind the schema the way
+        a hand-kept parallel list would.
+        """
+        _insert_minimal_span(conn, trace_id="t1", span_id="s1")
+        for index_name, _ in SPANS_INDEXES:
+            conn.execute(f"DROP INDEX {index_name}")
+        assert {name for name, _ in check_spans_index_corruption(conn)} == {
+            name for name, _ in SPANS_INDEXES
+        }
+        conn.execute(SPANS_INDEX_SQL)
+
+    def test_an_index_returning_fewer_rows_than_the_table_is_reported(self):
+        """The under-reporting fault, which cannot be staged in real DuckDB.
+
+        A genuinely torn ART index is not something SQL can construct on demand,
+        so the probe's arithmetic is exercised directly: the index-served count
+        comes back below the scan-served one for the same value. Asserting on
+        the shape of the two queries rather than on a corrupted file is the only
+        way to pin this half at all, and it is the half that decides whether the
+        check can ever fire on the fault it was written for.
+        """
+        class TornIndexConn:
+            def execute(self, sql, params=None):
+                self._sql = sql
+                return self
+
+            def fetchall(self):
+                if "duckdb_indexes()" in self._sql:
+                    return [(name,) for name, _ in SPANS_INDEXES]
+                return [("probe-value",)]          # the sample lookup
+
+            def fetchone(self):
+                # The scan sees three rows; the index admits to one.
+                return (1,) if "CAST(" not in self._sql else (3,)
+
+        faults = check_spans_index_corruption(TornIndexConn())
+        assert {name for name, _ in faults} == {name for name, _ in SPANS_INDEXES}
+        assert "1 of 3" in faults[0][1]
+
+
+class TestRepairSpansIndexes:
+    def test_it_puts_a_dropped_index_back(self, conn):
+        _insert_minimal_span(conn, trace_id="t1", span_id="s1")
+        conn.execute("DROP INDEX idx_spans_conv_id")
+        repair_spans_indexes(conn)
+        assert check_spans_index_corruption(conn) == []
+
+    def test_it_moves_no_rows(self, conn):
+        for i in range(20):
+            _insert_minimal_span(conn, trace_id=f"trace{i:02d}", span_id=f"span{i:02d}")
+        before = conn.execute(
+            "SELECT span_id, trace_id, start_time FROM spans ORDER BY span_id"
+        ).fetchall()
+        conn.execute("DROP INDEX idx_spans_trace_id")
+        repair_spans_indexes(conn)
+        after = conn.execute(
+            "SELECT span_id, trace_id, start_time FROM spans ORDER BY span_id"
+        ).fetchall()
+        assert after == before
+
+    def test_it_is_idempotent_on_a_healthy_table(self, conn):
+        _insert_minimal_span(conn, trace_id="t1", span_id="s1")
+        repair_spans_indexes(conn)
+        repair_spans_indexes(conn)
+        assert check_spans_index_corruption(conn) == []

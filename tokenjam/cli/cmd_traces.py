@@ -5,12 +5,13 @@ import json
 import click
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.models import NormalizedSpan, TraceFilters
 from tokenjam.utils.formatting import console, format_cost, make_table
 from tokenjam.utils.time_parse import parse_since
 
 
-@click.command("traces")
+@click.command("traces", cls=TjCommand)
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("--since", default="24h", help="Time window (e.g. 1h, 7d)")
 @click.option("--limit", default=50, type=int)
@@ -74,7 +75,7 @@ def cmd_traces(ctx: click.Context, agent: str | None, since: str, limit: int,
     console.print(table)
 
 
-@click.command("trace")
+@click.command("trace", cls=TjCommand)
 @click.argument("trace_id")
 @json_option
 @click.pass_context

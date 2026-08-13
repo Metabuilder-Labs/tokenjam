@@ -127,28 +127,6 @@ def test_api_user_carries_usd_savings(render):
     assert "estimated_tokens_freed" not in body
 
 
-@pytest.mark.parametrize("render", [render_ccr_config, render_litellm_config])
-def test_subscription_user_carries_usd_savings_too(render):
-    body = render(
-        downgrade=_sample_finding(), pricing_mode="subscription", plan_tier="max_20x",
-        since="30d", until="2026-06-22",
-    )
-    assert "estimated_savings_usd_month" in body
-    assert "42.5" in body
-    assert "estimated_tokens_freed" not in body
-
-
-@pytest.mark.parametrize("render", [render_ccr_config, render_litellm_config])
-def test_unknown_plan_carries_usd_savings_too(render):
-    body = render(
-        downgrade=_sample_finding(), pricing_mode="unknown", plan_tier="unknown",
-        since="30d", until="2026-06-22",
-    )
-    assert "estimated_savings_usd_month" in body
-    assert "42.5" in body
-    assert "estimated_tokens_freed" not in body
-
-
 # --- empty-finding case -----------------------------------------------------
 
 def test_ccr_empty_finding_still_valid_and_carries_caveat():

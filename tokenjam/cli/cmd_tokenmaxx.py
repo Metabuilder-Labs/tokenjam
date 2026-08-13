@@ -31,6 +31,7 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.context_diagnostic import ContextDiagnostic
 from tokenjam.core.framing import Framing
 from tokenjam.utils.formatting import console, format_tokens
@@ -73,7 +74,7 @@ def _classify(overhead_share: float) -> Tier:
     return _TIERS[-1]
 
 
-@click.command("tokenmaxx")
+@click.command("tokenmaxx", cls=TjCommand, status_message="Building your efficiency card…")
 @click.option("--agent", default=None, help="Filter to a specific agent_id.")
 @click.option("--since", default="30d", help="Window for analysis (default 30d).")
 @click.option("--weekly", is_flag=True,
@@ -82,7 +83,7 @@ def _classify(overhead_share: float) -> Tier:
 @click.pass_context
 def cmd_tokenmaxx(ctx: click.Context, agent: str | None, since: str,
                   weekly: bool, output_json_flag: bool) -> None:
-    """Your quota/efficiency card: how lean is your context? (screenshottable)"""
+    """Your shareable efficiency card."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
@@ -143,10 +144,6 @@ def cmd_tokenmaxx(ctx: click.Context, agent: str | None, since: str,
 
 # ───────────────────────────── helpers ────────────────────────────────────
 
-def _pct(value: float) -> str:
-    return f"{value * 100:.1f}%"
-
-
 def _quota_share(tokens: int, framing: Framing) -> str:
     """Render a token figure as a quota share on a subscription plan.
 
@@ -200,26 +197,28 @@ def _render(
     quip_text = _highlight_commands(tier.quip)
 
     # ── Composition block — overhead vs real work, quota-framed. ──
+    # Each share is stated ONCE, with its token count folded into the prose
+    # (subscription → "X% of cycle tokens" via _quota_share; else raw share).
+    # The parenthetical carries the measured token counts the old separate
+    # breakdown block used to duplicate (#672).
     body = Text()
-    body.append(f"{_pct(overhead_share)} ", style="bold red")
-    body.append("of your quota went to ")
+    body.append(_quota_share(diag.total_reread_tokens, framing), style="bold red")
+    body.append(" went to ")
     body.append("overhead", style="bold")
-    body.append(" — re-reading history, CLAUDE.md, tool output.", style="dim")
+    body.append(
+        f" — re-reading history, CLAUDE.md, tool output "
+        f"({format_tokens(diag.total_reread_tokens)} cache reads).",
+        style="dim",
+    )
     body.append("\n")
-    body.append(f"{_pct(work_share)} ", style="bold green")
-    body.append("did ")
+    body.append(_quota_share(diag.total_work_tokens, framing), style="bold green")
+    body.append(" did ")
     body.append("real work", style="bold")
-    body.append(" — uncached input + output.", style="dim")
-
-    # Quota-native breakdown (subscription → "% of cycle"; else token counts).
-    body.append("\n\nOverhead:  ", style="dim")
-    body.append(_quota_share(diag.total_reread_tokens, framing), style="bold")
-    body.append(f"  ({format_tokens(diag.total_reread_tokens)} cache reads)",
-                style="dim")
-    body.append("\nReal work: ", style="dim")
-    body.append(_quota_share(diag.total_work_tokens, framing), style="bold")
-    body.append(f"  ({format_tokens(diag.total_work_tokens)} tokens)",
-                style="dim")
+    body.append(
+        f" — uncached input + output "
+        f"({format_tokens(diag.total_work_tokens)} tokens).",
+        style="dim",
+    )
     body.append(
         f"\n\nAcross {diag.sessions} sessions, {diag.turns} turns ({window_label}).",
         style="dim",
@@ -235,6 +234,11 @@ def _render(
     # ── Action line — what you can reclaim, never a guaranteed saving. ──
     action = Text("💡 ")
     if diag.compact_candidates:
+        # Show the RECLAIMABLE figure — the overhead that actually sits in the
+        # compactable sessions — not the window-wide total. These sessions are a
+        # threshold-filtered, capped subset, so "that overhead" (the headline %)
+        # would overstate how much is here (Greptile, #672). This is a distinct,
+        # actionable number, not a restatement of the composition block above.
         reclaimable = sum(c.reread_tokens for c in diag.compact_candidates)
         action.append(_quota_share(reclaimable, framing), style="bold")
         action.append(" sits in ")

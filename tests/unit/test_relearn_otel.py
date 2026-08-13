@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tokenjam.core.db import InMemoryBackend
+from tokenjam.core import distill as distill_mod
 from tokenjam.core.optimize.analyzers.relearn import (
     FailureEpisode,
     analyze_relearns,
@@ -88,6 +89,13 @@ def test_skips_coding_agents_so_transcripts_are_not_double_counted(db):
 
 
 def test_falls_back_to_span_name_when_no_status_message(db):
+    """A span with no ``status_message`` still becomes a FailureEpisode (the
+    failure is real, and the money it cost is real — see
+    BELOW_THRESHOLD_BASIS), but the fallback text is the span's own NAME, not
+    a diagnosis. It must be marked as such: `error_text_is_name_fallback`
+    downstream keeps it out of the distill pass and out of any shared
+    signature with unrelated failures (see `_failure_signature` /
+    `_evidence_too_thin_for_distill` in `analyzers/relearn.py`)."""
     span = make_tool_span(
         agent_id="billing-svc", tool_name="", status="error",
         session_id="s1", start_time=BASE, name="gen_ai.tool.call",
@@ -99,6 +107,17 @@ def test_falls_back_to_span_name_when_no_status_message(db):
 
     assert len(failures) == 1
     assert failures[0].error_text == "gen_ai.tool.call"
+    assert failures[0].error_text_is_name_fallback is True
+
+
+def test_real_status_message_is_not_flagged_as_name_fallback(db):
+    _seed_failure(db, agent_id="billing-svc", session_id="s1",
+                  message="ConnectionResetError: peer closed")
+
+    failures = extract_span_failures(db.conn)
+
+    assert len(failures) == 1
+    assert failures[0].error_text_is_name_fallback is False
 
 
 def test_since_filters_older_spans(db):
@@ -153,6 +172,83 @@ def test_recurring_span_failures_become_a_proposal(db):
     assert finding.clusters[0].sessions == 3
     # Span-sourced sessions count as scanned exposure.
     assert finding.sessions_scanned == 3
+
+
+def test_text_less_span_failures_never_merge_across_sessions(db):
+    """Old behavior: every span with no status_message on the same tool fell
+    back to the SAME span-name string and clustered as one shared signature
+    across every session, however unrelated the underlying calls actually
+    were. Now a name-fallback failure is scoped to its own session — see
+    `_failure_signature` in analyzers/relearn.py."""
+    for i, sid in enumerate(("s1", "s2", "s3", "s4")):
+        span = make_tool_span(
+            agent_id="billing-svc", tool_name="Bash", status="error",
+            session_id=sid, start_time=BASE + timedelta(minutes=i),
+            name="gen_ai.tool.call",
+        )
+        span.status_message = None
+        db.insert_span(span)
+
+    failures = extract_span_failures(db.conn)
+    assert len(failures) == 4
+    assert all(f.error_text_is_name_fallback for f in failures)
+
+    clusters = cluster_failures(failures)
+
+    # Four unrelated no-error-text failures must never collapse into one
+    # shared signature — each keeps its own, one per session.
+    assert len(clusters) == 4
+    assert all(len(c.session_ids) == 1 for c in clusters.values())
+
+
+def test_text_less_span_failures_never_become_a_recurring_proposal(db):
+    for i, sid in enumerate(("s1", "s2", "s3", "s4", "s5")):
+        span = make_tool_span(
+            agent_id="billing-svc", tool_name="Bash", status="error",
+            session_id=sid, start_time=BASE + timedelta(minutes=i),
+            name="gen_ai.tool.call",
+        )
+        span.status_message = None
+        db.insert_span(span)
+
+    finding = analyze_relearns(
+        [], extra_failures=extract_span_failures(db.conn),
+        advise_only_repos=non_coding_agent_ids(db.conn), distill_enabled=False,
+    )
+
+    # Never a recurring cluster despite 5 sessions all hitting the same
+    # name-fallback shape — the cost is still counted, as below-threshold
+    # residue (Critical Rule 32(b): the money stays counted), just never
+    # asserted as a named, recurring relearn.
+    assert finding.clusters == []
+    assert finding.below_threshold_occurrences == 5
+
+
+def test_text_less_spans_never_reach_the_distill_pass(db, monkeypatch):
+    """The primary fix: spending a model call to NAME a failure that carries
+    no error text at all must never happen, however many sessions hit it."""
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("distill must never be invoked for a name-fallback cluster")
+
+    monkeypatch.setattr(distill_mod, "_invoke_claude", _boom)
+
+    for i, sid in enumerate(("s1", "s2", "s3", "s4", "s5")):
+        span = make_tool_span(
+            agent_id="billing-svc", tool_name="Bash", status="error",
+            session_id=sid, start_time=BASE + timedelta(minutes=i),
+            name="gen_ai.tool.call",
+        )
+        span.status_message = None
+        db.insert_span(span)
+
+    # distill_enabled=True on purpose — this proves the exclusion, not the
+    # opt-out flag.
+    finding = analyze_relearns(
+        [], extra_failures=extract_span_failures(db.conn),
+        advise_only_repos=non_coding_agent_ids(db.conn), distill_enabled=True,
+    )
+
+    assert finding.clusters == []
 
 
 def test_below_recurrence_threshold_does_not_surface(db):

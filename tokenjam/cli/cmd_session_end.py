@@ -17,17 +17,22 @@ import urllib.request
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand
+
 _REQUEST_TIMEOUT_S = 2.0
 
 
-@click.command("session-end")
+#: Structural opt-out: called best-effort by the shell wrapper on every
+#: `claude` exit and must never break or visibly interrupt the user's shell —
+#: it is intentionally silent unless -v (see module docstring).
+@click.command("session-end", cls=TjCommand, no_status=True)
 @click.option("--instance", default=None,
               help="service.instance.id of the terminal whose sessions to close")
 @click.option("--session", default=None,
               help="session_id to close (alternative/addition to --instance)")
 @click.pass_context
 def cmd_session_end(ctx: click.Context, instance: str | None, session: str | None) -> None:
-    """Mark a terminal's active sessions as closed (best-effort, over HTTP)."""
+    """Mark a terminal's sessions as closed."""
     if not instance and not session:
         raise click.UsageError("Provide --instance and/or --session.")
 

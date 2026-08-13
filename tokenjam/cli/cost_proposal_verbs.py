@@ -39,6 +39,7 @@ import json
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.framing import (
     Framing,
     WindowSummary,
@@ -53,6 +54,8 @@ from tokenjam.core.optimize import (
     relearn_proposals,
     relearn_store,
 )
+from tokenjam.core.rulewrite.kinds import DEFAULT_DELIVERY
+from tokenjam.core.rulewrite.legacy import delivery_from_legacy_record
 from tokenjam.utils.formatting import console
 
 
@@ -107,7 +110,7 @@ def _stored_cost_proposal(config, proposal_id: str) -> dict | None:
 # cost-proposals: the list/render verb.
 # --------------------------------------------------------------------------- #
 
-@click.command("cost-proposals")
+@click.command("cost-proposals", cls=TjCommand)
 @click.pass_context
 def cost_proposals_cmd(ctx: click.Context) -> None:
     """List cost-saving fixes (downsize/cache/trim/subagent/deadweight/
@@ -143,10 +146,7 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
         )
         return
 
-    applied_sigs = {
-        str(rec.get("signature") or "") for rec in cost_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
+    applied_sigs = cost_apply.applied_signatures(config)
     open_proposals = [
         p for p in proposals
         if not cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
@@ -159,40 +159,21 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
     # inbox_contribution.py` -- never a second aggregate, never re-derived
     # per surface. This terminal rollup used to cover cost proposals only,
     # which made it a smaller, disagreeing number for the same underlying
-    # data. Reuse the exact same shared-module calls the API route makes
-    # rather than re-deriving the rollup logic here.
-    from tokenjam.core.optimize.cost_proposals import past_overspend_rollup
-
+    # data. `gather_rollup_population` is the ONE function allowed to reach
+    # `past_overspend_rollup` (see its docstring): it always gathers both
+    # feeds, so this call site cannot regress back to a cost-proposals-only
+    # sum by forgetting the relearn half the way this file once did.
     window_days = inbox_contribution.headline_window_days(block)
     relearn_cache = relearn_store.read_cache(config=config)
     relearn_finding = (relearn_cache or {}).get("finding")
-    relearn_label = inbox_contribution.contribution_window_label(
-        relearn_finding, window_days,
+    relearn_applied_sigs = relearn_apply.applied_signatures(config)
+    rollup = inbox_contribution.gather_rollup_population(
+        open_proposals, relearn_finding, window_days=window_days,
+        relearn_applied_signatures=relearn_applied_sigs,
+        cost_excluded=(block.get("cost_excluded") or {}) if block else None,
     )
-    relearn_applied_sigs = {
-        str(rec.get("signature") or "")
-        for rec in relearn_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
-    relearn_rows = inbox_contribution.relearn_contribution_rows(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
-    )
-    unrepresented = inbox_contribution.unrepresented_relearn(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
-    )
-    excluded = {
-        **((block.get("cost_excluded") or {}) if block else {}),
-        **inbox_contribution.relearn_excluded_entry(
-            unrepresented, reason=inbox_contribution.NO_BOUNDED_WINDOW_REASON,
-        ),
-    }
 
-    if open_proposals or relearn_rows:
-        rollup = past_overspend_rollup(
-            open_proposals + relearn_rows, window_days=window_days, excluded=excluded,
-        )
+    if rollup.get("deduplicated_proposal_count"):
         headline = render_savings(
             rollup.get("past_overspend_usd"),
             rollup.get("past_overspend_tokens"),
@@ -286,7 +267,7 @@ def _render_cost_proposal(
 # cost-apply: the workspace-write verb, apply_capable proposals only.
 # --------------------------------------------------------------------------- #
 
-@click.command("cost-apply")
+@click.command("cost-apply", cls=TjCommand)
 @click.argument("proposal_id")
 @click.option("--go", is_flag=True, help="Actually write the fix (default is a dry run).")
 @click.option("--target", "target_path", default=None,
@@ -330,8 +311,8 @@ def cost_apply_cmd(
 
     analyzer = str(stored.get("analyzer") or "")
     baseline = dict(stored.get("baseline") or {})
-    # The cluster shape `relearn_apply.apply_relearn_fix` renders a rung-1/2
-    # note/skill from, built the same way `POST
+    # The cluster shape `relearn_apply.apply_relearn_fix` renders a rule or
+    # skill from, built the same way `POST
     # /relearn/cost-proposals/apply-workspace` builds it
     # (api/routes/relearn.py) -- duplicated here rather than imported,
     # because the CLI must not import across into the API layer.
@@ -340,7 +321,11 @@ def cost_apply_cmd(
         "family_key": f"cost_{analyzer}" if analyzer else "cost_proposal",
         "title": str(stored.get("title") or "") or str(stored.get("signature") or ""),
         "proposed_fix": str(stored.get("proposed_fix") or ""),
-        "rung": int(stored.get("rung") or 1),
+        # A stored proposal names its own mechanism; a cache written by an
+        # older build named a ladder number, mapped on read. Never defaulted
+        # blindly: what this resolves to decides which artifact is written to
+        # a real path.
+        "delivery": delivery_from_legacy_record(stored) or DEFAULT_DELIVERY,
         "sessions": int(
             baseline.get("apply_sessions", baseline.get("flagged_subagents", 0)) or 0
         ),
@@ -394,7 +379,7 @@ def cost_apply_cmd(
 # cost-mark-applied / cost-revert: the advise-only bookkeeping verbs.
 # --------------------------------------------------------------------------- #
 
-@click.command("cost-mark-applied")
+@click.command("cost-mark-applied", cls=TjCommand)
 @click.argument("proposal_id")
 @click.pass_context
 def cost_mark_applied_cmd(ctx: click.Context, proposal_id: str) -> None:
@@ -430,7 +415,7 @@ def cost_mark_applied_cmd(ctx: click.Context, proposal_id: str) -> None:
     console.print(f"[dim]Undo with `tj relearn cost-revert {rec['id']}`.[/dim]")
 
 
-@click.command("cost-revert")
+@click.command("cost-revert", cls=TjCommand)
 @click.argument("record_id")
 @click.pass_context
 def cost_revert_cmd(ctx: click.Context, record_id: str) -> None:

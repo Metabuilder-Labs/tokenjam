@@ -45,6 +45,7 @@ from tokenjam.cli.cmd_uninstall import (
     _installed_via_uv_tool,
     _is_ephemeral_runner,
 )
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.server_state import (
     ServerState,
     is_pid_alive,
@@ -337,11 +338,10 @@ def poll_daemon_version(
         sleep(interval_s)
 
 
-@click.command("upgrade")
+@click.command("upgrade", cls=TjCommand, status_message="Upgrading tj…")
 @click.pass_context
 def cmd_upgrade(ctx: click.Context) -> None:
-    """Upgrade the tokenjam package and restart the daemon so the dashboard
-    actually reflects the new version."""
+    """Upgrade tj and restart the daemon."""
     old_version = __version__
 
     plan = detect_upgrade_plan()

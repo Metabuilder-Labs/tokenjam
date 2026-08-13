@@ -51,7 +51,7 @@ def test_non_tty_prints_periodically_not_every_session(capsys):
         for i in range(150):
             cb(_parsed(f"s{i}"), _result(i + 1))
     out = capsys.readouterr().out
-    # Cadence is every 100th session — one line at #100, not at every session.
+    # Cadence is every 100th transcript: one line at 100, not one per file.
     assert out.count("Backfilling") == 1
     assert "100/250" in out
 
@@ -64,8 +64,8 @@ def test_non_tty_line_includes_running_token_total(capsys):
     # 100 sessions * 150 tokens = 15,000 -> humanized as "15.0k" by format_tokens.
     assert "15.0k tokens read" in out
     # No total was given, so no "/total" suffix — just the running count.
-    assert "100 sessions" in out
-    assert "/" not in out.split("sessions")[0]
+    assert "100 transcripts" in out
+    assert "/" not in out.split("transcripts")[0]
 
 
 def test_no_total_shows_bare_running_count(capsys):
@@ -73,4 +73,4 @@ def test_no_total_shows_bare_running_count(capsys):
         for i in range(100):
             cb(_parsed(f"s{i}"), _result(i + 1))
     out = capsys.readouterr().out
-    assert "100 sessions" in out
+    assert "100 transcripts" in out

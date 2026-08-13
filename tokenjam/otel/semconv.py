@@ -265,7 +265,21 @@ class TjAttributes:
     # for a shared-prefix match (cache-recommend) always came up empty. This
     # carries the one thing that actually IS resent identically call after
     # call. Gated by the same [capture] `prompts` toggle as PROMPT_CONTENT.
+    # LEGACY, read-only. Spans written before the compact form below carry the
+    # prefix text itself. `cache_recommend` still falls back to this key so
+    # existing history keeps working; nothing writes it any more.
     SYSTEM_PREFIX_CONTENT = "tokenjam.system_prefix.content"
+
+    # The compact form, written instead of the text. The value was identical
+    # across every span of a project, so storing it whole cost (size x span
+    # count): 92,514 spans holding ~43 KB each came to 4.06 GB on disk carrying
+    # 1.84 MB of distinct text, all of which had to page through DuckDB's buffer
+    # pool on every scan of the table. These three carry every answer the
+    # analyzer took from the text, in ~230 bytes rather than ~43,000. Derived by
+    # `core.system_prefix`, which is the single source both sides use.
+    SYSTEM_PREFIX_HASH = "tokenjam.system_prefix.hash"
+    SYSTEM_PREFIX_SAMPLE = "tokenjam.system_prefix.sample"
+    SYSTEM_PREFIX_LENGTH = "tokenjam.system_prefix.length"
 
     # Enforcement-plane self-observation (#223). The proxy emits one span per
     # recorded policy decision under this namespace so the web UI + drift see

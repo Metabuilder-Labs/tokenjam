@@ -31,6 +31,7 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.context_diagnostic import (
     INCLUSION_FILE_READ,
     INCLUSION_PROMPT,
@@ -52,7 +53,7 @@ _INCLUSION_LABELS = {
 }
 
 
-@click.command("context")
+@click.command("context", cls=TjCommand, status_message="Computing context composition…")
 @click.option("--agent", default=None, help="Filter to a specific agent_id.")
 @click.option("--since", default="30d",
               help="Window for analysis (e.g. 7d, 30d, 2026-03-01). Default 30d.")
@@ -60,7 +61,7 @@ _INCLUSION_LABELS = {
 @click.pass_context
 def cmd_context(ctx: click.Context, agent: str | None, since: str,
                 output_json_flag: bool) -> None:
-    """Diagnose where your Claude Code quota goes: re-reading vs. real work."""
+    """See where your Claude Code quota goes."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
@@ -133,76 +134,88 @@ def _render(diag: ContextDiagnostic, framing: Framing, *, since: str) -> None:
     headline.append(f"  ·  {diag.sessions} sessions, {diag.turns} turns "
                     f"(last {since})", style="dim")
 
+    # Prose pair carries the token counts inline, so the Re-read / New-work
+    # percentages are stated exactly once (#673). Only the genuinely-new
+    # Cache-miss figure survives in the breakdown block below.
     reread = Text()
-    reread.append(f"{_pct(diag.reread_share)} ", style="bold red")
+    reread.append(f"{_pct(diag.reread_share)} ", style="bold")
     reread.append("of your tokens went to ", style="")
     reread.append("re-reading context", style="bold")
-    reread.append(" (history, CLAUDE.md, tool output)", style="dim")
+    reread.append(f" — history, CLAUDE.md, tool output "
+                  f"({format_tokens(diag.total_reread_tokens)} cache reads)",
+                  style="dim")
 
     work = Text()
     work_share = (
         diag.total_work_tokens / diag.total_tokens if diag.total_tokens else 0.0
     )
-    work.append(f"{_pct(work_share)} ", style="bold green")
+    work.append(f"{_pct(work_share)} ", style="bold")
     work.append("went to ", style="")
     work.append("net-new work", style="bold")
-    work.append(" (uncached input + output)", style="dim")
+    work.append(f" — uncached input + output "
+                f"({format_tokens(diag.total_work_tokens)} tokens)",
+                style="dim")
 
     breakdown = Text()
-    breakdown.append("\nRe-read:    ", style="dim")
-    breakdown.append(_quota_share(diag.total_reread_tokens, framing), style="bold")
-    breakdown.append(f"  ({format_tokens(diag.total_reread_tokens)} cache reads)",
-                     style="dim")
-    # Named overhead source: prompt-cache MISS (cache-creation), #11. Shown only
-    # when present so default/zero-cache-write output stays clean.
+    # Named overhead source: prompt-cache MISS (cache-creation), #11 — the one
+    # figure not already stated in the prose pair. Shown only when present so
+    # default/zero-cache-write output stays clean.
     if diag.total_cache_miss_tokens > 0:
-        breakdown.append("\nCache-miss: ", style="dim")
+        breakdown.append("Cache-miss: ", style="dim")
         breakdown.append(_quota_share(diag.total_cache_miss_tokens, framing),
-                         style="bold yellow")
+                         style="warn")
         breakdown.append(
             f"  ({format_tokens(diag.total_cache_miss_tokens)} cache writes, "
             "billed at a premium)", style="dim")
-    breakdown.append("\nNew work:   ", style="dim")
-    breakdown.append(_quota_share(diag.total_work_tokens, framing), style="bold")
-    breakdown.append(f"  ({format_tokens(diag.total_work_tokens)} tokens)",
-                     style="dim")
 
     # Secondary: implied dollars for API users / calibration. Never headline.
     if framing.pricing_mode in ("api", "unknown") and diag.total_cost_usd > 0:
-        breakdown.append("\nImplied $: ", style="dim")
+        if breakdown.plain:
+            breakdown.append("\n")
+        breakdown.append("Implied $: ", style="dim")
         breakdown.append(f"${diag.total_cost_usd:,.2f}", style="bold")
         breakdown.append(" over the window", style="dim")
 
-    sections: list[Any] = [headline, Text(""), reread, work, breakdown]
+    # The breakdown block may be empty now (no cache-miss, no implied-$ line),
+    # in which case it is left out entirely rather than rendering a blank row.
+    sections: list[Any] = [headline, Text(""), reread, work]
+    if breakdown.plain:
+        sections.append(breakdown)
 
     # ── Recurring inclusions (capture-gated, multi-kind). ──
     sections.append(Text(""))
-    rec_header = Text("Recurring inclusions", style="bold")
-    sections.append(rec_header)
     any_capture = (
         diag.tool_inputs_captured
         or diag.prompts_captured
         or diag.tool_outputs_captured
     )
     if diag.recurring:
+        # State the shared structural instruction ONCE as the section intro,
+        # then list each file compactly with just its `@path` reference + counts
+        # — the path is printed once per file, never repeated inside a per-item
+        # fix sentence (#673).
+        rec_header = Text("Recurring inclusions", style="bold")
+        rec_header.append(
+            " — reference these as `@path` (or add to CLAUDE.md) instead of "
+            "re-reading them every session:", style="dim")
+        sections.append(rec_header)
         for r in diag.recurring[:5]:
             line = Text("  · ", style="dim")
             line.append(f"[{_INCLUSION_LABELS.get(r.inclusion_type, 'repeat')}] ",
-                        style="cyan")
-            line.append(r.target, style="bold")
+                        style="dim")
+            line.append(f"@{r.target}", style="accent")
             line.append(f"  ×{r.occurrences} ({r.sessions} sessions)",
                         style="dim")
             sections.append(line)
-            fix = Text("    → ", style="green")
-            fix.append(r.fix, style="dim")
-            sections.append(fix)
     elif not any_capture:
+        sections.append(Text("Recurring inclusions", style="bold"))
         sections.append(Align.left(Text(
             "  Needs content capture (`[capture] tool_inputs / prompts / "
             "tool_outputs = true`) — see note below.",
             style="dim yellow",
         )))
     else:
+        sections.append(Text("Recurring inclusions", style="bold"))
         sections.append(Align.left(Text(
             "  None recurring across enough sessions/turns yet.", style="dim",
         )))

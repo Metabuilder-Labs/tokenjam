@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from tests.summarize_fakes import compliant_summary, envelope_like
 from tokenjam.cli.main import cli
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize import candidates
@@ -247,10 +248,9 @@ _RUN = "tokenjam.core.summarize.delivery.subprocess.run"
 
 
 def _fake_claude():
-    """`subprocess.run` stand-in for the CLI: echo every marker so restore() succeeds (no real claude)."""
+    """`subprocess.run` stand-in for the CLI: a model that obeyed the contract (no real claude)."""
     def _run(cmd, *, input, capture_output, text, timeout=None):
-        markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', input, re.DOTALL)
-        return SimpleNamespace(returncode=0, stdout="Be careful; never skip. " + " ".join(markers), stderr="")
+        return SimpleNamespace(returncode=0, stdout=compliant_summary(input), stderr="")
     return _run
 
 
@@ -313,10 +313,9 @@ def _fake_api():
     """`httpx.post` stand-in for the CLI api path: echo markers + report usage (no network)."""
     def _post(url, *, timeout, headers, json):
         wrapped = json["messages"][0]["content"]
-        markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', wrapped, re.DOTALL)
         return SimpleNamespace(
             status_code=200, text="",
-            json=lambda: {"content": [{"type": "text", "text": "Be careful; never skip. " + " ".join(markers)}],
+            json=lambda: {"content": [{"type": "text", "text": compliant_summary(wrapped)}],
                           "stop_reason": "end_turn",
                           "usage": {"input_tokens": 1200, "output_tokens": 400}})
     return _post
@@ -403,10 +402,9 @@ def test_prep_via_api_missing_usage_json_omits_amortization(runner, tmp_path, mo
 
     def _api_without_usage(url, *, timeout, headers, json):
         wrapped = json["messages"][0]["content"]
-        markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', wrapped, re.DOTALL)
         return SimpleNamespace(
             status_code=200, text="",
-            json=lambda: {"content": [{"type": "text", "text": "Be careful. " + " ".join(markers)}],
+            json=lambda: {"content": [{"type": "text", "text": compliant_summary(wrapped)}],
                           "stop_reason": "end_turn"})
 
     with patch(_POST, _api_without_usage):
@@ -415,3 +413,193 @@ def test_prep_via_api_missing_usage_json_omits_amortization(runner, tmp_path, mo
     verdict = json.loads(res.output)
     assert verdict["structure_ok"] is True and verdict["staged"] is True
     assert "amortization" not in verdict and verdict["cost"] == "unknown"   # api billed, usage absent (#2)
+
+
+# --------------------------------------------------------------------------- #
+# `tj summarize calibrate` — the measurement is explicit, bounded, and consented.
+# --------------------------------------------------------------------------- #
+
+def test_calibrate_dry_run_spends_nothing_and_says_it_would(runner, tmp_path):
+    """The default must never issue a model call, and must say plainly that
+    running it for real is billed to the user."""
+    (tmp_path / "CLAUDE.md").write_text(
+        "Always act carefully and never drop a required step. " * 200)
+    cfg = _tmp_storage_config(tmp_path)
+
+    with patch("tokenjam.core.summarize.delivery.deliver",
+               side_effect=AssertionError("a dry run must never call a model")):
+        result = _invoke_cfg(
+            runner, ["summarize", "calibrate", "--via", "claude-p", str(tmp_path)], cfg)
+
+    assert result.exit_code == 0, result.output
+    assert "would sample" in result.output
+    assert "billed to you" in result.output
+    assert "--go" in result.output
+
+
+def test_calibrate_requires_choosing_how_to_spend(runner, tmp_path):
+    """`--via` has no default: which credential pays for the rewrites is the
+    user's decision, not something inferred for them."""
+    result = _invoke_cfg(
+        runner, ["summarize", "calibrate"], _tmp_storage_config(tmp_path))
+
+    assert result.exit_code != 0
+    assert "--via" in result.output
+
+
+def test_calibrate_json_reports_the_measured_ratio(runner, tmp_path):
+    marker_re = re.compile(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', re.DOTALL)
+    prose = "Always act carefully and never drop a required step. " * 200
+    (tmp_path / "CLAUDE.md").write_text(prose + "\n```\nkeep = 'me'\n```\n")
+    cfg = _tmp_storage_config(tmp_path)
+
+    def _shrink(config, mode, wrapped_prompt, system_rules):
+        from tokenjam.core.summarize.delivery import DeliveryResult
+        markers = marker_re.findall(wrapped_prompt)
+        words = [w for w in wrapped_prompt.split()
+                 if not w.startswith("<tj-keep") and not w.startswith(("<tj-source", "</tj-source"))]
+        body = " ".join(words[: len(words) // 4] + markers)
+        return DeliveryResult(summary=envelope_like(wrapped_prompt, body))
+
+    with patch("tokenjam.core.summarize.delivery.deliver", _shrink):
+        result = _invoke_cfg(
+            runner,
+            ["summarize", "calibrate", "--via", "claude-p", "--go", "--json", str(tmp_path)],
+            cfg)
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["dry_run"] is False
+    assert len(payload["samples"]) == 1
+    assert payload["samples"][0]["achieved_ratio"] is not None
+    # One sample is below the credibility gate: the ratio stays None rather than
+    # collapsing to a zero, and the run says what is still missing.
+    assert payload["ratio_after"] is None
+    assert payload["samples_after"] == 1
+    assert "Not enough evidence yet" in payload["note"]
+    # `claude -p` reports no per-token price. Absent, never $0.00.
+    assert payload["rewrite_usd"] is None
+
+
+# --- prune / expire / quarantine / restore through the CLI ------------------
+#
+# The full loop a user actually touches: plan, see the lines, approve, and get
+# them back. Routed at a tmp storage dir so the quarantine lands under
+# `tmp/summary/quarantine` and never the developer's real ~/.tj.
+
+_PRUNE_DOC = """# Project rules
+
+## Keep me
+
+This one earns its place and must survive.
+
+## Cut me
+
+Standard conventions restated at length for no reason whatsoever.
+
+## Keep me too
+
+Trailing content that must not move.
+"""
+
+_LOG_DOC = """# learnings
+
+## 2019-01-15 ancient
+
+Long stale.
+
+## Standing notes
+
+Undated, so not an entry.
+"""
+
+
+def _tmp_cfg(tmp_path):
+    from tokenjam.core.config import StorageConfig
+
+    return TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")))
+
+
+def test_prune_dry_run_shows_the_lines_and_writes_nothing(runner, tmp_path):
+    doc = tmp_path / "CLAUDE.md"
+    doc.write_text(_PRUNE_DOC, encoding="utf-8")
+    result = _invoke_cfg(
+        runner, ["summarize", "prune", str(doc), "--section", "Cut me"],
+        _tmp_cfg(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    assert "Cut me" in result.output
+    assert "dry-run" in result.output
+    assert doc.read_text(encoding="utf-8") == _PRUNE_DOC
+
+
+def test_prune_without_a_section_refuses(runner, tmp_path):
+    doc = tmp_path / "CLAUDE.md"
+    doc.write_text(_PRUNE_DOC, encoding="utf-8")
+    result = _invoke_cfg(
+        runner, ["summarize", "prune", str(doc)], _tmp_cfg(tmp_path),
+    )
+    assert result.exit_code != 0
+    assert "at least one --section" in result.output
+
+
+def test_prune_go_then_restore_round_trips_through_the_cli(runner, tmp_path):
+    """THE loop. Approve a removal, then get it back byte-for-byte."""
+    cfg = _tmp_cfg(tmp_path)
+    doc = tmp_path / "CLAUDE.md"
+    doc.write_text(_PRUNE_DOC, encoding="utf-8")
+
+    applied = _invoke_cfg(
+        runner, ["summarize", "prune", str(doc), "--section", "Cut me", "--go"], cfg,
+    )
+    assert applied.exit_code == 0, applied.output
+    assert "Cut me" not in doc.read_text(encoding="utf-8")
+    assert "quarantined as" in applied.output
+
+    listed = _invoke_cfg(runner, ["summarize", "quarantine", "list", "--json"], cfg)
+    assert listed.exit_code == 0, listed.output
+    entries = json.loads(listed.output)
+    assert len(entries) == 1
+    entry_id = entries[0]["entry_id"]
+
+    shown = _invoke_cfg(runner, ["summarize", "quarantine", "show", entry_id], cfg)
+    assert "Cut me" in shown.output
+
+    restored = _invoke_cfg(
+        runner, ["summarize", "restore", entry_id, "--go"], cfg,
+    )
+    assert restored.exit_code == 0, restored.output
+    assert doc.read_text(encoding="utf-8") == _PRUNE_DOC
+
+
+def test_expire_only_takes_dated_entries_past_the_cutoff(runner, tmp_path):
+    cfg = _tmp_cfg(tmp_path)
+    doc = tmp_path / "learnings.md"
+    doc.write_text(_LOG_DOC, encoding="utf-8")
+    result = _invoke_cfg(
+        runner, ["summarize", "expire", str(doc), "--older-than", "30", "--go"], cfg,
+    )
+    assert result.exit_code == 0, result.output
+    final = doc.read_text(encoding="utf-8")
+    assert "2019-01-15 ancient" not in final
+    assert "Standing notes" in final       # undated is standing content, never swept
+
+
+def test_restore_needs_exactly_one_of_an_id_or_all(runner, tmp_path):
+    cfg = _tmp_cfg(tmp_path)
+    both = _invoke_cfg(runner, ["summarize", "restore", "abc", "--all"], cfg)
+    assert both.exit_code != 0
+    neither = _invoke_cfg(runner, ["summarize", "restore"], cfg)
+    assert neither.exit_code != 0
+
+
+def test_prune_rejects_dry_run_and_go_together(runner, tmp_path):
+    doc = tmp_path / "CLAUDE.md"
+    doc.write_text(_PRUNE_DOC, encoding="utf-8")
+    result = _invoke_cfg(
+        runner,
+        ["summarize", "prune", str(doc), "--section", "Cut me", "--go", "--dry-run"],
+        _tmp_cfg(tmp_path),
+    )
+    assert result.exit_code != 0
+    assert "Choose one of --dry-run or --go" in result.output

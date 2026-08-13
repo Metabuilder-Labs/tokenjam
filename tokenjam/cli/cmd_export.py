@@ -7,12 +7,13 @@ from pathlib import Path
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.models import TraceFilters
 from tokenjam.utils.formatting import console
 from tokenjam.utils.time_parse import parse_since
 
 
-@click.command("export")
+@click.command("export", cls=TjCommand, status_message="Exporting spans…")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("--since", default="7d", help="Time window (e.g. 1h, 7d)")
 @click.option("--format", "fmt",
@@ -22,7 +23,7 @@ from tokenjam.utils.time_parse import parse_since
 @click.pass_context
 def cmd_export(ctx: click.Context, agent: str | None, since: str,
                fmt: str, output_path: str | None) -> None:
-    """Export spans in various formats."""
+    """Export spans (JSON / CSV / ...)."""
     db = ctx.obj["db"]
     agent_filter = agent or ctx.obj.get("agent")
     filters = TraceFilters(

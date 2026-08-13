@@ -43,8 +43,12 @@ sdk-ts/dist/
 tj.toml
 .tj/
 
-# Claude Code
-.claude/
+# Claude Code — local settings stay private, but the checked-in path-scoped rule files
+# do not: CLAUDE.md's Critical Rules live in .claude/rules/*.md and every contributor
+# (and every fresh clone) needs them.
+# (git cannot re-include a file under an excluded DIRECTORY, hence `.claude/*` not `.claude/`)
+.claude/*
+!.claude/rules/
 .omc/
 .mcp.json
 
@@ -53,7 +57,3 @@ docs/superpowers/
 .plans/
 .specs/
 .gstack/
-
-# Per-release pre-release test logs are committed (for reference) — see
-# tests/results/. They're small markdown files, one per release run, and
-# serve as a record of what was verified at release time.

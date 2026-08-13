@@ -592,7 +592,13 @@ def agent_persona_mix(
     agent_id window, same ``sessions`` table). Classification uses
     :func:`tokenjam.core.alerts.is_interactive_coding_agent` (Claude Code or
     Codex), not a Claude-Code-only prefix check. Returns
-    ``{"claude_code": N, "other": M}``.
+    ``{"claude-code": N, "other": M}``.
+
+    The bucket key is spelled exactly as the persona value in :data:`PERSONAS`.
+    It used to be ``claude_code`` while the persona it feeds was
+    ``claude-code``, which is one concept wearing two spellings: the kind of
+    near-miss that reads as a typo, invites a third spelling, and silently
+    returns 0 from any lookup that guesses the wrong one.
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -608,11 +614,11 @@ def agent_persona_mix(
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = "SELECT agent_id FROM sessions" + where
     rows = conn.execute(sql, params).fetchall()
-    mix = {"claude_code": 0, "other": 0}
+    mix = {"claude-code": 0, "other": 0}
     for (aid,) in rows:
         aid_str = aid if isinstance(aid, str) else (str(aid) if aid is not None else None)
         if is_interactive_coding_agent(aid_str):
-            mix["claude_code"] += 1
+            mix["claude-code"] += 1
         else:
             mix["other"] += 1
     return mix
@@ -648,7 +654,7 @@ def dominant_persona(
         if declared_plan == "api":
             return "sdk"
         return "unknown"
-    cc_fraction = agent_mix.get("claude_code", 0) / total
+    cc_fraction = agent_mix.get("claude-code", 0) / total
     if cc_fraction >= _PERSONA_DOMINANT_FRACTION:
         return "claude-code"
     if cc_fraction <= (1 - _PERSONA_DOMINANT_FRACTION):

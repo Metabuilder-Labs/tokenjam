@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import platform
+from pathlib import Path
 
 import click
 import duckdb
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.config import load_config, resolve_config_path
+from tokenjam.core.data_span import MIN_PLAUSIBLE_YEAR
+from tokenjam.core.db import SPANS_INDEXES
+from tokenjam.core.server_state import find_own_serve_pid
 from tokenjam.utils.formatting import console, display_path
 
 
-@click.command("doctor")
+@click.command("doctor", cls=TjCommand, status_message="Running health checks…")
 @json_option
 @click.option(
     "--repair",
@@ -22,7 +28,7 @@ from tokenjam.utils.formatting import console, display_path
 )
 @click.pass_context
 def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None:
-    """Run health checks on tj configuration and environment."""
+    """Health-check your tj setup."""
     output_json = resolve_output_json(ctx, output_json_flag)
     config = ctx.obj["config"]
     checks: list[dict] = []
@@ -35,6 +41,11 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # 3. Ingest secret set
     checks.append(_check_ingest_secret(config))
+
+    # 3b. OTLP endpoint reachability — resolve, connect, authenticate. Replaces
+    #     the per-invocation stderr warning that used to fire on a static file
+    #     diff while nothing was listening at all.
+    checks.append(_check_otlp_endpoint(config))
 
     # 4. Prometheus configured
     checks.append(_check_prometheus(config))
@@ -58,8 +69,30 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     spans_stats_check = _check_spans_stats(ctx.obj["db"])
     checks.append(spans_stats_check)
 
+    # 9b. Secondary-index integrity on spans — a fault the statistics check
+    #     above cannot see, and one that makes the retention DELETE unreliable.
+    checks.append(_check_spans_indexes(ctx.obj["db"]))
+
+    # 9c. Every OTHER explicit index, swept. 9b covers spans specifically
+    #     (including absent ones); this one asks the same divergence question
+    #     of the whole catalogue, because the fault is not confined to spans.
+    checks.append(_check_index_divergence(ctx.obj["db"]))
+
     # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
     checks.append(_check_span_staleness(ctx.obj["db"]))
+
+    # 10b. Background daemon liveness — is `tj serve` actually running, not
+    #      just installed. Computed once and reused by the corpus-freshness
+    #      and transcript-gap checks below so all three agree on whether
+    #      anything is currently positioned to self-heal a gap.
+    daemon_alive = find_own_serve_pid() is not None
+    checks.append(_check_daemon_liveness(daemon_alive))
+
+    # 10c. Corpus freshness — newest ingested session vs the configured
+    #      ingest cadence. FAILS (not warns) when nothing is live to close
+    #      the gap on its own, since that's silent, unbounded data loss
+    #      rather than a transient lag.
+    checks.append(_check_corpus_freshness(config, ctx.obj["db"], daemon_alive))
 
     # 11. Proxy base-URL wiring consistency (issue #219)
     checks.append(_check_proxy_wiring(config))
@@ -78,13 +111,30 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # 16. Transcript ingest completeness — on-disk sessions never ingested,
     #     still recoverable only until Claude Code prunes the transcript.
-    checks.append(_check_transcript_ingest_gap(config, ctx.obj["db"]))
+    checks.append(_check_transcript_ingest_gap(config, ctx.obj["db"], daemon_alive))
 
     # 17. Cost integrity — sessions.total_cost_usd vs SUM(spans.cost_usd)
     checks.append(_check_cost_integrity(ctx.obj["db"]))
 
     # 18. Duplicate call ingest — one LLM call stored twice, once per observer
     checks.append(_check_duplicate_call_ingest(ctx.obj["db"]))
+
+    # 18b. Timestamp sentinels an older build wrote — a one-shot cleanup.
+    checks.append(_check_sentinel_timestamps(ctx.obj["db"]))
+
+    # 19. Retention — the analysis span, what it keeps, and what the last run
+    #     actually deleted. A delete of user history has to be readable after
+    #     the fact, not inferable by diffing two measurements days apart.
+    checks.append(_check_retention(config, ctx.obj["db"]))
+
+    # 20. Subagent type linkage — sub_agent_id spans with no resolved
+    #     sub_agent_type, the join key `subagent_rightsizing` and cost
+    #     attribution need.
+    checks.append(_check_unresolved_subagent_type(ctx.obj["db"]))
+
+    # 21. Captured content backfill gap — [capture] is on, but a slice of
+    #     backfilled history predates that and never got the content.
+    checks.append(_check_content_capture_backfill_gap(config, ctx.obj["db"]))
 
     if output_json:
         click.echo(json.dumps(checks, default=str))
@@ -94,7 +144,7 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # --repair: attempt fixes for any check that exposed a repair_action
     if repair:
-        _attempt_repairs(checks, ctx.obj["db"], output_json)
+        _attempt_repairs(checks, ctx.obj["db"], output_json, config)
 
     has_errors = any(c["level"] == "error" for c in checks)
     has_warnings = any(c["level"] == "warning" for c in checks)
@@ -162,11 +212,202 @@ def _check_db(config: object) -> dict:
 
 
 def _check_ingest_secret(config: object) -> dict:
-    if config.security.ingest_secret:
-        return {"name": "Ingest secret", "level": "ok",
-                "message": "Ingest secret is configured."}
-    return {"name": "Ingest secret", "level": "warning",
-            "message": "No ingest secret set. API ingest endpoint is unprotected."}
+    if not config.security.ingest_secret:
+        return {"name": "Ingest secret", "level": "warning",
+                "message": "No ingest secret set. API ingest endpoint is unprotected."}
+
+    # Beyond "is a secret set": is it the SAME secret every config on this
+    # machine's search path would resolve to? A project-local .tj/config.toml
+    # and the global ~/.config/tj/config.toml can carry different secrets for
+    # one store — the SDK reads one, a daemon started from a different cwd
+    # reads the other, and span pushes 401 silently with no error surfaced
+    # anywhere else (see `core/config.find_diverged_secret_config`).
+    import sys
+    from typing import cast
+
+    # tomllib is stdlib only from 3.11+; pyproject.toml declares >=3.10, and
+    # this file already carries this exact guard at `_check_mcp_wiring`
+    # (~:1247) for the same reason — matching it here, not inventing a
+    # second spelling.
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    from tokenjam.core.config import TjConfig, active_config_path, find_diverged_secret_config
+
+    active_path = active_config_path(cast("TjConfig", config))
+    if active_path is not None:
+        try:
+            with open(active_path, "rb") as f:
+                active_raw = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            active_raw = None
+        if active_raw is not None:
+            diverged = find_diverged_secret_config(active_path, active_raw)
+            if diverged is not None:
+                other_path, _active_secret, _other_secret = diverged
+                return {
+                    "name": "Ingest secret",
+                    "level": "warning",
+                    "message": (
+                        f"ingest_secret differs between {active_path} and "
+                        f"{other_path} — whichever process reads the other "
+                        f"file will 401 every span it tries to push. Align "
+                        f"them (copy one secret into the other config) or "
+                        f"delete the unused config."
+                    ),
+                }
+
+    return {"name": "Ingest secret", "level": "ok",
+            "message": "Ingest secret is configured."}
+
+
+#: How long a reachability probe waits before calling the endpoint dead. Short
+#: on purpose: doctor is interactive, and a hung TCP connect is the failure
+#: mode being diagnosed, not something to sit through.
+OTLP_PROBE_TIMEOUT_S = 2.0
+
+
+def _configured_otlp_endpoint() -> tuple[str | None, str, str | None]:
+    """The OTLP endpoint an agent session on this machine actually exports to.
+
+    Returns ``(endpoint, source, secret)``. The authority is the tj-managed
+    block in ``~/.zshrc``, because that is what a Claude Code session inherits;
+    reading only the config would report the endpoint tj INTENDED rather than
+    the one already written to the user's shell profile, which is precisely the
+    fault this check exists to catch. ``endpoint`` is None when no managed block
+    is installed.
+    """
+    import re
+    from pathlib import Path
+
+    from tokenjam.cli.cmd_onboard import _ZSHRC_OTEL_END, _ZSHRC_OTEL_START
+
+    try:
+        text = (Path.home() / ".zshrc").read_text()
+    except OSError:
+        return None, "shell profile", None
+    block = re.search(
+        rf"{re.escape(_ZSHRC_OTEL_START)}\n(.*?){re.escape(_ZSHRC_OTEL_END)}",
+        text,
+        flags=re.DOTALL,
+    )
+    if block is None:
+        return None, "shell profile", None
+    body = block.group(1)
+    endpoint = re.search(r"^export OTEL_EXPORTER_OTLP_ENDPOINT=(\S+)$", body, re.M)
+    secret = re.search(
+        r'^export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ([^"]+)"$', body, re.M
+    )
+    return (
+        endpoint.group(1) if endpoint else None,
+        "~/.zshrc",
+        secret.group(1) if secret else None,
+    )
+
+
+def _check_otlp_endpoint(config: object) -> dict:
+    """Does the OTLP endpoint agents export to actually answer?
+
+    A telemetry pipeline that drops spans silently is the defect this replaces
+    a per-invocation static warning with: the endpoint written to the shell
+    profile was a container-only hostname that does not resolve on a host, so
+    every span failed at DNS and only the delayed transcript backfill survived.
+    Nothing anywhere reported it.
+
+    So this resolves the host, opens a TCP connection, and — when something
+    answers — authenticates with the secret that block carries, reporting a
+    real verdict at each layer rather than a claim derived from file contents.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    name = "OTLP endpoint"
+    endpoint, source, block_secret = _configured_otlp_endpoint()
+    if endpoint is None:
+        return {"name": name, "level": "info",
+                "message": "No tj-managed OTel block in ~/.zshrc. Run "
+                           "`tj onboard --claude-code` to configure Claude Code "
+                           "telemetry."}
+
+    parsed = urlparse(endpoint)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if not host:
+        return {"name": name, "level": "error",
+                "message": f"Endpoint in {source} is not a usable URL: "
+                           f"{endpoint}. Re-run `tj onboard --claude-code` to "
+                           f"rewrite it."}
+
+    try:
+        socket.getaddrinfo(host, port)
+    except OSError:
+        return {
+            "name": name, "level": "error",
+            "message": (
+                f"{endpoint} ({source}) does not resolve: the hostname "
+                f"{host} has no address on this machine, so every span an "
+                f"agent session emits is dropped before it leaves the "
+                f"process. Re-run `tj onboard --claude-code` to rewrite the "
+                f"endpoint."
+            ),
+        }
+
+    try:
+        with socket.create_connection((host, port), timeout=OTLP_PROBE_TIMEOUT_S):
+            pass
+    except OSError as e:
+        expected = config.api.port
+        mismatch = (
+            f" The daemon binds port {expected}, and this endpoint names "
+            f"{port}."
+            if port != expected else ""
+        )
+        return {
+            "name": name, "level": "warning",
+            "message": (
+                f"{endpoint} ({source}) resolves but nothing is listening "
+                f"({e.strerror or e}).{mismatch} Start the daemon with "
+                f"`tj serve`, then re-run `tj doctor`."
+            ),
+        }
+
+    # Something answers. Does it accept the secret the shell block signs with?
+    if not block_secret:
+        return {"name": name, "level": "ok",
+                "message": f"{endpoint} ({source}) is reachable."}
+
+    import httpx
+
+    try:
+        resp = httpx.get(
+            f"{parsed.scheme}://{host}:{port}/api/v1/status",
+            headers={"Authorization": f"Bearer {block_secret}"},
+            timeout=OTLP_PROBE_TIMEOUT_S,
+        )
+    except httpx.RequestError as e:
+        return {"name": name, "level": "warning",
+                "message": f"{endpoint} ({source}) accepted a connection but "
+                           f"the status probe failed: {e}."}
+
+    if resp.status_code == 401:
+        return {
+            "name": name, "level": "error",
+            "message": (
+                f"{endpoint} ({source}) is reachable but rejected the ingest "
+                f"secret in that block (401), so every span it pushes is "
+                f"discarded. Re-run `tj onboard --claude-code` to rewrite the "
+                f"block with the secret the daemon uses."
+            ),
+        }
+    if resp.status_code >= 400:
+        return {"name": name, "level": "warning",
+                "message": f"{endpoint} ({source}) answered HTTP "
+                           f"{resp.status_code} to the status probe."}
+    return {"name": name, "level": "ok",
+            "message": f"{endpoint} ({source}) is reachable and accepted the "
+                       f"configured ingest secret."}
 
 
 def _check_prometheus(config: object) -> dict:
@@ -333,6 +574,213 @@ def _check_spans_stats(db: object) -> dict:
             "message": "Column statistics are consistent."}
 
 
+def _check_spans_indexes(db: object) -> dict:
+    """Detect a missing or under-reporting secondary index on `spans`.
+
+    An ERROR, not a warning, and deliberately: the retention job's `DELETE FROM
+    spans WHERE start_time < ?` maintains every index inside its own
+    transaction, so a damaged one can abort the statement part-way and leave it
+    reporting fewer rows removed than it matched. A deletion of user history
+    whose extent nobody can state afterwards is not a degraded read path, it is
+    an unsafe write path, and the column-statistics check next door cannot see
+    it — that one asks only about `trace_id`'s row-group statistics and reports
+    OK on either fault below.
+    """
+    from tokenjam.core.db import check_spans_index_corruption
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Spans index integrity", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        faults = check_spans_index_corruption(conn)
+    except duckdb.Error as e:
+        return {"name": "Spans index integrity", "level": "info",
+                "message": f"Skipped — could not probe the indexes: {e}"}
+    if faults:
+        detail = "; ".join(f"{name} {reason}" for name, reason in faults)
+        return {
+            "name": "Spans index integrity",
+            "level": "error",
+            "message": f"Secondary index damage on the spans table — {detail}. "
+                       f"Queries served by these indexes return incomplete "
+                       f"results, and a DELETE (retention cleanup) can abort "
+                       f"part-way through. Run `tj doctor --repair` to rebuild "
+                       f"them from the table (no data is moved).",
+            "repair_action": "rebuild_spans_indexes",
+        }
+    return {"name": "Spans index integrity", "level": "ok",
+            "message": f"All {len(SPANS_INDEXES)} secondary indexes on spans "
+                       f"agree with the table."}
+
+
+def _check_index_divergence(db: object) -> dict:
+    """Sweep EVERY explicit index for disagreement with its table.
+
+    One cause, two harms, which is why this is an error and not a note:
+
+    * **Reads silently under-report.** A `WHERE col = ...` served by a damaged
+      index returns fewer rows than the table holds, with no error at all, so
+      analyzers understate whatever they read through it.
+    * **Writes are fatal.** A statement that must REMOVE an index entry raises
+      a DuckDB `FatalException`, which invalidates the whole database instance
+      and every connection in the process.
+
+    The sweep covers every explicit index because the fault has been seen on
+    more than one table. It reports what it can PROVE: an index is called sound
+    only when every distinct value was compared, and anything less is reported
+    as not proven rather than counted as passing. `--repair` therefore rebuilds
+    every index rather than only the ones named here -- see the repair handler.
+    """
+    from tokenjam.core.db import check_index_divergence, explicit_indexes
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Index integrity", "level": "info",
+                "message": "Skipped \u2014 CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        faults, unproven = check_index_divergence(conn)
+        total = len(explicit_indexes(conn))
+    except duckdb.Error as e:
+        return {"name": "Index integrity", "level": "info",
+                "message": f"Skipped \u2014 could not probe the indexes: {e}"}
+
+    if faults:
+        detail = "; ".join(f"{name} on {table} {reason}" for name, table, reason in faults)
+        caveat = (
+            f" A further {len(unproven)} index(es) could not be proven sound; "
+            f"the repair rebuilds every index, not only the ones listed here."
+            if unproven else ""
+        )
+        return {
+            "name": "Index integrity",
+            "level": "error",
+            "message": f"Index damage \u2014 {detail}. Queries served by these "
+                       f"indexes return incomplete results, and the next write "
+                       f"that removes an entry will invalidate the database and "
+                       f"500 every route. Run `tj doctor --repair` to rebuild "
+                       f"every index from its table (no rows are read or moved)."
+                       f"{caveat}",
+            "repair_action": "rebuild_diverged_indexes",
+        }
+    if unproven:
+        listed = "; ".join(f"{name} ({reason})" for name, _t, reason in unproven)
+        return {
+            "name": "Index integrity",
+            "level": "warn",
+            "message": f"No divergence found, but only {total - len(unproven)} of "
+                       f"{total} explicit indexes could be PROVEN sound. Not "
+                       f"proven: {listed}. `tj doctor --repair` rebuilds every "
+                       f"index regardless, which is the only way to be certain.",
+            "repair_action": "rebuild_diverged_indexes",
+        }
+    return {"name": "Index integrity", "level": "ok",
+            "message": f"All {total} explicit indexes compared against every "
+                       f"distinct value in their tables and agree."}
+
+
+def _check_retention(config: object, db: object) -> dict:
+    """Report the analysis span, the retention derived from it, and the last delete.
+
+    A deletion of the user's own history that leaves no account of itself is
+    discoverable only by measuring the store twice, days apart, and diffing —
+    which is how eight weeks of the oldest history went missing unnoticed. The
+    ledger makes it a fact on disk; this makes it a fact somebody sees.
+
+    Never an error: retention doing its job is not a fault. What would be a
+    fault is a config whose retention undercuts its own span, and that cannot
+    happen — `core/analysis_span.retention_days_for` raises it — so this reports
+    when the clamp fired rather than warning about a state that no longer exists.
+    """
+    from tokenjam.core.analysis_span import (
+        retention_days_for,
+        retention_was_raised_to_span,
+        span_label,
+    )
+
+    storage = getattr(config, "storage", None)
+    if storage is None:
+        return {"name": "Retention", "level": "info",
+                "message": "Skipped — no storage config."}
+
+    span = span_label(storage)
+    kept = retention_days_for(storage)
+    kept_text = (
+        "deletion is disabled" if kept is None else f"history is kept for {kept} days"
+    )
+    clamp = ""
+    if retention_was_raised_to_span(storage):
+        clamp = (
+            " Storage retention is set shorter than the span and has been raised "
+            "to match — nothing tj analyzes can be deleted underneath it."
+        )
+
+    conn = getattr(db, "conn", None)
+    last = ""
+    if conn is not None:
+        try:
+            row = conn.execute(
+                "SELECT ran_at, spans_deleted, sessions_deleted, oldest_kept "
+                "FROM retention_events ORDER BY ran_at DESC LIMIT 1"
+            ).fetchone()
+        except duckdb.Error:
+            row = None
+        if row is None:
+            last = " No retention run has been recorded yet."
+        else:
+            ran_at, spans_deleted, sessions_deleted, oldest_kept = row
+            last = (
+                f" Last run {ran_at:%Y-%m-%d %H:%M} UTC removed {spans_deleted} "
+                f"span(s) and {sessions_deleted} session(s)"
+            )
+            last += (
+                f"; oldest surviving span {oldest_kept:%Y-%m-%d}." if oldest_kept
+                else "; no dated spans remain."
+            )
+
+    return {"name": "Retention", "level": "ok",
+            "message": f"Analyzing {span}, so {kept_text}.{clamp}{last}"}
+
+
+def _check_sentinel_timestamps(db: object) -> dict:
+    """Find rows an older build stamped with an epoch sentinel instead of a time.
+
+    Ingest can no longer produce one — a record with no observed time is
+    rejected at the boundary — so this is a one-shot cleanup for corpora already
+    written, offered here rather than as a SQL snippet somebody has to be told
+    about. A warning, not an error: the rows are inert until something takes a
+    naive `MIN()` over them, at which point a single row reports a span decades
+    wide and crushes every derived rate to zero.
+    """
+    from tokenjam.core.db import count_sentinel_timestamp_rows
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Timestamp sentinels", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        found = count_sentinel_timestamp_rows(conn)
+    except duckdb.Error as e:
+        return {"name": "Timestamp sentinels", "level": "info",
+                "message": f"Skipped — could not scan for sentinels: {e}"}
+    if found:
+        detail = ", ".join(f"{count} in {table}" for table, count in sorted(found.items()))
+        return {
+            "name": "Timestamp sentinels",
+            "level": "warning",
+            "message": f"Rows dated before {MIN_PLAUSIBLE_YEAR} — {detail}. These "
+                       f"carry no real observed time and a single one makes a "
+                       f"naive MIN() report a span decades wide. Run `tj doctor "
+                       f"--repair` to delete them.",
+            "repair_action": "purge_timestamp_sentinels",
+        }
+    return {"name": "Timestamp sentinels", "level": "ok",
+            "message": "No rows carry a placeholder timestamp."}
+
+
 def _check_schema_integrity(db: object) -> dict:
     """Detect a recorded-but-unlanded migration (missing columns #55 / tables #382).
 
@@ -485,6 +933,111 @@ def _check_duplicate_call_ingest(db: object) -> dict:
     }
 
 
+def _check_unresolved_subagent_type(db: object) -> dict:
+    """Flag Claude Code subagent spans with no resolved `sub_agent_type`.
+
+    `sub_agent_id` (migration 14) and `sub_agent_type` (migration 19, the
+    stable per-dispatch-agent-definition identity `subagent_rightsizing` and
+    the cost-attribution proposals key on) are both derived from the on-disk
+    transcript by `core/backfill.py`. A span tagged with the former but not
+    the latter is one of: a row inserted before migration 19 shipped (the
+    common case, and the one this check's repair actually fixes — a normal
+    `tj backfill claude-code` re-derives it from the sidecar and overlays it
+    onto the existing row), a dispatch whose transcript/sidecar Claude Code has
+    since pruned (unrecoverable), or a deliberate `_PER_DISPATCH_TASK_KINDS`
+    carve-out (not a gap — see that constant's docstring). The count here
+    can't tell those apart; the repair narrows it to whatever the first case
+    still leaves.
+    """
+    from tokenjam.core.db import unresolved_subagent_type_stats
+
+    name = "Subagent type linkage"
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        spans, cost_usd = unresolved_subagent_type_stats(conn)
+    except duckdb.Error as e:
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not inspect subagent spans: {e}"}
+    if not spans:
+        return {"name": name, "level": "ok",
+                "message": "Every subagent-dispatch span has a resolved type."}
+    return {
+        "name": name,
+        "level": "warning",
+        "message": (
+            f"{spans} subagent span(s) (${cost_usd:,.2f}) carry a "
+            f"sub_agent_id with no resolved sub_agent_type — per-agent-type "
+            f"cost breakdowns undercount them. Run `tj doctor --repair` to "
+            f"re-derive what the on-disk transcripts still support; some may "
+            f"remain unresolved because Claude Code has since pruned the "
+            f"transcript or sidecar."
+        ),
+        "repair_action": "resolve_subagent_types",
+    }
+
+
+def _check_content_capture_backfill_gap(config: object, db: object) -> dict:
+    """Warn loudly when `[capture]` is ON but backfilled spans still have no
+    content — the other side of `_check_capture_prompts` above, which only
+    flags capture being OFF. A row backfilled BEFORE the user turned capture
+    on never gets the content on its own (a plain re-run only ever inserted
+    NEW spans until `bulk_overlay_span_attrs` grew a content-merge half), so
+    silently having neither check cover this case reads as "capture is on,
+    so it must be working" when in fact a slice of history never got it.
+    """
+    capture = getattr(config, "capture", None)
+    prompts_on = bool(getattr(capture, "prompts", False))
+    completions_on = bool(getattr(capture, "completions", False))
+    tool_inputs_on = bool(getattr(capture, "tool_inputs", False))
+    name = "Captured content backfill"
+    if not (prompts_on or completions_on or tool_inputs_on):
+        return {"name": name, "level": "info",
+                "message": "Skipped — no [capture] toggle is on."}
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        from tokenjam.core.db import (
+            missing_captured_content_stats,
+            missing_captured_tool_input_stats,
+        )
+
+        llm_missing = missing_captured_content_stats(
+            conn, prompts=prompts_on, completions=completions_on,
+        )
+        tool_missing = missing_captured_tool_input_stats(conn) if tool_inputs_on else 0
+    except duckdb.Error as e:
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not inspect span content: {e}"}
+    total_missing = llm_missing + tool_missing
+    if not total_missing:
+        return {"name": name, "level": "ok",
+                "message": "Every backfilled span has the content [capture] "
+                           "toggles say it should."}
+    parts = []
+    if llm_missing:
+        parts.append(f"{llm_missing} LLM span(s) missing prompt/completion content")
+    if tool_missing:
+        parts.append(f"{tool_missing} tool span(s) missing tool_input")
+    return {
+        "name": name,
+        "level": "warning",
+        "message": (
+            f"{'; '.join(parts)} — likely backfilled before [capture] was "
+            f"turned on. Run `tj doctor --repair` to re-derive it from the "
+            f"on-disk transcripts still present; some may remain unresolved "
+            f"if Claude Code has since pruned them."
+        ),
+        "repair_action": "backfill_missing_content",
+    }
+
+
 # Spans older than this are treated as a stalled connection. Claude Code /
 # Codex flush their OTLP exporter on a short interval while running, so during
 # any active session the newest span is minutes old at most. A 6h gap means
@@ -552,7 +1105,165 @@ def _check_span_staleness(db: object) -> dict:
             "message": f"Most recent span is {age_hours:.1f}h old."}
 
 
-def _check_transcript_ingest_gap(config: object, db: object) -> dict:
+# macOS/Linux paths a background daemon installs itself under (see
+# `cmd_onboard._install_launchd` / `_install_systemd`). Presence means the
+# user opted into continuous background capture — used only to phrase the
+# liveness message; the liveness question itself is answered by
+# `find_own_serve_pid()`, which works the same whether `tj serve` is running
+# as a managed daemon or was started by hand.
+def _daemon_install_path() -> Path | None:
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
+    if system == "Linux":
+        return Path.home() / ".config/systemd/user/tokenjam.service"
+    return None
+
+
+def _daemon_liveness_hint() -> str:
+    system = platform.system()
+    if system == "Darwin":
+        return ("Check with `launchctl print gui/$(id -u)/com.tokenjam.serve`, then "
+                "re-register with `tj onboard --claude-code --reconfigure` or run "
+                "`tj serve` manually.")
+    if system == "Linux":
+        return ("Check with `systemctl --user status tokenjam`, then re-register with "
+                "`tj onboard --claude-code --reconfigure` or run `tj serve` manually.")
+    return "Run `tj serve` manually."
+
+
+def _check_daemon_liveness(daemon_alive: bool) -> dict:
+    """Is `tj serve` actually running right now — not just installed.
+
+    `find_own_serve_pid()` reads the state file `tj serve`'s own lifespan
+    writes after binding its port, so this is true liveness (a real running
+    process), independent of HOW it was started — managed daemon or a
+    manually foregrounded `tj serve` both count. A background install that
+    exists on disk but isn't currently loaded/running is the exact failure
+    mode that motivated this check: on a real machine the launchd plist was
+    present with `RunAtLoad`/`KeepAlive` both true and no `Disabled` key, yet
+    `launchctl list` showed nothing loaded and there was no error trace —
+    ingestion had simply stopped, silently, with no signal anywhere else.
+    """
+    name = "Background daemon liveness"
+    if daemon_alive:
+        return {"name": name, "level": "ok", "message": "`tj serve` is running."}
+
+    install_path = _daemon_install_path()
+    if install_path is None or not install_path.exists():
+        return {
+            "name": name,
+            "level": "info",
+            "message": ("No background daemon installed and `tj serve` is not "
+                        "running — run `tj serve` manually, or `tj onboard` to "
+                        "install one."),
+        }
+    return {
+        "name": name,
+        "level": "error",
+        "message": (
+            f"A background daemon is installed ({install_path}) but `tj serve` "
+            f"is not running. Ingestion, alerts, and the web UI are all silently "
+            f"paused — Claude Code prunes its own on-disk transcripts, so every "
+            f"hour this stays down is history moving closer to being unrecoverable. "
+            f"{_daemon_liveness_hint()}"
+        ),
+    }
+
+
+def _check_corpus_freshness(config: object, db: object, daemon_alive: bool) -> dict:
+    """Compare the newest ingested `sessions.started_at` to wall-clock,
+    against a threshold derived from the daemon's own `[ingest]
+    interval_minutes` cadence (`core/ingest_freshness.py`, shared with `tj
+    status`'s advisory line so the two can't disagree on what "stale" means).
+
+    Wall-clock age alone can't tell "ingestion is lagging" apart from "the
+    user simply hasn't run Claude Code since" — both look identical from the
+    `sessions` table. So a stale-by-age result is only PROVISIONAL: it's
+    confirmed as a real gap by checking for on-disk transcript data newer
+    than what's ingested (the same reconciliation `_check_transcript_ingest_gap`
+    below uses), and downgraded to healthy when there is none. Severity for a
+    confirmed gap depends on whether anything is currently positioned to
+    close it on its own: with the daemon down, a real gap can only get
+    staler, so this FAILS; with the daemon up, it's a WARNING — the next
+    scheduled catch-up may well close it before anyone needs to act.
+    """
+    name = "Corpus freshness"
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    interval_minutes = getattr(getattr(config, "ingest", None), "interval_minutes", 30)
+    try:
+        from tokenjam.core.ingest_freshness import corpus_freshness
+        from tokenjam.utils.time_parse import utcnow
+
+        freshness = corpus_freshness(conn, interval_minutes, now=utcnow())
+    except duckdb.Error as e:
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not query session timestamps: {e}"}
+
+    if freshness.newest_session_at is None:
+        return {"name": name, "level": "info",
+                "message": "No sessions recorded yet — nothing to check."}
+    if not freshness.is_stale:
+        return {"name": name, "level": "ok",
+                "message": f"Newest session started {freshness.age_hours:.1f}h ago."}
+
+    # Stale by age — confirm there's actually un-ingested data waiting,
+    # rather than the user just being idle, before calling it a gap.
+    try:
+        from tokenjam.core.transcript_sync import reconcile_claude_code
+
+        report = reconcile_claude_code(db, since=freshness.newest_session_at)
+    except Exception as e:  # never let a health check crash `tj doctor`
+        return {"name": name, "level": "info",
+                "message": f"Newest session started {freshness.age_hours:.1f}h ago; "
+                           f"couldn't check on-disk transcripts to confirm this is "
+                           f"a real ingestion gap: {e}"}
+
+    if not report.verified:
+        # Same "can't confidently render either way" case _check_transcript_
+        # ingest_gap guards against (#642) — the anti-join never ran, so the
+        # missing-count below would be meaningless.
+        return {"name": name, "level": "info",
+                "message": f"Newest session started {freshness.age_hours:.1f}h ago; "
+                           "couldn't verify against on-disk transcripts to confirm "
+                           "this is a real ingestion gap."}
+
+    if report.missing_count == 0:
+        return {
+            "name": name,
+            "level": "ok",
+            "message": (
+                f"Newest session started {freshness.age_hours:.1f}h ago, but "
+                "there's no newer on-disk Claude Code data waiting to be "
+                "ingested — you just haven't run it since."
+            ),
+        }
+
+    level = "warning" if daemon_alive else "error"
+    remedy = (
+        " `tj serve` is running, so this should close on its own by the next "
+        "scheduled catch-up; run `tj backfill claude-code` to close it now."
+        if daemon_alive else
+        " The background daemon is not running (see the liveness check above) "
+        "— nothing is ingesting until it's back. Run `tj backfill claude-code` "
+        "to close the gap once it is."
+    )
+    return {
+        "name": name,
+        "level": level,
+        "message": (
+            f"Newest session started {freshness.age_hours:.1f}h ago (expected "
+            f"roughly every {interval_minutes}m), and {report.missing_count} "
+            f"newer on-disk session(s) aren't ingested yet.{remedy}"
+        ),
+    }
+
+
+def _check_transcript_ingest_gap(config: object, db: object, daemon_alive: bool = True) -> dict:
     """Surface on-disk Claude Code sessions that were never ingested.
 
     The live OTLP path drops any session whose shell lacked the telemetry env
@@ -566,6 +1277,12 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
     Scoped to a recent window so the check stays fast and only reports sessions
     that are still recoverable — anything older than the rotation horizon is
     gone regardless of what we say about it.
+
+    Severity mirrors `_check_corpus_freshness`: a gap is only a WARNING while
+    the daemon is up and `auto_catch_up` is on — both conditions under which
+    the gap can plausibly close on its own on the next scheduled pass. Either
+    one being false means nothing is going to fix this without a human
+    running `tj backfill claude-code`, which is a FAIL, not a nag.
     """
     from datetime import timedelta
 
@@ -599,13 +1316,19 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
     horizon = (f" Oldest is ~{days_left:.0f} day(s) from being pruned."
                if days_left is not None else "")
     auto = getattr(getattr(config, "ingest", None), "auto_catch_up", False)
-    remedy = (" `tj serve` will catch up automatically; run `tj backfill claude-code` "
-              "to close it now." if auto else
-              " Automatic catch-up is off ([ingest] auto_catch_up) — run "
-              "`tj backfill claude-code`.")
+    self_heals = daemon_alive and auto
+    if self_heals:
+        remedy = (" `tj serve` will catch up automatically; run `tj backfill claude-code` "
+                  "to close it now.")
+    elif not daemon_alive:
+        remedy = (" The background daemon is not running, so nothing will close this "
+                  "automatically — run `tj backfill claude-code`.")
+    else:
+        remedy = (" Automatic catch-up is off ([ingest] auto_catch_up) — run "
+                  "`tj backfill claude-code`.")
     return {
         "name": name,
-        "level": "warning",
+        "level": "warning" if self_heals else "error",
         "message": (
             f"{report.missing_count} on-disk session(s) are not ingested."
             f"{horizon}{remedy}"
@@ -613,12 +1336,17 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
     }
 
 
-def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
+def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: object = None) -> None:
     """Run repair actions for any check that flagged one."""
     from tokenjam.core.db import (
         SESSION_COST_DRIFT_TOLERANCE_USD,
+        check_spans_index_corruption,
         ensure_expected_columns,
         ensure_expected_tables,
+        purge_sentinel_timestamp_rows,
+        check_index_divergence,
+        repair_explicit_indexes,
+        repair_spans_indexes,
         repair_spans_stats,
         session_cost_drift,
     )
@@ -733,6 +1461,172 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                     f"reconciled.[/green]"
                 )
             continue
+        if action == "resolve_subagent_types":
+            from tokenjam.core.backfill import (
+                CLAUDE_CODE_PROJECTS_ROOT,
+                ingest_claude_code,
+            )
+            from tokenjam.core.db import unresolved_subagent_type_stats
+
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                # A normal (non-`--reingest`) backfill: it inserts anything
+                # newly on disk AND, as of this repair, overlays
+                # sub_agent_id/sub_agent_type onto existing rows it can now
+                # resolve (see `_dedup_new_spans`'s overlay_candidates /
+                # `bulk_overlay_span_attrs`). Unbounded (no `--since`) so
+                # it reaches every row this check counted, matching how the
+                # transcript-ingest-gap repair above is also unbounded.
+                subagent_repair_result = ingest_claude_code(
+                    db, root=CLAUDE_CODE_PROJECTS_ROOT, config=config,
+                )
+                still_unresolved, still_unresolved_usd = unresolved_subagent_type_stats(conn)
+            except Exception as e:  # backfill can raise for many reasons (OS, JSON, DB)
+                if not output_json:
+                    console.print(
+                        f"  [red]Subagent-type repair failed — {e}.[/red]"
+                    )
+                continue
+            if not output_json:
+                tail = (
+                    f" {still_unresolved} span(s) (${still_unresolved_usd:,.2f}) "
+                    "remain unresolved — their transcript or sidecar has likely "
+                    "been pruned by Claude Code, or they're a per-dispatch "
+                    "label that's correctly untyped."
+                    if still_unresolved else " None remain unresolved."
+                )
+                console.print(
+                    f"  [green]Resolved sub_agent_type on "
+                    f"{subagent_repair_result.spans_retagged} existing "
+                    f"span(s).[/green]{tail}"
+                )
+            continue
+        if action == "backfill_missing_content":
+            from tokenjam.core.backfill import (
+                CLAUDE_CODE_PROJECTS_ROOT,
+                ingest_claude_code,
+            )
+            from tokenjam.core.db import (
+                missing_captured_content_stats,
+                missing_captured_tool_input_stats,
+            )
+
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            capture = getattr(config, "capture", None)
+            prompts_on = bool(getattr(capture, "prompts", False))
+            completions_on = bool(getattr(capture, "completions", False))
+            tool_inputs_on = bool(getattr(capture, "tool_inputs", False))
+            try:
+                # Same underlying mechanism as "resolve_subagent_types" — a
+                # normal (non-`--reingest`) backfill, unbounded — the
+                # content-overlay half of `bulk_overlay_span_attrs` is
+                # capture-config-aware (see `_dedup_new_spans`'s
+                # `capture_on` gate), so this one pass re-derives content
+                # from the transcripts still on disk using whatever
+                # [capture] toggles are ACTUALLY on right now.
+                content_repair_result = ingest_claude_code(
+                    db, root=CLAUDE_CODE_PROJECTS_ROOT, config=config,
+                )
+                still_missing = missing_captured_content_stats(
+                    conn, prompts=prompts_on, completions=completions_on,
+                ) + (missing_captured_tool_input_stats(conn) if tool_inputs_on else 0)
+            except Exception as e:  # backfill can raise for many reasons (OS, JSON, DB)
+                if not output_json:
+                    console.print(
+                        f"  [red]Content-backfill repair failed — {e}.[/red]"
+                    )
+                continue
+            if not output_json:
+                tail = (
+                    f" {still_missing} span(s) remain missing content — "
+                    "their transcript has likely been pruned by Claude Code."
+                    if still_missing else " None remain missing."
+                )
+                # spans_retagged counts every overlay this pass made (content
+                # AND any newly-resolvable sub_agent_type together — one
+                # shared counter), so it is an upper bound on the content
+                # portion specifically, not an exact count of it.
+                console.print(
+                    f"  [green]Overlaid {content_repair_result.spans_retagged} "
+                    f"existing span(s) (content and/or subagent type)."
+                    f"[/green]{tail}"
+                )
+            continue
+        if action == "purge_timestamp_sentinels":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                removed = purge_sentinel_timestamp_rows(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Sentinel purge failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                detail = ", ".join(
+                    f"{count} from {table}" for table, count in sorted(removed.items())
+                ) or "nothing"
+                console.print(f"  [green]Deleted {detail}.[/green]")
+            continue
+        if action == "rebuild_spans_indexes":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                repair_spans_indexes(conn)
+                remaining = check_spans_index_corruption(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Index rebuild failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                if remaining:
+                    # Rebuilding from the table cannot leave an index disagreeing
+                    # with it, so anything still failing is a fault one layer
+                    # down — say so rather than reporting a repair that did not
+                    # take.
+                    console.print(
+                        f"  [red]Rebuilt, but {len(remaining)} index(es) still "
+                        f"disagree with the table — the damage is below the "
+                        f"index layer. Run `tj doctor --repair` again to rebuild "
+                        f"the table itself.[/red]"
+                    )
+                else:
+                    console.print(
+                        f"  [green]Rebuilt {len(SPANS_INDEXES)} secondary "
+                        f"index(es) on spans; no rows were moved.[/green]"
+                    )
+            continue
         if action == "rebuild_spans":
             if conn is None:
                 if not output_json:
@@ -760,6 +1654,47 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                     f"  [green]Spans table rebuilt — {before} rows preserved "
                     f"(verified: {after}).[/green]"
                 )
+            continue
+        if action == "rebuild_diverged_indexes":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped \u2014 CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                # EVERY index, not only the ones the probe flagged. The probe
+                # compares particular values, so a clean verdict from it is not
+                # proof -- on a real damaged database a sampled sweep missed one
+                # of four, and repairing only its verdict left the table still
+                # raising the fatal. Measured at ~1.1s for all fourteen indexes
+                # of a 3.9GB database, so there is nothing to be clever about.
+                rebuilt = repair_explicit_indexes(conn)
+                still_diverged, _ = check_index_divergence(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Repair failed \u2014 {e}. If the database is locked, "
+                        f"stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                if still_diverged:
+                    detail = "; ".join(
+                        f"{n} on {t} {r}" for n, t, r in still_diverged
+                    )
+                    console.print(
+                        f"  [red]Rebuilt {len(rebuilt)} index(es) but divergence "
+                        f"remains \u2014 {detail}.[/red]"
+                    )
+                else:
+                    console.print(
+                        f"  [green]Rebuilt {len(rebuilt)} damaged index(es) from "
+                        f"their tables \u2014 {', '.join(rebuilt)}. No rows read or "
+                        f"moved; re-probe is clean.[/green]"
+                    )
 
 
 def _is_local_url(url: str) -> bool:
@@ -975,11 +1910,11 @@ def _detect_onboarded_persona(config: object) -> str:
     """
     agent_ids = list(getattr(config, "agents", {}) or {})
     if any(a.startswith("claude-code-") for a in agent_ids):
-        return "claude_code"
+        return "claude-code"
     if "codex_exec" in agent_ids:
         return "codex"
     if _tj_statusline_wired():
-        return "claude_code"
+        return "claude-code"
     return "sdk"
 
 

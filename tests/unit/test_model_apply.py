@@ -10,6 +10,8 @@ import subprocess
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.optimize import model_apply as ma
 from tokenjam.core.optimize import relearn_apply as pa
@@ -58,7 +60,7 @@ def _agent_cluster(**overrides) -> dict:
     base = {
         "signature": "cost:subagent:explore",
         "title": "Over-powered subagent explore",
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "apply_kind": ma.APPLY_KIND_AGENT_MODEL,
         "agent_name": "explore",
         "current_model": "claude-opus-4-8",
@@ -72,7 +74,7 @@ def _swap_cluster(source_path: str, **overrides) -> dict:
     base = {
         "signature": "cost:downsize:svc-a",
         "title": "Model over-sizing in svc-a",
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "apply_kind": ma.APPLY_KIND_MODEL_SWAP,
         "source_path": source_path,
         "current_model": "claude-opus-4-8",

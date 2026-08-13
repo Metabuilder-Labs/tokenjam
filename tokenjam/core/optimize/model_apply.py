@@ -72,7 +72,7 @@ def default_agent_file_path(scope: str, repo_cwd: str, agent_name: str) -> str:
 
     Project scope is tried first by the caller; ``user-global`` is only correct
     when the agent's sessions span repos, which is the same scope routing the
-    relearn note/skill rungs use. Returns ``""`` when a project-scoped lookup
+    relearn's note/skill deliveries use. Returns ``""`` when a project-scoped lookup
     has no repo to anchor on, so the caller must ask rather than guess.
     """
     if not agent_name:

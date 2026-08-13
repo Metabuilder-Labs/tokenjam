@@ -3,12 +3,13 @@ from __future__ import annotations
 import click
 
 from tokenjam.cli.cmd_onboard import _derive_project_name
+from tokenjam.cli.tj_status import TjCommand
 
 
-@click.command("otel-resource-attrs")
+@click.command("otel-resource-attrs", cls=TjCommand)
 @click.pass_context
 def cmd_otel_resource_attrs(ctx: click.Context) -> None:
-    """Print this project's OTel resource attributes on a single line.
+    """Print this project's OTel resource attributes.
 
     Emits e.g. ``service.name=claude-code-myrepo,service.namespace=myproject``.
 

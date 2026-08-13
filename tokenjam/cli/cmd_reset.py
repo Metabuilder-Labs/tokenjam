@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand, tj_status
 from tokenjam.utils.formatting import console
 
 
-@click.command("reset")
+#: No class-level `status_message`: the confirmation prompt below must not
+#: run under a live spinner. `tj_status` is called manually after the
+#: prompt resolves, wrapping only the teardown itself.
+@click.command("reset", cls=TjCommand)
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
 def cmd_reset(ctx: click.Context, yes: bool) -> None:
-    """Wipe TokenJam's config/daemon/wiring — keeps the tokenjam package installed.
+    """Reset tj config/daemon (keeps the package).
 
     The config-only counterpart to `tj uninstall` (which also removes the
     package itself): use `tj reset` to reconfigure or pause TokenJam without
@@ -27,7 +31,8 @@ def cmd_reset(ctx: click.Context, yes: bool) -> None:
             return
 
     from tokenjam.cli.cmd_uninstall import _teardown_side_effects
-    _teardown_side_effects(ctx)
+    with tj_status("Resetting tj…", ctx):
+        _teardown_side_effects(ctx)
 
     console.print()
     console.print("[dim]Run[/dim]  tj onboard  [dim]to set up again.[/dim]")

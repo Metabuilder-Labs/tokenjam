@@ -37,5 +37,3 @@ Every analyzer must:
   class of work worth reviewing.
 - Carry a caveat string the renderer surfaces verbatim. Constants like
   `MODEL_DOWNGRADE_CAVEAT` live in `types.py`.
-
-See `tokenjam-product-strategy.md` v3 §4.5 and §10 for the full discipline.

@@ -8,7 +8,9 @@ divider. `prep` wraps a prompt's structure and emits it for you to rewrite (or `
 claude-p`/`--via api` to have a model do it in one shot); `check` verifies the rewrite
 preserved every structure block (a hard gate) and stages it; `apply`
 writes a staged result (taking a backup first), `undo` reverts — both default to a dry-run,
-`--go` writes. See DEC-020/021/024/025.
+`--go` writes. `calibrate` samples real rewrites so the savings estimate can use a MEASURED
+prose ratio instead of the unenforced target it is otherwise assuming; it too defaults to a
+dry-run, because every sample is a billed model call. See DEC-020/021/024/025.
 """
 from __future__ import annotations
 
@@ -19,11 +21,36 @@ import click
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjGroup, tj_status_stream
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize.apply import apply_staged, undo
+from tokenjam.core.summarize.calibrate import (
+    DEFAULT_SAMPLES,
+    MAX_SAMPLES,
+    CalibrationReport,
+    run_calibration,
+)
+from tokenjam.core.summarize import quarantine
 from tokenjam.core.summarize.candidates import list_candidates
+from tokenjam.core.summarize.prune import (
+    DEFAULT_EXPIRE_DAYS,
+    apply_prune,
+    plan_expire,
+    plan_prune,
+)
 from tokenjam.core.summarize.delivery import Amortization, DeliveryError, summarize_via
-from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO
+from tokenjam.core.summarize.relocate import (
+    DEFAULT_TARGET,
+    apply_relocation,
+    plan_relocation,
+)
+from tokenjam.core.summarize.estimate import (
+    DEFAULT_TARGET_RATIO,
+    UNMEASURED_PRIOR_RANGE,
+    UNMEASURED_PRIOR_RATIO,
+    UNMEASURED_PRIOR_SAMPLES,
+    observed_prose_ratio,
+)
 from tokenjam.core.summarize.session import CheckVerdict, SummarizeRefused, check, prepare
 from tokenjam.utils.formatting import console, format_tokens
 
@@ -42,7 +69,7 @@ def _print_verdict(verdict: CheckVerdict) -> None:
     never surfaced to the user here.)"""
     if verdict.structure_ok:
         console.print(f"[green]✓[/green] {escape(verdict.path)} — structure preserved, "
-                      f"~{format_tokens(verdict.est_tokens_saved)} prompt tok/call "
+                      f"~{format_tokens(verdict.est_tokens_saved or 0)} prompt tok/call "
                       f"({verdict.words_before}→{verdict.words_after} words)")
     else:
         console.print(f"[red]✗[/red] {escape(verdict.path)} — {escape(verdict.reason)} (not staged)")
@@ -83,12 +110,12 @@ def _print_amortization(amort: Amortization) -> None:
     console.print(line + "[/dim]")
 
 
-@click.group("summarize", invoke_without_command=False)
+@click.group("summarize", cls=TjGroup, invoke_without_command=False)
 def cmd_summarize() -> None:
-    """Structure-aware prompt summarization (advisory preview)."""
+    """Summarize prompts (structure-aware, advisory)."""
 
 
-@cmd_summarize.command("list")
+@cmd_summarize.command("list", status_message="Scanning for summarize candidates…")
 @click.argument("path", required=False, default=None)
 @click.option("-r", "--recursive", is_flag=True,
               help="Walk the repo subtree (or PATH) — opens to all .md.")
@@ -120,14 +147,33 @@ def cmd_summarize_list(
     kwargs: dict = {}
     if min_prose is not None:
         kwargs["min_prose_words"] = min_prose
+    # Forecast on what rewrites have ACTUALLY delivered here when that is known,
+    # and on the measured prior otherwise — never on the target the rewriter is
+    # merely asked for. `list` forecasting at the ask is what let a file
+    # advertised at 286 tokens deliver 81.
+    measured_ratio, ratio_samples = observed_prose_ratio(config)
     result = list_candidates(
         path, config=config, recursive=recursive, repo=repo,
-        include_global=not no_global, extra_exts=extra_exts, **kwargs,
+        include_global=not no_global, extra_exts=extra_exts,
+        ratio=measured_ratio if measured_ratio is not None else UNMEASURED_PRIOR_RATIO,
+        **kwargs,
+    )
+    ratio_note = (
+        f"Reduction assumes prose compresses to {(measured_ratio or 0) * 100:.0f}% "
+        f"of its words, measured across {ratio_samples:,} verified rewrite(s) here."
+        if measured_ratio is not None else
+        f"Reduction assumes prose compresses to {UNMEASURED_PRIOR_RATIO * 100:.0f}% of "
+        f"its words — tokenjam's measurement on other machines, not yours "
+        f"({UNMEASURED_PRIOR_SAMPLES:,} rewrites spanning "
+        f"{UNMEASURED_PRIOR_RANGE[0]:.0%}-{UNMEASURED_PRIOR_RANGE[1]:.0%}). "
+        f"Run `tj summarize calibrate --via claude-p --go` to measure your own."
     )
 
     if output_json:
         payload = result.to_dict()
         payload["note"] = result.note or CANDIDATE_NOTE
+        payload["ratio_basis"] = ratio_note
+        payload["prose_ratio_observed"] = measured_ratio is not None
         click.echo(json.dumps(payload, indent=2))
         return
 
@@ -180,6 +226,7 @@ def cmd_summarize_list(
         console.print(t)
     console.print()
     console.print(f"[dim]{escape(CANDIDATE_NOTE)}[/dim]")
+    console.print(f"[dim]{escape(ratio_note)}[/dim]")
 
 
 @cmd_summarize.command("prep")
@@ -201,10 +248,18 @@ def cmd_summarize_prep(
     output_json = resolve_output_json(ctx, output_json_flag)
 
     if via is not None:                             # automated: wrap → rewrite → check → stage
-        on_progress = None if output_json else (
-            lambda m: console.print(f"[dim]{escape(m)}…[/dim]"))
+        # One live status line across the three phases `summarize_via` calls
+        # `on_progress` for (wrap / rewrite / verify), rather than the static
+        # print-per-phase this used to do — the rewrite phase in particular
+        # can run for several seconds with nothing else on screen.
         try:
-            outcome = summarize_via(config, path, via, ratio=ratio, on_progress=on_progress)
+            if output_json:
+                outcome = summarize_via(config, path, via, ratio=ratio)
+            else:
+                with tj_status_stream("Wrapping structure…", ctx) as update:
+                    on_progress = lambda m: update(f"{escape(m)}…")  # noqa: E731
+                    outcome = summarize_via(
+                        config, path, via, ratio=ratio, on_progress=on_progress)
         except (DeliveryError, SummarizeRefused) as e:
             raise click.ClickException(str(e)) from e
         if outcome.verdict is None:                 # below the worth-it prose gate (note from the one prep)
@@ -242,6 +297,8 @@ def cmd_summarize_prep(
     console.print(f"[dim]{escape(result.path)}[/dim] · prose {result.prose_words} → "
                   f"~{result.target_prose_words} words · "
                   f"{result.protected_blocks} block(s) kept verbatim")
+    if result.target_basis:                         # whose target this is, and why
+        console.print(f"[dim]{escape(result.target_basis)}[/dim]")
     console.print(f"hash: [bold]{result.source_sha256}[/bold]")
     # The manual/copy path: emit the actual payload so the user can rewrite in any model
     # without needing --json (a JSON form is still available via --json for tooling).
@@ -253,7 +310,85 @@ def cmd_summarize_prep(
     console.print(escape(result.wrapped_prompt))
     console.print()
     console.print("[dim]Save the rewrite to a file, then: tj summarize check "
-                  f"{escape(result.path)} --summary <file> --prepped-hash {result.source_sha256}[/dim]")
+                  f"{escape(result.path)} --summary <file> --prepped-hash {result.source_sha256} "
+                  f"--nonce {result.source_nonce}[/dim]")
+
+
+def _print_calibration(report: CalibrationReport) -> None:
+    """The calibration verdict: what was sampled, what it cost, what it showed."""
+    if report.dry_run:
+        for t in report.planned:
+            console.print(f"[dim]would sample[/dim] {escape(t.path)} "
+                          f"({t.prose_words:,} prose words)")
+        console.print(f"[yellow]{escape(report.note)}[/yellow]")
+        return
+
+    for s in report.samples:
+        if s.achieved_ratio is not None:
+            console.print(
+                f"[green]✓[/green] {escape(s.path)} — prose to "
+                f"{s.achieved_ratio * 100:.0f}% of its words "
+                f"({s.words_before}→{s.words_after} words)")
+        else:
+            console.print(f"[red]✗[/red] {escape(s.path)} — "
+                          f"{escape(s.error or 'no usable outcome')} (recorded, not staged)")
+    if not report.samples:
+        console.print("[dim]Nothing was sampled.[/dim]")
+        return
+    if report.rewrite_usd is not None:
+        console.print(f"[dim]{len(report.samples):,} rewrite(s) via {escape(report.via)}; "
+                      f"~${report.rewrite_usd:.4f} billed.[/dim]")
+    else:
+        # Not "free": claude-p spends the user's Claude Code quota, it just
+        # reports no per-token price. Saying $0.00 would be a quiet lie.
+        console.print(f"[dim]{len(report.samples):,} rewrite(s) via {escape(report.via)}; "
+                      f"per-token cost not reported on this path.[/dim]")
+    console.print(escape(report.note))
+
+
+@cmd_summarize.command("calibrate")
+@click.option("--via", "via", type=click.Choice(["claude-p", "api"]), required=True,
+              help="How to run the sample rewrites: 'claude-p' drives your local Claude Code "
+                   "(headless `claude -p`); 'api' calls Anthropic with your TJ_ANTHROPIC_API_KEY "
+                   "(needs [summarize] api_model).")
+@click.option("--limit", "limit", default=DEFAULT_SAMPLES, show_default=True, type=int,
+              help=f"How many files to sample (hard cap {MAX_SAMPLES}).")
+@click.option("--go", is_flag=True,
+              help="Actually run the rewrites (default is a dry-run that spends nothing).")
+@click.argument("path", required=False, default=None)
+@json_option
+@click.pass_context
+def cmd_summarize_calibrate(
+    ctx: click.Context, via: str, limit: int, go: bool, path: str | None,
+    output_json_flag: bool,
+) -> None:
+    """Measure what a rewrite actually delivers here, instead of assuming the target.
+
+    The savings estimate assumes prose compresses to the ratio the rewriter is
+    ASKED for, which nothing enforces. This samples the largest prompt files with
+    real rewrites and records what they achieved, so the estimate can use a
+    measured ratio. Each sample is a billed model call; default is a dry-run.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    try:
+        if output_json:
+            report = run_calibration(config, via=via, limit=limit, go=go, path=path)
+        else:
+            # One live status line across the per-file samples `run_calibration`
+            # reports through `on_progress`, rather than one static print per
+            # file — each sample is a billed model call and can run for seconds.
+            with tj_status_stream("Calibrating…", ctx) as update:
+                on_progress = lambda m: update(f"{escape(m)}…")  # noqa: E731
+                report = run_calibration(
+                    config, via=via, limit=limit, go=go, path=path,
+                    on_progress=on_progress)
+    except (DeliveryError, SummarizeRefused) as e:
+        raise click.ClickException(str(e)) from e
+    if output_json:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    _print_calibration(report)
 
 
 @cmd_summarize.command("check")
@@ -262,10 +397,15 @@ def cmd_summarize_prep(
               help="File holding the model's summary ('-' for stdin).")
 @click.option("--prepped-hash", "prepped_hash", required=True,
               help="The source_sha256 returned by `prep`.")
+@click.option("--nonce", "source_nonce", default=None,
+              help="The source_nonce returned by `prep`. Pass it and the rewrite must come back "
+                   "inside the same <tj-source> envelope it was sent in — the one check that "
+                   "works on a file with no protected blocks.")
 @json_option
 @click.pass_context
 def cmd_summarize_check(
-    ctx: click.Context, path: str, summary_path: str, prepped_hash: str, output_json_flag: bool,
+    ctx: click.Context, path: str, summary_path: str, prepped_hash: str,
+    source_nonce: str | None, output_json_flag: bool,
 ) -> None:
     """Verify a summary (hash-guards the file) and stage it for review."""
     config: TjConfig = ctx.obj["config"]
@@ -275,7 +415,7 @@ def cmd_summarize_check(
         else Path(summary_path).expanduser().read_text(encoding="utf-8")
     )
     try:
-        verdict = check(config, path, summary_text, prepped_hash)
+        verdict = check(config, path, summary_text, prepped_hash, source_nonce=source_nonce)
     except SummarizeRefused as e:
         raise click.ClickException(str(e)) from e   # file changed/missing — house-voice refuse
     if output_json:
@@ -353,3 +493,329 @@ def cmd_summarize_undo(
         console.print(f"[dim]would restore {escape(result['path'])} from backup — re-run with --go.[/dim]")
     else:
         console.print(f"[green]✓[/green] restored {escape(result['path'])} from backup")
+
+
+@cmd_summarize.command("relocate")
+@click.argument("path")
+@click.option("--to", "target", default=None,
+              help=f"Where the reference material goes (default: {DEFAULT_TARGET} beside PATH).")
+@click.option("--section", "sections", multiple=True,
+              help="Only this section (repeatable). Still subject to the classifier.")
+@click.option("--go", is_flag=True,
+              help="Write the files (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@json_option
+@click.pass_context
+def cmd_summarize_relocate(
+    ctx: click.Context, path: str, target: str | None, sections: tuple[str, ...],
+    go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Move REFERENCE sections out of PATH into a linked file, leaving a pointer.
+
+    Nothing is rewritten and nothing is deleted: the text moves and a pointer
+    stays behind, so unlike a summary this cannot change what any surviving
+    instruction says. Only sections a classifier is confident describe what
+    EXISTS are moved; anything that might be an instruction is left alone and
+    the reason is printed. Default dry-run; --go writes.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    if dry_run and go:
+        raise click.UsageError("Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    source = Path(path).expanduser()
+    if source.is_dir():
+        raise click.UsageError("PATH is a directory; relocate takes one file.")
+    if not source.is_file():
+        raise click.UsageError(f"{path} is not a file.")
+
+    target_path = Path(target).expanduser() if target else source.parent / DEFAULT_TARGET
+    target_text = target_path.read_text(encoding="utf-8") if target_path.is_file() else ""
+    try:
+        plan = plan_relocation(
+            source_path=str(source), source_text=source.read_text(encoding="utf-8"),
+            target_path=str(target_path), target_text=target_text,
+            titles=list(sections) or None,
+        )
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e
+
+    if plan is None:
+        if output_json:
+            click.echo(json.dumps({"plan": None, "applied": False}, indent=2))
+            return
+        console.print(
+            f"[muted]No section of {escape(str(source))} is confidently reference "
+            f"material, so nothing is offered. Leaving a section in place costs a "
+            f"saving; moving an instruction out of an always-loaded file costs "
+            f"correctness, so the ambiguous cases stay put.[/muted]"
+        )
+        return
+
+    result = apply_relocation(config, plan, go=go)
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+
+    for s in plan.sections:
+        verb = "moved" if result["applied"] else "would move"
+        console.print(
+            f"[ok]✓[/ok] {verb} [accent]{escape(s.title)}[/accent] to "
+            f"[accent]{escape(str(target_path))}[/accent] "
+            f"(~{format_tokens(s.tokens_freed)} always-resident tok/read)"
+        )
+        console.print(f"  [muted]{escape(s.classification.reason)}[/muted]")
+    for title, verdict in plan.declined:
+        console.print(f"[muted]left in place: {escape(title)}; {escape(verdict.reason)}[/muted]")
+    for skip in result["skipped"]:
+        console.print(f"[warn]skip[/warn] {escape(skip['path'])}; {escape(skip['reason'])}")
+    if result["dry_run"]:
+        console.print("[muted]dry-run; nothing written. Re-run with --go to apply.[/muted]")
+    elif result["applied"]:
+        console.print(
+            f"[muted]Both files are backed up; `tj summarize undo {escape(str(source))} --go` "
+            f"restores the original.[/muted]"
+        )
+
+
+# --- prune / expire / quarantine ------------------------------------------
+#
+# The two routes `route.py` names that could not previously reach a write. They
+# use the same shape every write-affecting subcommand above uses — plan, show
+# the exact change, default to a dry run, `--go` writes — because the human gate
+# is not what the quarantine replaces. The quarantine is what sits UNDER that
+# gate, so approving a removal is no longer an irreversible act.
+
+def _print_prune_plan(plan, *, route_label: str) -> None:
+    if not plan.fragments:
+        console.print(f"[dim]nothing to {route_label}.[/dim]")
+    for fragment in plan.fragments:
+        console.print(
+            f"[yellow]-[/yellow] {escape(fragment.title)} "
+            f"[dim](lines {fragment.start_line}-{fragment.end_line - 1}, "
+            f"~{format_tokens(fragment.tokens)} tok) — {escape(fragment.reason)}[/dim]"
+        )
+    for title, why in plan.declined:
+        console.print(f"[dim]  kept  {escape(title)} — {escape(why)}[/dim]")
+
+
+def _finish_prune(config, plan, *, go: bool, output_json: bool, route_label: str) -> None:
+    try:
+        result = apply_prune(config, plan, go=go)
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    _print_prune_plan(plan, route_label=route_label)
+    for skip in result["skipped"]:
+        console.print(f"[yellow]skip[/yellow] {escape(skip['path'])} — {escape(skip['reason'])}")
+    if result["applied"]:
+        console.print(
+            f"[green]✓[/green] {route_label}d {len(plan.fragments)} fragment(s), "
+            f"~{format_tokens(plan.tokens_freed)} always-resident tok freed"
+        )
+        console.print(
+            f"[dim]quarantined as {', '.join(result['quarantined'])} — "
+            f"`tj summarize restore <id> --go` puts any of them back.[/dim]"
+        )
+    elif result["dry_run"] and plan.fragments:
+        console.print("[dim]dry-run — nothing written. Re-run with --go to apply.[/dim]")
+
+
+@cmd_summarize.command("prune")
+@click.argument("path")
+@click.option("--section", "sections", multiple=True,
+              help="Heading of a section to remove. Repeatable; required.")
+@click.option("--level", default=2, show_default=True, type=int,
+              help="Heading level the sections are at.")
+@click.option("--go", is_flag=True,
+              help="Write the file (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@json_option
+@click.pass_context
+def cmd_summarize_prune(
+    ctx: click.Context, path: str, sections: tuple[str, ...], level: int,
+    go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Remove named sections from an instruction file. Default dry-run; --go writes.
+
+    Nothing is selected for you: which rules earn their place is a question only
+    the file's owner can answer, and the shape measurement behind the `prune`
+    verdict deliberately does not answer it. Every removal is quarantined first
+    and can be restored with `tj summarize restore`.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    if dry_run and go:
+        raise click.UsageError(
+            "Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    target = Path(path).expanduser()
+    if target.is_dir():
+        raise click.UsageError("PATH is a directory — prune takes one file.")
+    if not target.is_file():
+        raise click.ClickException(f"{target} not found.")
+    try:
+        plan = plan_prune(
+            source_path=str(target), source_text=target.read_text(encoding="utf-8"),
+            titles=list(sections), level=level,
+        )
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e
+    _finish_prune(config, plan, go=go, output_json=output_json, route_label="prune")
+
+
+@cmd_summarize.command("expire")
+@click.argument("path")
+@click.option("--older-than", "older_than", default=DEFAULT_EXPIRE_DAYS, show_default=True,
+              type=int, help="Days. Dated entries older than this are offered for removal.")
+@click.option("--level", default=2, show_default=True, type=int,
+              help="Heading level the entries are at.")
+@click.option("--go", is_flag=True,
+              help="Write the file (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@json_option
+@click.pass_context
+def cmd_summarize_expire(
+    ctx: click.Context, path: str, older_than: int, level: int,
+    go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Drain aged entries from a dated log. Default dry-run; --go writes.
+
+    Only entries whose heading carries a date older than the cutoff. An undated
+    section in a log is standing content and is never swept along. Every removal
+    is quarantined first and can be restored with `tj summarize restore`.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    if dry_run and go:
+        raise click.UsageError(
+            "Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    target = Path(path).expanduser()
+    if target.is_dir():
+        raise click.UsageError("PATH is a directory — expire takes one file.")
+    if not target.is_file():
+        raise click.ClickException(f"{target} not found.")
+    plan = plan_expire(
+        source_path=str(target), source_text=target.read_text(encoding="utf-8"),
+        older_than_days=older_than, level=level,
+    )
+    _finish_prune(config, plan, go=go, output_json=output_json, route_label="expire")
+
+
+@cmd_summarize.group("quarantine")
+def cmd_summarize_quarantine() -> None:
+    """What prune and expire removed, and how to read it back."""
+
+
+@cmd_summarize_quarantine.command("list")
+@click.argument("path", required=False, default=None)
+@json_option
+@click.pass_context
+def cmd_summarize_quarantine_list(
+    ctx: click.Context, path: str | None, output_json_flag: bool,
+) -> None:
+    """Every quarantined removal, newest first — all files, or one PATH."""
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    entries = quarantine.list_entries(config, source_path=path)
+    if output_json:
+        click.echo(json.dumps([e.to_dict() for e in entries], indent=2))
+        return
+    if not entries:
+        console.print("[dim]nothing quarantined.[/dim]")
+        return
+    for entry in entries:
+        console.print(
+            f"[cyan]{entry.entry_id}[/cyan]  {escape(entry.route)}  "
+            f"{escape(entry.source_path)} "
+            f"[dim](lines {entry.start_line}-{entry.end_line - 1}, "
+            f"{entry.removed_chars} chars, {escape(entry.removed_at)})[/dim]"
+        )
+        if entry.reason:
+            console.print(f"    [dim]{escape(entry.reason)}[/dim]")
+
+
+@cmd_summarize_quarantine.command("show")
+@click.argument("entry_id")
+@json_option
+@click.pass_context
+def cmd_summarize_quarantine_show(
+    ctx: click.Context, entry_id: str, output_json_flag: bool,
+) -> None:
+    """Print one quarantined fragment verbatim."""
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    entry = quarantine.read(config, entry_id)
+    if entry is None:
+        raise click.ClickException(
+            f"no quarantine entry {entry_id!r}. `tj summarize quarantine list` "
+            f"shows what is there.")
+    if output_json:
+        click.echo(json.dumps({**entry.to_dict(), "removed_text": entry.removed_text}, indent=2))
+        return
+    console.print(f"[dim]{escape(entry.source_path)} — {escape(entry.reason)}[/dim]")
+    click.echo(entry.removed_text)
+
+
+@cmd_summarize.command("restore")
+@click.argument("entry_id", required=False, default=None)
+@click.option("--all", "restore_every", is_flag=True,
+              help="Restore every quarantined fragment (optionally scoped by --path).")
+@click.option("--path", "path", default=None,
+              help="With --all, restore only this file's fragments.")
+@click.option("--go", is_flag=True,
+              help="Write the file (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@json_option
+@click.pass_context
+def cmd_summarize_restore(
+    ctx: click.Context, entry_id: str | None, restore_every: bool, path: str | None,
+    go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Put a quarantined fragment back. Default dry-run; --go writes.
+
+    Refuses rather than guessing when the file changed so much that the
+    fragment's original surroundings can no longer be located: silent corruption
+    of an instruction file is a worse failure than a refusal you can act on.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    if dry_run and go:
+        raise click.UsageError(
+            "Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    if bool(entry_id) == bool(restore_every):
+        raise click.UsageError("Give either an ENTRY_ID or --all, not both and not neither.")
+
+    try:
+        if restore_every:
+            report = quarantine.restore_all(config, source_path=path, go=go)
+            results = report["results"]
+        else:
+            results = [quarantine.restore(config, entry_id or "", go=go)]
+            report = {
+                "restored": sum(1 for r in results if r["restored"]),
+                "refused": [r for r in results if not r["restored"] and r["reason"]],
+                "dry_run": not go, "results": results,
+            }
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e
+
+    if output_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    for result in results:
+        if result["restored"]:
+            exact = "exactly" if result["source_unchanged"] else "re-anchored"
+            console.print(
+                f"[green]✓[/green] restored {result['entry_id']} into "
+                f"{escape(result['path'])} ({exact})")
+        elif result["reason"]:
+            console.print(f"[yellow]refused[/yellow] {escape(result['reason'])}")
+        else:
+            console.print(
+                f"[dim]would restore {result['entry_id']} into "
+                f"{escape(result['path'])} — re-run with --go.[/dim]")

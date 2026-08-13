@@ -30,6 +30,7 @@ from typing import cast
 import click
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.utils.formatting import console
 
 # Clearly-labeled test identity so a ping span is never mistaken for real
@@ -66,13 +67,13 @@ class _ProofExporter:
         return True
 
 
-@click.command("ping")
+@click.command("ping", cls=TjCommand, status_message="Sending test span…")
 @click.option("--agent", "agent_id", default=PING_AGENT_ID, show_default=True,
               help="agent_id to stamp on the test span.")
 @json_option
 @click.pass_context
 def cmd_ping(ctx: click.Context, agent_id: str, output_json_flag: bool) -> None:
-    """Emit a labeled test span to prove SDK instrumentation is wired up.
+    """Send a test span to verify the SDK.
 
     Exits 0 only once delivery is *confirmed* — HTTP mode polls the daemon's
     read API for the span before exiting; exit 0 in HTTP mode never means

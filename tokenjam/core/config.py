@@ -84,7 +84,34 @@ class DefaultsConfig:
 @dataclass
 class StorageConfig:
     path:           str = "~/.tj/telemetry.duckdb"
-    retention_days: int = 90
+    # THE user-chosen analysis span — "30d" / "90d" / "all" — written by
+    # `tj onboard`. Retention is derived from it, never chosen independently,
+    # so deletion cannot remove history the product is offering to analyze. See
+    # `core/analysis_span.py` for the derivation and the one-directional clamp;
+    # read the span through that module, never off this field, so the
+    # back-compat path below is applied everywhere.
+    analysis_span:  str | None = None
+    # None means "derive from analysis_span". A config that sets this and
+    # nothing else — every config written before the coupling existed — has its
+    # value read AS the span, so nothing about that setup changes.
+    retention_days: int | None = None
+    # DuckDB's buffer pool, bounded. Left unset, DuckDB sizes `memory_limit` at
+    # 80% of physical RAM — 19.1 GiB on a 24 GB Mac — and its buffer manager has
+    # no reason to evict below that, so a daemon that should idle near 200 MB
+    # instead grows until the machine is swapping. This is a *ceiling*, not a
+    # reservation: past it DuckDB spills to `temp_directory` rather than
+    # failing, so a small number costs disk I/O on the rare large scan and
+    # nothing the rest of the time. `threads` is capped for the same reason —
+    # each carries its own allocation arenas, and the daemon opens a second
+    # backend for transcript catch-up while the request path is live.
+    # 2GB rather than 1GB because 1GB was measured failing here: on a 768k-span
+    # database the daemon OOMed on a request-path aggregate while the startup
+    # transcript catch-up already held the pool ("1.0 GiB/953.6 MiB used" — the
+    # query needed 16 KB more). The ceiling has to fit the request path AND the
+    # catch-up backend that runs beside it, not either alone. Raise it if a scan
+    # ever spills enough to feel slow.
+    memory_limit:   str = "2GB"
+    threads:        int = 4
     # Runtime provenance, never read from or written to TOML: True when `path`
     # came from an explicit `--db` rather than config discovery. The
     # filesystem-reading analyzers scope themselves off it (see
@@ -319,12 +346,26 @@ class OptimizeConfig:
     # section this is a SCOPE, not a sensitivity threshold — it decides which
     # filesystem is evidence, not how eager an analyzer is about it.
     projects_root: str | None = None
-    # deadweight (analyzers/deadweight.py MIN_SESSIONS_DEADWEIGHT): an MCP
-    # server needs to be configured-present in at least this many distinct
-    # sessions, with zero invocations across all of them, to be flagged dead.
-    # Default 5 (was 10) -- see MIN_SESSIONS_DEADWEIGHT's comment for the
-    # false-positive-rate reasoning behind the lowered bar.
-    min_sessions_deadweight: int = 5
+    # deadweight (core/optimize/mcp_probe.py): whether the analyzer may MEASURE
+    # each configured MCP server's tool schemas, which means STARTING that
+    # server, sending it `initialize` + `tools/list`, and terminating it. That is
+    # the only way to know what a server actually injects, and the figure it
+    # replaced was a flat assumption charged per-server.
+    #
+    # OFF BY DEFAULT, deliberately. The protocol surface is read-only (no
+    # `tools/call` is ever issued), but starting a process is not nothing: the
+    # command is the user's own, and an `npx -y` spec fetches from the network
+    # while a server may open connections or refresh a token on startup. The
+    # analyzer pass is reachable from `tj optimize`, the daemon's scheduled scan,
+    # AND tj's own MCP tool — so an agent asking tj for a report could otherwise
+    # spawn a batch of the user's servers as a side effect of a question. Making
+    # the first exposure opt-in is the difference between a user choosing that
+    # and discovering it.
+    #
+    # Leaving it off does NOT restore the old assumption. Unmeasured servers are
+    # excluded from every priced figure and the finding's own coverage note says
+    # how many were excluded and why.
+    measure_mcp_schemas: bool = False
     # cache (analyzers/cache_efficacy.py MIN_INPUT_TOKENS): minimum
     # (provider, model) input-token volume in the window before a low
     # cache-efficacy ratio is even worth surfacing.
@@ -395,6 +436,18 @@ class OptimizeConfig:
     # How often a UI surface re-reads the stored result (NOT how often the scan
     # runs). Zero disables the UI's auto-refresh entirely.
     scan_ui_poll_seconds: int = 300
+    # Ingestion watermark that gates a SCHEDULED tick (never an explicit
+    # rescan — see `core/optimize/scan_cycle.py`). A tick only re-runs the
+    # expensive analyzer pass when at least this many new spans have landed
+    # since the last pass; below it, the tick is a no-op on an idle machine.
+    # 1 preserves today's "scan on every tick" behaviour for any machine that
+    # saw ANY telemetry; only a genuinely idle tick is skipped.
+    scan_watermark_min_new_spans: int = 1
+    # Ceiling on the above: a scheduled tick re-runs the pass regardless of
+    # the watermark once this many hours have passed since the last one, so a
+    # quiet machine still refreshes eventually rather than never rescanning
+    # again.
+    scan_watermark_max_staleness_hours: float = 24.0
 
 
 @dataclass
@@ -498,27 +551,125 @@ SEARCH_PATHS = [
 ]
 
 
-def _warn_if_secrets_diverge(active_path: Path, active_raw: dict) -> None:
-    """
-    Emit a stderr warning if a shadowed config exists with a different
-    ingest_secret. Tracks the common footgun (#68 §5): project-local
-    .tj/config.toml has secret A; global ~/.config/tj/config.toml has
-    secret B; the SDK uses A; the daemon (started with global config)
-    uses B; span pushes 401 silently.
+def global_config_path() -> Path:
+    """The user-scoped config file: the single source of truth for the ingest
+    secret.
 
-    Fires at most once per process via the module-level guard so this
-    doesn't spam multi-call test environments.
+    Resolved at call time rather than import time, because ``SEARCH_PATHS``
+    bakes ``Path.home()`` in at import and a test (or a sandboxed run) that
+    moves ``HOME`` afterwards would otherwise still be pointed at the real
+    user's file.
+
+    Why this file and no other: the daemon is launched from a unit file that
+    names this path explicitly, so the daemon ALWAYS authenticates with the
+    secret stored here, whatever directory anything else runs from. A secret
+    minted into a project-local ``.tj/config.toml`` is therefore a secret the
+    daemon will never accept, and every span pushed with it 401s silently.
     """
-    global _SECRET_DIVERGENCE_WARNED
-    if _SECRET_DIVERGENCE_WARNED:
-        return
+    return Path.home() / ".config" / "tj" / "config.toml"
+
+
+def global_ingest_secret() -> str:
+    """The ingest secret recorded in the global config, or "" when there is
+    no global config or it carries none. Never raises."""
+    path = global_config_path()
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return ""
+    secret = (raw.get("security") or {}).get("ingest_secret")
+    return secret if isinstance(secret, str) else ""
+
+
+def ensure_global_ingest_secret() -> tuple[str, bool]:
+    """Return ``(secret, minted)`` for the machine-wide ingest secret.
+
+    Adopts the secret already in the global config when there is one, and only
+    mints (and stores) a fresh one when the global config has none. Every
+    onboarding path routes its secret through here, so no flow can create a
+    second, divergent secret: the shell block that every already-configured
+    integration carries holds the GLOBAL secret, and overwriting that would
+    break every working integration.
+    """
+    import secrets as _secrets
+
+    existing = global_ingest_secret()
+    if existing:
+        return existing, False
+
+    path = global_config_path()
+    config = load_config(str(path)) if path.exists() else TjConfig(version="1")
+    secret = _secrets.token_hex(32)
+    config.security.ingest_secret = secret
+    write_config(config, path)
+    return secret, True
+
+
+def align_project_secret_to_global(secret: str, path: Path | None = None) -> Path | None:
+    """Rewrite a project-local config's ``ingest_secret`` to the global one.
+
+    The global secret is always the survivor: the managed shell block, the
+    daemon unit file, and therefore every already-working integration carry
+    it. Returns the path repaired, or None when there was nothing to repair
+    (no project-local config, or it already agrees).
+    """
+    target = path if path is not None else Path(".tj/config.toml")
+    if not secret or not target.exists():
+        return None
+    try:
+        with open(target, "rb") as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    current = (raw.get("security") or {}).get("ingest_secret")
+    if not isinstance(current, str) or not current or current == secret:
+        return None
+    # Textual edit of the one key, not a `write_config` round-trip: the plain
+    # onboarding path writes this file as commented TOML by hand, and
+    # re-serialising it would silently delete every one of those comments as a
+    # side effect of a secret repair.
+    import re as _re
+
+    try:
+        text = target.read_text()
+    except OSError:
+        return None
+    patched, count = _re.subn(
+        r'(?m)^(\s*ingest_secret\s*=\s*)"[^"]*"',
+        lambda m: m.group(1) + f'"{secret}"',
+        text,
+        count=1,
+    )
+    if not count:
+        return None
+    try:
+        target.write_text(patched)
+    except OSError:
+        return None
+    # Resolved, not relative: the caller prints this, and ".tj/config.toml" on
+    # its own does not say WHICH project directory was just edited.
+    return target.resolve()
+
+
+def find_diverged_secret_config(active_path: Path, active_raw: dict) -> tuple[Path, str, str] | None:
+    """Return `(other_path, active_secret, other_secret)` for the first
+    shadowed config on `SEARCH_PATHS` that carries a DIFFERENT non-empty
+    `ingest_secret` than `active_raw`'s, or None when none diverges.
+
+    The single source of truth for the footgun `tj doctor`'s ingest-secret
+    check reports: project-local `.tj/config.toml` has
+    secret A; global `~/.config/tj/config.toml` has secret B; the SDK uses A;
+    the daemon (started with global config) uses B; span pushes 401 silently.
+    Best-effort — an unreadable/unparseable candidate is skipped, never raised.
+    """
     active_secret = (active_raw.get("security") or {}).get("ingest_secret")
     if not active_secret:
-        return
+        return None
     try:
         active_resolved = active_path.resolve()
     except OSError:
-        return
+        return None
     for candidate in SEARCH_PATHS:
         try:
             cand_resolved = candidate.resolve()
@@ -536,28 +687,18 @@ def _warn_if_secrets_diverge(active_path: Path, active_raw: dict) -> None:
         other_secret = (other_raw.get("security") or {}).get("ingest_secret")
         if not other_secret or other_secret == active_secret:
             continue
-        # Diverged. Warn once.
-        print(
-            f"warning: ingest_secret differs between {active_path} "
-            f"and {candidate}. The SDK will use the secret from "
-            f"{active_path} but a daemon launched from a different cwd "
-            f"may use the other one — span pushes will 401 silently. "
-            f"Align them (copy one secret into the other config) or "
-            f"delete the unused config.",
-            file=sys.stderr,
-        )
-        _SECRET_DIVERGENCE_WARNED = True
-        return
+        return candidate, active_secret, other_secret
+    return None
 
 
-# Module-level guard. Reset for tests via the helper exposed below.
-_SECRET_DIVERGENCE_WARNED = False
-
-
-def _reset_secret_divergence_warning() -> None:
-    """Test helper — reset the once-per-process warning guard."""
-    global _SECRET_DIVERGENCE_WARNED
-    _SECRET_DIVERGENCE_WARNED = False
+# `load_config` deliberately does NOT warn about a diverged secret. It used to
+# print one to stderr on every invocation, in front of every command, which is
+# noise on a fault the user cannot act on from there and trains people to read
+# past warnings. The divergence is now reported where a verdict belongs and can
+# be re-checked on demand: `tj doctor`'s ingest-secret check (which calls
+# `find_diverged_secret_config` directly) alongside its live endpoint probe, and
+# onboarding no longer creates the divergence in the first place
+# (`ensure_global_ingest_secret` / `align_project_secret_to_global`).
 
 
 def find_config_file(override: str | None = None) -> Path | None:
@@ -639,13 +780,6 @@ def load_config(path: str | None = None) -> TjConfig:
     with open(config_path, "rb") as f:   # "rb" is REQUIRED
         raw = tomllib.load(f)
 
-    # Diverged-secret detection (#68 §5). When a project-local config
-    # shadows a global one with a different ingest_secret, the SDK and
-    # daemon end up with different secrets and span pushes silently 401.
-    # Warn at config-load time so the user gets a chance to align them
-    # before debugging mysterious 401s.
-    _warn_if_secrets_diverge(config_path, raw)
-
     cfg = _parse(raw)
     cfg.config_path = config_path.resolve()
     return cfg
@@ -679,7 +813,14 @@ def _parse(raw: dict) -> TjConfig:
     storage_raw = raw.get("storage", {})
     storage = StorageConfig(
         path=storage_raw.get("path", StorageConfig.path),
-        retention_days=storage_raw.get("retention_days", StorageConfig.retention_days),
+        # Absence is meaningful for both of these and must survive the load:
+        # `analysis_span` absent + `retention_days` present is the pre-coupling
+        # config whose kept history IS its span. Defaulting either one here
+        # would erase that distinction.
+        analysis_span=storage_raw.get("analysis_span"),
+        retention_days=storage_raw.get("retention_days"),
+        memory_limit=storage_raw.get("memory_limit", StorageConfig.memory_limit),
+        threads=storage_raw.get("threads", StorageConfig.threads),
     )
 
     export_raw = raw.get("export", {})
@@ -791,8 +932,8 @@ def _parse(raw: dict) -> TjConfig:
     optimize = OptimizeConfig(
         min_cluster_instances=optimize_raw.get(
             "min_cluster_instances", OptimizeConfig.min_cluster_instances),
-        min_sessions_deadweight=optimize_raw.get(
-            "min_sessions_deadweight", OptimizeConfig.min_sessions_deadweight),
+        measure_mcp_schemas=bool(optimize_raw.get(
+            "measure_mcp_schemas", OptimizeConfig.measure_mcp_schemas)),
         min_cache_input_tokens=optimize_raw.get(
             "min_cache_input_tokens", OptimizeConfig.min_cache_input_tokens),
         cache_efficacy_threshold=optimize_raw.get(
@@ -827,6 +968,11 @@ def _parse(raw: dict) -> TjConfig:
             "scan_min_rescan_seconds", OptimizeConfig.scan_min_rescan_seconds)),
         scan_ui_poll_seconds=int(optimize_raw.get(
             "scan_ui_poll_seconds", OptimizeConfig.scan_ui_poll_seconds)),
+        scan_watermark_min_new_spans=int(optimize_raw.get(
+            "scan_watermark_min_new_spans", OptimizeConfig.scan_watermark_min_new_spans)),
+        scan_watermark_max_staleness_hours=float(optimize_raw.get(
+            "scan_watermark_max_staleness_hours",
+            OptimizeConfig.scan_watermark_max_staleness_hours)),
         projects_root=optimize_raw.get("projects_root") or None,
     )
 

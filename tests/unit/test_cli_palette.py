@@ -84,11 +84,11 @@ def test_prose_carries_no_incidental_styling(prose):
 # --- one accent, and it means "you can type or click this" -------------------
 
 
-def test_accent_is_the_only_hue_in_the_next_steps_list(capsys):
-    _print_next_steps_nudge(has_data=False, persona="claude_code", port=7391)
+def test_next_steps_shows_the_actionable_ctas(capsys):
+    _print_next_steps_nudge(has_data=False, persona="claude-code", port=7391)
     out = capsys.readouterr().out
-    # commands and the URL are the actionable content of this screen
-    assert "tj serve" in out
+    # The two rows are call-to-action instructions (green `go` role — "do this
+    # next"): open the Lens URL, and run tj tokenmaxx.
     assert "tj tokenmaxx" in out
     assert "http://127.0.0.1:7391/" in out
     # no em dash in user-facing copy
@@ -118,10 +118,20 @@ def test_plan_menu_accents_only_the_choice_key(capsys):
 
 def test_accent_is_a_single_defined_hue():
     assert ACCENT.startswith("#")
-    # brand and url are the same hue as accent, so no screen carries two
-    # competing accents (the cyan-banner-vs-violet-body problem).
-    for role in ("brand", "url"):
-        assert ACCENT in str(TJ_THEME.styles[role]), role
+    # `url` is the same hue as accent, so typeable/clickable content never
+    # carries two competing accents in the body of a screen.
+    assert ACCENT in str(TJ_THEME.styles["url"])
+
+
+def test_brand_is_the_dedicated_orange_wordmark_colour():
+    # #643: the ASCII wordmark gets its OWN brand colour (orange), distinct from
+    # the periwinkle accent — the banner is a branded moment, not typeable
+    # content, so it earns its own hue. The accent stays reserved for the body.
+    from tokenjam.utils.theme import BRAND_ORANGE
+
+    assert BRAND_ORANGE == "#e0922f"
+    assert BRAND_ORANGE in str(TJ_THEME.styles["brand"])
+    assert ACCENT not in str(TJ_THEME.styles["brand"])
 
 
 # --- colour past the accent is reserved for genuine state -------------------
@@ -145,6 +155,23 @@ def test_ok_role_carries_no_colour():
     assert style.color is None
 
 
+def test_check_role_is_the_deliberate_green_check(capsys):
+    """#675: the three `✓` status lines at the end of the --claude-code payoff
+    screen are GREEN — a deliberate founder override of the usual "success is a
+    glyph + bold, never green" rule. It lives on its own `check` role (distinct
+    from `ok`, which stays weight-only) so the override is scoped to that screen
+    and still goes through a named theme role rather than raw `[green]` markup.
+    """
+    style = TJ_THEME.styles["check"]
+    assert style.bold is True
+    assert style.color is not None
+    assert "green" in str(style)
+    # And it renders as green when applied to a `✓`.
+    out = _render("[check]✓[/check] Config written")
+    assert "✓" in out
+    assert _sgr_codes(out), "the check role should emit styling"
+
+
 @pytest.mark.parametrize("role", ["warn", "warn.strong", "error", "error.strong"])
 def test_state_roles_keep_a_colour(role):
     # These are the two cases where colour still earns its place: a blocker the
@@ -152,13 +179,14 @@ def test_state_roles_keep_a_colour(role):
     assert TJ_THEME.styles[role].color is not None
 
 
-def test_restart_panel_is_the_only_warning_colour_on_the_claude_code_tail(capsys):
+def test_restart_note_is_optional_not_an_action_gate(capsys):
+    # Demoted from an "Action required" panel to one optional line: the daemon's
+    # transcript catch-up ingests running sessions from disk regardless, so a
+    # restart only affects live-stream immediacy (Anil, 2026-07-30).
     cmd_onboard._print_claude_code_restart_panel()
     out = capsys.readouterr().out
-    assert "Action required: restart Claude Code" in out
-    # the panel's instructions are commands, so they stay intact and typeable
-    assert "claude -c" in out
-    assert "claude --resume" in out
-    assert "tj onboard --claude-code --verify-only" in out
-    # no stray Rich markup escaped into the rendered panel
+    assert "Optional" in out
+    assert "restart Claude Code" in out
+    assert "Action required" not in out
+    # no stray Rich markup escaped into the rendered line
     assert "\\<" not in out

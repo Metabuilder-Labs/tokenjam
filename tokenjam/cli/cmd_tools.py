@@ -5,11 +5,12 @@ import json
 import click
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.utils.formatting import console, make_table
 from tokenjam.utils.time_parse import parse_since
 
 
-@click.command("tools")
+@click.command("tools", cls=TjCommand)
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("--since", default="24h", help="Time window (e.g. 1h, 7d)")
 @click.option("--name", "tool_name", default=None, help="Filter to specific tool")

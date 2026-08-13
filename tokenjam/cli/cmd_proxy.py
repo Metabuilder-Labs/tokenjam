@@ -17,6 +17,7 @@ from pathlib import Path
 
 import click
 
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.config import write_config
 from tokenjam.proxy.wiring import (
     apply_env_wiring,
@@ -35,9 +36,9 @@ def _config_write_path(config) -> Path:
     return Path.home() / ".config" / "tj" / "config.toml"
 
 
-@click.group("proxy")
+@click.group("proxy", cls=TjGroup)
 def cmd_proxy() -> None:
-    """Manage the optional enforcement-plane proxy (suggest mode)."""
+    """Manage the enforcement proxy (optional)."""
 
 
 @cmd_proxy.command("enable")

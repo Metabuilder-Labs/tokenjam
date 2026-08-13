@@ -39,6 +39,7 @@ from tokenjam.core.optimize.clustering import group_by_key, recurring
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Conservative threshold: a cluster needs at least this many sessions
 # before we'll recommend replacing it with a script. Lower thresholds
@@ -106,9 +107,16 @@ class WorkflowCluster:
     total_cost_usd: float = 0.0
     total_tokens:    int   = 0
     # Up to 3 example session ids for this cluster (beyond the single
-    # `example_session_id` above), so a downstream apply artifact (a rung-2
+    # `example_session_id` above), so a downstream apply artifact (a
     # skill note) can cite more than one instance. Defaulted for round-trip.
     example_session_ids: list[str] = field(default_factory=list)
+    # EVERY session in the cluster, not just the 3 examples above — see
+    # `ReuseCluster.member_session_ids`, the same field for the same reason:
+    # `reuse` clusters the identical repeated-tool-sequence shape this
+    # analyzer does, and without the full population neither adapter can tell
+    # it is pricing sessions the other already claimed (CLAUDE.md Critical
+    # Rule 27). Defaulted for round-trip with older serialized reports.
+    member_session_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -120,7 +128,7 @@ class WorkflowRestructureFinding:
     confidence:  str = "structural"
     caveat:      str = (
         "Conservative cluster detection. Review each cluster before replacing "
-        "with a script — value variation that the heuristic can't see may matter."
+        "with a script. Value variation that the heuristic can't see may matter."
     )
     # Recoverable-savings contract (#111). See types.DowngradeFinding for field
     # semantics. None when no cluster cleared the threshold.
@@ -167,6 +175,10 @@ def run(ctx: AnalyzerContext) -> None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope — see `core/persona_scope.py`. The
+    # per-cluster `sessions` aggregate further down needs no clause of its own:
+    # its `session_id IN (...)` list is drawn from these already-scoped rows.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     rows = ctx.conn.execute(
         f"SELECT session_id, tool_name, attributes "
@@ -244,6 +256,7 @@ def run(ctx: AnalyzerContext) -> None:
             total_cost_usd=round(cluster_cost, 6),
             total_tokens=cluster_tokens,
             example_session_ids=list(members[:3]),
+            member_session_ids=tuple(members),
         ))
 
     # Sort by instance count desc — the most common deterministic patterns
@@ -263,7 +276,7 @@ def run(ctx: AnalyzerContext) -> None:
             total_cluster_tokens if has_clusters else None
         ),
         estimate_basis=(
-            "total cost of sessions matching a deterministic call-pattern — "
-            "replacing the cluster with a script eliminates the LLM call entirely"
+            "total cost of sessions matching a deterministic call-pattern. "
+            "Replacing the cluster with a script eliminates the LLM call entirely"
         ),
     )

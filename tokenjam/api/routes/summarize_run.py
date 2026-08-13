@@ -54,6 +54,9 @@ class CheckRequest(BaseModel):
     path: str
     summary: str
     source_hash: str           # the prep's source_sha256 — check hash-guards against it
+    # The prep's source_nonce. Pass it and the rewrite must come back inside the same
+    # <tj-source> envelope — the only check available on a file with no protected blocks.
+    source_nonce: str | None = None
 
 
 @router.post("/summarize/run", dependencies=[Depends(require_api_key)])
@@ -127,6 +130,7 @@ def post_summarize_check(request: Request, body: CheckRequest) -> dict[str, Any]
     from tokenjam.core.summarize.session import SummarizeRefused, check
 
     try:
-        return check(_config(request), body.path, body.summary, body.source_hash).to_dict()
+        return check(_config(request), body.path, body.summary, body.source_hash,
+                     source_nonce=body.source_nonce).to_dict()
     except SummarizeRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

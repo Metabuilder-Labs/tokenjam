@@ -342,3 +342,68 @@ def test_the_driver_card_and_the_tiny_card_do_not_claim_the_same_dollars(db):
     assert sum(p.past_overspend_usd or 0.0 for p in proposals) <= (
         finding.past_overspend_usd + 1e-6
     )
+
+
+# --- project-aware placement of the driver-role claim ------------------------
+#
+# Retiring the tiny-session card for `claude-code` (`_downsize_to_proposal`)
+# touches only which CARDS `cost_proposals` emits. `driver_session_tokens` —
+# what `_placement_weights` and `rule_placement.build_placement_plan` read —
+# is populated by `analyze_model_downgrade` itself, a layer below the card
+# adapters, so it is untouched by that gate. This pins the placement half
+# directly: a driver-role finding whose sessions span two projects still
+# splits into one destination per project rather than merging into one.
+
+def _repo(tmp_path, name: str):
+    root = tmp_path / name
+    (root / ".git").mkdir(parents=True)
+    (root / "CLAUDE.md").write_text("# existing\n", encoding="utf-8")
+    return root
+
+
+def test_driver_role_finding_across_two_projects_splits_into_two_destinations(db, tmp_path):
+    from tokenjam.core.optimize import rule_placement as rp
+    from tokenjam.core.optimize.cost_proposals import _placement_weights
+
+    # Two driver sessions per project — MIN_SESSIONS_PER_DESTINATION is 2, so a
+    # single session per root would fold back into the unresolved pool rather
+    # than earning its own destination.
+    for sid in ("alpha-1", "alpha-2"):
+        _seed_driver_session(db, session_id=sid)
+    for sid in ("beta-1", "beta-2"):
+        _seed_driver_session(db, session_id=sid)
+
+    since, until = _window()
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["downsize"],
+    )
+    finding = report.downgrade
+    assert finding is not None
+    assert finding.driver_sessions == 4
+    assert set(finding.driver_session_tokens) == {
+        "alpha-1", "alpha-2", "beta-1", "beta-2",
+    }
+
+    # `_placement_weights` reads that field straight off the finding — the
+    # same layer the claude-code card gate never touches.
+    weights = _placement_weights("downsize", report)
+    assert set(weights) == {"alpha-1", "alpha-2", "beta-1", "beta-2"}
+
+    alpha, beta = _repo(tmp_path, "alpha"), _repo(tmp_path, "beta")
+    cwds = {
+        "alpha-1": str(alpha), "alpha-2": str(alpha),
+        "beta-1": str(beta), "beta-2": str(beta),
+    }
+    plan = rp.build_placement_plan(
+        [rp.SessionShare(sid, weight=w) for sid, w in weights.items()],
+        cwds,
+        total_tokens=int(finding.driver_tokens),
+        total_usd=finding.driver_recoverable_usd,
+        within=tmp_path,
+    )
+    # One write per project, not one merged write, and not one write per
+    # session either.
+    assert {d.root for d in plan.destinations} == {str(alpha), str(beta)}
+    assert sorted(d.sessions for d in plan.destinations) == [2, 2]
+    assert plan.unresolved_sessions == 0

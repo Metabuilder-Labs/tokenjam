@@ -70,11 +70,11 @@ from tokenjam.core.model_tiers import is_premium_tier
 RELEARN_RESEND_BOUNDARY = (
     "relearn prices calls that should not have happened; resend prices the "
     "size of calls that had to. A failure's fix removes the retry turn "
-    "entirely, so relearn claims that turn whole — including the context it "
-    "re-read, which is not billed at all once the call is gone. The error "
-    "text's own re-read tail on LATER calls is excluded from relearn's claim "
-    "and reported as an observation, because those calls happen regardless "
-    "and their size is resend's to claim."
+    "entirely, so relearn claims that turn whole, including the context it "
+    "re-read. That context is not billed at all once the call is gone. The "
+    "error text's own re-read tail on LATER calls is excluded from relearn's "
+    "claim and reported as an observation. This is because those calls happen "
+    "regardless, and their size is resend's to claim"
 )
 
 #: A prompt whose size falls to at most this share of the previous turn's has

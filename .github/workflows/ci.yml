@@ -23,6 +23,25 @@ jobs:
             exit 1
           fi
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check tokenjam/
+
+      - name: Type check
+        run: mypy tokenjam/
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -40,14 +59,8 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev,mcp]"
 
-      - name: Lint
-        run: ruff check tokenjam/
-
-      - name: Type check
-        run: mypy tokenjam/
-
       - name: Run tests
-        run: pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
+        run: pytest -n auto tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
 
   test-ts:
     runs-on: ubuntu-latest

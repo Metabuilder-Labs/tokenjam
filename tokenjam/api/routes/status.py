@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from datetime import timedelta, timezone
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tokenjam.api.deps import require_api_key
-from tokenjam.core.alerts import is_interactive_coding_agent
+from tokenjam.core.alerts import agent_display_name, is_interactive_coding_agent
 from tokenjam.core.transcript import (
     resolve_projects_root,
     session_transcript_mtime,
@@ -18,9 +18,14 @@ from tokenjam.core.db import (
     session_active_seconds,
 )
 from tokenjam.core.framing import (
+    PERSONAS,
     WindowSummary,
     compute_framing,
     plan_determination_mix,
+)
+from tokenjam.core.persona_scope import (
+    persona_agent_clause,
+    persona_scopes_population,
 )
 from tokenjam.core.models import (
     SESSION_IDLE_THRESHOLD,
@@ -124,6 +129,7 @@ def _build_archive(
     cutoff,
     agent_id: str | None,
     db_labels: dict[str, str] | None = None,
+    persona: str | None = None,
 ) -> list[dict]:
     """Terminal + stale sessions, most-recent first, capped at ARCHIVE_LIMIT.
 
@@ -147,6 +153,14 @@ def _build_archive(
     if agent_id:
         params.append(agent_id)
         sql += f" AND agent_id = ${len(params)}"
+    # SAME persona scope as `_count_archived` and as the live tiles above it.
+    # `archived` is published beside `archived_total` as "latest N of TOTAL", so
+    # the two have to cover one population — and both have to cover the same one
+    # the tiles do, or the page shows a filtered present beside an unfiltered
+    # past.
+    persona_clause = persona_agent_clause(persona)
+    if persona_clause:
+        sql += f" AND {persona_clause}"
     # Fetch more candidates than we return: 0-signal zombie terminals are
     # dropped below, so scan a wider window to still surface up to ARCHIVE_LIMIT
     # sessions that did real work.
@@ -167,6 +181,11 @@ def _build_archive(
             continue
         archived.append({
             "agent_id": s.agent_id,
+            # DISPLAY ONLY, resolved here so every surface that shows this name
+            # shows the same one. `agent_id` stays the identity beside it and is
+            # what links, filters and dedup keys use — see
+            # `alerts.agent_display_name`.
+            "agent_display_name": agent_display_name(s.agent_id),
             "kind": "coding" if is_interactive_coding_agent(s.agent_id) else "sdk",
             "namespace": namespace,
             "session_id": s.session_id,
@@ -188,7 +207,9 @@ def _build_archive(
     return archived
 
 
-def _count_archived(db, cutoff, agent_id: str | None) -> int:
+def _count_archived(
+    db, cutoff, agent_id: str | None, persona: str | None = None,
+) -> int:
     """Exact count of the archive's TRUE population, uncapped.
 
     Mirrors `_build_archive`'s row-selection predicate exactly: the same
@@ -223,6 +244,9 @@ def _count_archived(db, cutoff, agent_id: str | None) -> int:
     if agent_id:
         params.append(agent_id)
         sql += f" AND agent_id = ${len(params)}"
+    persona_clause = persona_agent_clause(persona)
+    if persona_clause:
+        sql += f" AND {persona_clause}"
     row = db.conn.execute(sql, params).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
 
@@ -273,6 +297,7 @@ def _build_sdk_services(db, config, agent_ids: list[str], now) -> list[dict]:
 
             services.append({
                 "agent_id": aid,
+                "agent_display_name": agent_display_name(aid),
                 "kind": "sdk",
                 "namespace": _project_for(config, aid),
                 "state": state,
@@ -301,8 +326,24 @@ def _build_sdk_services(db, config, agent_ids: list[str], now) -> list[dict]:
 async def get_status(
     request: Request,
     agent_id: str | None = None,
+    persona: str | None = None,
 ) -> dict:
+    """The Dashboard's live status: session tiles, archive, SDK services.
+
+    ``persona`` scopes every one of those to one side of the "Viewing as"
+    picker. It is applied ONCE, to the discovered agent-id list, and separately
+    to the two archive queries — so the tiles, the archive page, the archive
+    TOTAL and the SDK-services strip all describe the same population. This
+    route already labelled each row `coding` / `sdk` off
+    ``is_interactive_coding_agent``; the picker now selects on the same
+    predicate rather than only colouring by it.
+    """
     db = request.app.state.db
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
     config = getattr(request.app.state, "config", None)
     session_labels = dict(config.session_labels) if config else {}
     # Dashboard renames (POST /sessions/{id}/label), fetched once and overlaid on
@@ -331,6 +372,15 @@ async def get_status(
         agent_ids = [r[0] for r in rows]
     else:
         agent_ids = []
+    # ONE scope point for everything derived from the agent list — tiles, the
+    # per-agent alert rollup, `has_active_alerts` and the SDK-services strip.
+    # Filtered in Python for the same reason `GET /sessions` filters in Python:
+    # a `LIKE` here would be a second copy of the classifier, free to drift.
+    if persona_scopes_population(persona):
+        want_coding = persona == "claude-code"
+        agent_ids = [
+            a for a in agent_ids if is_interactive_coding_agent(a) == want_coding
+        ]
 
     has_active_alerts = False
     agents_data: list[dict] = []
@@ -395,6 +445,7 @@ async def get_status(
                 sess_alerts = len(active_alerts)
             agents_data.append({
                 "agent_id": aid,
+                "agent_display_name": agent_display_name(aid),
                 "kind": "coding" if is_interactive_coding_agent(aid) else "sdk",
                 "namespace": namespace,
                 "status": _live_status(session, idle_threshold, projects_root),
@@ -445,12 +496,12 @@ async def get_status(
 
     archived = _build_archive(
         db, config, session_labels, idle_threshold, current_cutoff, agent_id,
-        db_labels,
+        db_labels, persona,
     )
     # True total behind the capped `archived` list above (same predicate, same
     # population, no ARCHIVE_LIMIT) -- lets the UI show "latest N of TOTAL"
     # honestly instead of presenting the capped page as the whole archive.
-    archived_total = _count_archived(db, current_cutoff, agent_id)
+    archived_total = _count_archived(db, current_cutoff, agent_id, persona)
 
     return {
         "agents": agents_data,

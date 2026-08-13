@@ -4,13 +4,7 @@ A window-scoped observation ("this wasted $119 over the last 30 days") and a
 per-session standing cost ("this CLAUDE.md rule costs 180 tokens on every
 future session") are only comparable once both sit on the SAME horizon. This
 module owns that horizon and is the only place in the tree allowed to define
-it. Two consumers share it and neither may re-derive it:
-
-* the recoverable-savings rollup, which rescales each analyzer's
-  window-scoped observation onto the 30-day display basis;
-* :mod:`tokenjam.core.optimize.write_budget`, which needs "how many sessions
-  will re-send this artifact in a month" before it can price a permanent
-  CLAUDE.md rule.
+it.
 
 **The basis.** Project to a 30-day month at the user's OWN pace, measured from
 their own data::

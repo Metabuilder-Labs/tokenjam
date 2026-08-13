@@ -81,6 +81,9 @@ def test_parse_otlp_span_extracts_cache_read_and_write_tokens():
     """
     raw = {
         "name": "gen_ai.llm.call",
+        # An OTLP span with no startTimeUnixNano is rejected — it has no observed
+        # time. These cases are about attribute extraction, so they carry one.
+        "startTimeUnixNano": "1748736000000000000",
         "attributes": [
             {"key": GenAIAttributes.REQUEST_MODEL, "value": {"stringValue": "claude-haiku-4-5"}},
             {"key": GenAIAttributes.CACHE_READ_TOKENS, "value": {"intValue": "1000"}},
@@ -102,6 +105,7 @@ def test_parse_otlp_span_extracts_openinference_llm_span():
     """
     raw = {
         "name": "ChatOpenAI",
+        "startTimeUnixNano": "1748736000000000000",
         "attributes": [
             {"key": OpenInferenceAttributes.SPAN_KIND, "value": {"stringValue": "LLM"}},
             {"key": OpenInferenceAttributes.MODEL_NAME, "value": {"stringValue": "gpt-4o"}},
@@ -126,6 +130,7 @@ def test_parse_otlp_span_genai_wins_over_openinference():
     """When BOTH conventions are present on a span, gen_ai.* takes precedence."""
     raw = {
         "name": "ChatAnthropic",
+        "startTimeUnixNano": "1748736000000000000",
         "attributes": [
             # gen_ai.* (preferred)
             {"key": GenAIAttributes.REQUEST_MODEL, "value": {"stringValue": "claude-sonnet-4-6"}},
@@ -247,6 +252,9 @@ def test_parse_otlp_span_extracts_resource_deployment_attrs():
     }
     raw = {
         "name": "gen_ai.llm.call",
+        # An OTLP span with no startTimeUnixNano is rejected — it has no observed
+        # time. These cases are about attribute extraction, so they carry one.
+        "startTimeUnixNano": "1748736000000000000",
         "attributes": [
             {"key": GenAIAttributes.REQUEST_MODEL, "value": {"stringValue": "gpt-4o"}},
         ],
@@ -261,7 +269,11 @@ def test_parse_otlp_span_vcs_commit_sha_deprecated_fallback():
     """The current vcs.ref.head.revision wins; the older deprecated
     vcs.repository.ref.revision is read only when the current name is absent —
     so a not-yet-upgraded OTLP producer's data isn't silently missed."""
-    raw = {"name": "gen_ai.llm.call", "attributes": []}
+    raw = {
+        "name": "gen_ai.llm.call",
+        "startTimeUnixNano": "1748736000000000000",
+        "attributes": [],
+    }
     span = parse_otlp_span(
         raw, {ResourceAttributes.VCS_REPOSITORY_REF_REVISION: "deadbeef"}
     )
@@ -279,6 +291,9 @@ def test_parse_otlp_span_extracts_tenant_feature_prompt_template():
     populate tenant_id/feature/prompt_template_id/prompt_template_version."""
     raw = {
         "name": "gen_ai.llm.call",
+        # An OTLP span with no startTimeUnixNano is rejected — it has no observed
+        # time. These cases are about attribute extraction, so they carry one.
+        "startTimeUnixNano": "1748736000000000000",
         "attributes": [
             {"key": TjAttributes.TENANT_ID, "value": {"stringValue": "acme-corp"}},
             {"key": TjAttributes.FEATURE, "value": {"stringValue": "support-triage"}},
@@ -296,7 +311,11 @@ def test_parse_otlp_span_extracts_tenant_feature_prompt_template():
 def test_parse_otlp_span_attribution_dims_absent_by_default():
     """A span/producer that never sets these carries None — no forced default,
     no accidental '(none)' string landing in the DB."""
-    raw = {"name": "gen_ai.llm.call", "attributes": []}
+    raw = {
+        "name": "gen_ai.llm.call",
+        "startTimeUnixNano": "1748736000000000000",
+        "attributes": [],
+    }
     span = parse_otlp_span(raw, {})
     assert span.tenant_id is None
     assert span.feature is None

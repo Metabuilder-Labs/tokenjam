@@ -105,7 +105,7 @@ def _invoke(tmp_path, *args, input_text: str = ""):
 
 def test_claude_code_fresh_subscription_no_budget_prompt(_isolated_home, tmp_path):
     res, cfg = _invoke(
-        tmp_path, "--claude-code", "--project", "testproj", "--plan", "max_5x",
+        tmp_path, "--claude-code", "--plan", "max_5x",
     )
     assert res.exit_code == 0, res.output
     assert "Daily budget in USD" not in res.output
@@ -114,7 +114,7 @@ def test_claude_code_fresh_subscription_no_budget_prompt(_isolated_home, tmp_pat
 
 def test_claude_code_fresh_api_prompts_and_writes_budget(_isolated_home, tmp_path):
     res, cfg = _invoke(
-        tmp_path, "--claude-code", "--project", "testproj", "--plan", "api",
+        tmp_path, "--claude-code", "--plan", "api",
         input_text="25\n",
     )
     assert res.exit_code == 0, res.output
@@ -124,7 +124,7 @@ def test_claude_code_fresh_api_prompts_and_writes_budget(_isolated_home, tmp_pat
 
 def test_claude_code_fresh_budget_flag_skips_prompt_for_api(_isolated_home, tmp_path):
     res, cfg = _invoke(
-        tmp_path, "--claude-code", "--project", "testproj", "--plan", "api",
+        tmp_path, "--claude-code", "--plan", "api",
         "--budget", "9",
     )
     assert res.exit_code == 0, res.output
@@ -167,7 +167,7 @@ def _seed_existing_config(tmp_path, *, provider: str, plan: str):
 def test_claude_code_existing_subscription_plan_no_reprompt(_isolated_home, tmp_path):
     _seed_existing_config(tmp_path, provider="anthropic", plan="max_20x")
     res, cfg = _invoke(
-        tmp_path, "--claude-code", "--project", "testproj",
+        tmp_path, "--claude-code",
     )
     assert res.exit_code == 0, res.output
     assert "How do you pay for Claude?" not in res.output

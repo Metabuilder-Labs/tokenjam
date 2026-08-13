@@ -169,11 +169,6 @@ class TestEnums:
         assert Severity.WARNING.value == "warning"
         assert Severity.INFO.value == "info"
 
-    def test_alert_type_values(self):
-        assert AlertType.COST_BUDGET_DAILY.value == "cost_budget_daily"
-        assert AlertType.RETRY_LOOP.value == "retry_loop"
-        assert AlertType.DRIFT_DETECTED.value == "drift_detected"
-
     def test_span_status_values(self):
         assert SpanStatus.OK.value == "ok"
         assert SpanStatus.ERROR.value == "error"

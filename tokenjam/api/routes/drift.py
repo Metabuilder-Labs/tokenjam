@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.alerts import is_interactive_coding_agent
 from tokenjam.core.data_span import available_data_span
+from tokenjam.core.framing import PERSONAS
 from tokenjam.utils.time_parse import parse_since
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -123,8 +124,26 @@ async def get_drift(
                     "the baseline is compared against. Omit for the latest "
                     "session whenever it ran.",
     ),
+    persona: str | None = None,
 ):
+    """Behavioural drift against each agent's baseline.
+
+    ``persona`` exists so the picker gets a TRUE answer here, not so this route
+    gains a filter it did not have: drift is already SDK-only by construction.
+    The detector gates itself off interactive coding agents (see
+    ``core/alerts.py``) because a heterogeneous, human-driven workload has no
+    stable baseline to drift from, so the agent list below has always excluded
+    them. What was missing is saying so — a ``claude-code`` reader was shown an
+    empty list, which reads as "no drift detected" when the truth is that drift
+    is not measured for them at all. ``persona_applicable`` carries that
+    distinction to the client (root anti-pattern 22).
+    """
     db = request.app.state.db
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
 
     since_dt = None
     if since is not None:
@@ -146,11 +165,15 @@ async def get_drift(
             **_build_agent_drift(db, agent_id, since_dt),
             "window": window,
             "data_span": data_span,
+            "persona_applicable": persona != "claude-code",
         }
 
     # No agent_id: return drift info for all agents with baselines.
     if conn is None:
-        return {"agents": [], "window": window, "data_span": data_span}
+        return {
+            "agents": [], "window": window, "data_span": data_span,
+            "persona_applicable": persona != "claude-code",
+        }
     rows = conn.execute(
         "SELECT DISTINCT agent_id FROM drift_baselines ORDER BY agent_id"
     ).fetchall()
@@ -161,4 +184,12 @@ async def get_drift(
         for row in rows
         if not is_interactive_coding_agent(row[0])
     ]
-    return {"agents": agents, "window": window, "data_span": data_span}
+    return {
+        "agents": agents,
+        "window": window,
+        "data_span": data_span,
+        # FALSE means "not measured for this persona", which a surface must
+        # render differently from an empty list. Never a filter result: the
+        # coding-agent exclusion below is the detector's own, not the picker's.
+        "persona_applicable": persona != "claude-code",
+    }

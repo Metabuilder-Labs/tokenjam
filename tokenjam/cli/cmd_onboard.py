@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json as json_mod
+import os
 import platform
 import secrets
 import shutil
@@ -12,9 +13,18 @@ from typing import cast
 import click
 from rich.markup import escape
 
+from tokenjam.cli.backfill_progress import transient_status
 from tokenjam.cli.banner import print_welcome_banner
 from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
-from tokenjam.core.config import resolve_config_path
+from tokenjam.cli.tj_status import TjCommand
+from tokenjam.core.config import (
+    align_project_secret_to_global,
+    ensure_global_ingest_secret,
+    resolve_config_path,
+)
+# Aliased: several flows below bind a LOCAL `global_config_path` variable, which
+# would shadow the imported helper inside those functions.
+from tokenjam.core.config import global_config_path as _global_config_path
 from tokenjam.core.ingest_adapters.codex import ingest_codex
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import console, display_path
@@ -29,11 +39,6 @@ from tokenjam.utils.formatting import console, display_path
 # onboard's backfill is meant to be completable in full later via
 # `tj backfill claude-code` — the prompt below always says so.
 DEFAULT_BACKFILL_DAYS = 30
-
-# Above this many in-scope sessions, print a one-line heads-up before the
-# (still potentially slow) ingest starts, so a big "everything" choice or a
-# very active last-30-days window doesn't look like a hang either.
-_BACKFILL_HEADSUP_THRESHOLD = 300
 
 # --- output-trim (`tj hook cap-output`) legacy hook cleanup ------------------
 # The output-trim hook itself was removed (measured negative: +5.6% whole-
@@ -326,23 +331,23 @@ def _print_capture_disclosure(prompts_captured: bool, tool_inputs_captured: bool
     """
     if not (prompts_captured or tool_inputs_captured):
         return
-    # escape(): "[capture]" would otherwise be parsed as a Rich markup tag
-    # and silently stripped — same class of bug as issue #157.
-    if prompts_captured:
-        console.print(
-            "  Prompt capture:      [bold]on[/bold], prompt text is stored "
-            "locally in your telemetry DB (needed for trim / cache-recommend / "
-            "reuse). Set [bold]capture.prompts = false[/bold] under "
-            f"{escape('[capture]')} in your config to turn it off."
-        )
-    if tool_inputs_captured:
-        console.print(
-            "  Tool-input capture:  [bold]on[/bold], tool call arguments are "
-            "stored locally in your telemetry DB (needed for script / "
-            "verbosity's argument-shape clustering). Set "
-            "[bold]capture.tool_inputs = false[/bold] under "
-            f"{escape('[capture]')} in your config to turn it off."
-        )
+    # One clear line that leads with local + on-by-default (#643), replacing the
+    # two dense per-toggle paragraphs. The default (both on) uses the exact
+    # approved wording; the subject phrase narrows honestly when only one toggle
+    # is on so the line never claims capture that isn't happening.
+    if prompts_captured and tool_inputs_captured:
+        subject = "Your prompts and tool inputs are captured"
+    elif prompts_captured:
+        subject = "Your prompts are captured"
+    else:
+        subject = "Your tool inputs are captured"
+    console.print(
+        f"\U0001f512 {subject} and stored [bold]only on this machine[/bold] "
+        "(your local telemetry DB — nothing is ever uploaded). That's what "
+        "powers the trim, cache, reuse and script analyzers. On by default — "
+        "turn it off anytime with [accent]capture.prompts[/accent] / "
+        "[accent]capture.tool_inputs = false[/accent] in your config."
+    )
 
 
 def _print_instrument_agent_snippet() -> None:
@@ -381,7 +386,13 @@ def _print_instrument_agent_snippet() -> None:
         )
 
 
-@click.command("onboard")
+#: No class-level `status_message`: onboard is heavily interactive (usage-path
+#: choice, plan-tier prompts, an optional `--verify` confirm) for most of its
+#: body, and a live spinner colliding with a blocking stdin read corrupts
+#: both. `transient_status` is called directly around its two genuinely
+#: silent stretches instead — see `_try_backfill_codex` and
+#: `_run_onboard_verification`.
+@click.command("onboard", cls=TjCommand)
 @click.option("--claude-code", "claude_code", is_flag=True, default=False,
               help="Configure Claude Code telemetry to flow into tj")
 @click.option("--codex", "codex", is_flag=True, default=False,
@@ -391,8 +402,8 @@ def _print_instrument_agent_snippet() -> None:
                    "existing global config, without re-running the full "
                    "wizard (no plan/budget prompt, no backfill, no daemon "
                    "restart). Requires `tj onboard` to have already run once "
-                   "(anywhere). Pair with --project to skip even the "
-                   "namespace prompt.")
+                   "(anywhere). The project name is always derived from the "
+                   "repo/folder name.")
 @click.option("--budget", type=float, default=None,
               help="Daily budget in USD per agent (0 = no limit)")
 @click.option("--install-daemon", "install_daemon", is_flag=True, default=False,
@@ -410,11 +421,16 @@ def _print_instrument_agent_snippet() -> None:
               help="Plan tier for the provider being onboarded. Skips the "
                    "interactive plan prompt when set. Choices: api / pro / "
                    "max_5x / max_20x (Anthropic), plus / team / enterprise (OpenAI).")
-@click.option("--project", "project_override", default=None,
-              help="Project name to group this repo under in the dashboard "
-                   "(OTel service.namespace — e.g. all Aquanodeio/* repos under "
-                   "'aquanode'). Defaults to the git org. Used with "
-                   "--claude-code or --add-project.")
+@click.option("--analysis-span", "analysis_span",
+              type=click.Choice(["30d", "90d", "all"]),
+              default=None,
+              help="How far back tj should analyze. Storage retention is "
+                   "derived from this — 'all' disables deletion entirely — so "
+                   "history the analyzers use can never be deleted underneath "
+                   "them. Skips the interactive span prompt when set.")
+@click.option("--project", "removed_project_flag", default=None, hidden=True,
+              help="Removed — the project name is always derived from the "
+                   "repo/folder name now.")
 @click.option("--backfill-days", "backfill_days", type=int, default=None,
               help=f"Backfill only the last N days of Claude Code history "
                    f"(default {DEFAULT_BACKFILL_DAYS} when neither this nor "
@@ -422,6 +438,12 @@ def _print_instrument_agent_snippet() -> None:
 @click.option("--backfill-all", "backfill_all", is_flag=True, default=False,
               help="Backfill the entire Claude Code history instead of the "
                    "default recent window. Skips the interactive scope prompt.")
+@click.option("--verbose", "-V", "verbose", is_flag=True, default=False,
+              help="Show the full connection-details block (settings paths, "
+                   "Agent ID, OTLP endpoints, ingest secret, per-terminal "
+                   "tiles) on the success screen. Omitted by default to keep "
+                   "the completion screen lean; the same details are always "
+                   "available via `tj doctor`.")
 @click.option("--verify", is_flag=True, default=False,
               help="After setup, poll for the first span from the newly "
                    "configured source and report whether telemetry is flowing "
@@ -435,10 +457,24 @@ def _print_instrument_agent_snippet() -> None:
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
-                reconfigure: bool, plan: str | None, project_override: str | None,
+                reconfigure: bool, plan: str | None, analysis_span: str | None,
+                removed_project_flag: str | None,
                 backfill_days: int | None, backfill_all: bool,
-                verify: bool, verify_only: bool, add_project: bool) -> None:
-    """Interactive setup wizard for tj."""
+                verify: bool, verify_only: bool, add_project: bool,
+                verbose: bool) -> None:
+    """Set up tj (interactive)."""
+    # --project was removed: the project name is now ALWAYS derived from the
+    # repo/folder name (see _derive_project_name) — the flag and the prompt
+    # it fed were ceremony that only ever created divergence from what nearly
+    # everyone already ended up with. Fail loudly and specifically rather
+    # than letting a script that still passes it hit Click's generic
+    # "no such option" (the flag stays declared, hidden, purely so we can
+    # catch this and say why).
+    if removed_project_flag is not None:
+        raise click.UsageError(
+            "--project has been removed. The project name is now taken "
+            "from the repo/folder name automatically."
+        )
     # --add-project is the lightweight "register another repo" path: a fresh
     # onboard run per repo re-prompts plan/budget/backfill scope and re-scans
     # the entire Claude Code history just to set one config key
@@ -446,7 +482,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     # ephemeral-runner guard, and every other prompt — this path writes
     # nothing but the namespace mapping.
     if add_project:
-        _onboard_add_project(ctx, project_override)
+        _onboard_add_project(ctx)
         return
     # --verify-only is the documented post-restart re-check: config already
     # exists, the user just restarted the agent, and re-running the whole wizard
@@ -472,11 +508,13 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     print_welcome_banner()
     if claude_code:
         _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
-                             project_override, verify=verify,
-                             backfill_days=backfill_days, backfill_all=backfill_all)
+                             verify=verify,
+                             backfill_days=backfill_days, backfill_all=backfill_all,
+                             analysis_span=analysis_span, verbose=verbose)
         return
     if codex:
-        _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan, verify=verify)
+        _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
+                       verify=verify, analysis_span=analysis_span)
         return
 
     # Path-branched first run (#448): the bare `tj onboard` no longer assumes an
@@ -490,19 +528,23 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     # so existing automation is byte-for-byte unchanged.
     if not reconfigure and _is_interactive():
         choice = _prompt_usage_path()
-        if choice == "claude_code":
+        if choice == "claude-code":
             _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
-                                 project_override, verify=verify,
-                                 backfill_days=backfill_days, backfill_all=backfill_all)
+                                 verify=verify,
+                                 backfill_days=backfill_days,
+                                 backfill_all=backfill_all,
+                                 analysis_span=analysis_span, verbose=verbose)
             return
         if choice == "codex":
             _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
-                           verify=verify)
+                           verify=verify, analysis_span=analysis_span)
             return
         if choice == "combination":
             _onboard_combination(ctx, budget, no_daemon, force, plan,
-                                  project_override, verify=verify,
-                                  backfill_days=backfill_days, backfill_all=backfill_all)
+                                  verify=verify,
+                                  backfill_days=backfill_days,
+                                  backfill_all=backfill_all,
+                                  analysis_span=analysis_span)
             return
         # choice == "sdk" → fall through to the generic SDK/API path below.
 
@@ -573,7 +615,13 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         f'\n[budget.{plan_provider}]\nplan = "{plan_tier}"\n' if plan_tier else ""
     )
 
-    ingest_secret = secrets.token_hex(32)
+    # One machine-wide ingest secret, always the global config's. This path
+    # writes a project-local `.tj/config.toml`, and minting a secret into it
+    # produced a config the daemon (always launched against the global config)
+    # rejects: the SDK signs spans with the project secret, the daemon
+    # authenticates against the global one, and every push 401s silently. The
+    # project file now MIRRORS the global secret rather than owning one.
+    ingest_secret, secret_minted = ensure_global_ingest_secret()
 
     want_daemon = not no_daemon
 
@@ -593,6 +641,16 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     budget_line = ""
     if budget and budget > 0:
         budget_line = f"daily_usd = {budget}"
+
+    # The one span question, asked here because this path writes its config as
+    # TOML text rather than through `write_config` — `_apply_analysis_span`
+    # cannot reach it. Same choice, same default, same silence when non-tty.
+    from tokenjam.core.analysis_span import DEFAULT_ANALYSIS_SPAN, parse_analysis_span
+    if analysis_span is None:
+        analysis_span = (
+            _prompt_analysis_span() if _is_interactive() else DEFAULT_ANALYSIS_SPAN
+        )
+    parse_analysis_span(analysis_span)  # reject an unwritable span before it is written
 
     config_text = f"""\
 # TokenJam configuration
@@ -622,7 +680,12 @@ tool_outputs = false
 
 [storage]
 path = "~/.tj/telemetry.duckdb"
-retention_days = 90
+# How far back tj analyzes: "30d", "90d", or "all" (keep everything, never
+# delete). Storage retention is DERIVED from this, so history the analyzers use
+# can never be deleted underneath them. Set retention_days as well only if you
+# want to keep MORE than you analyze; a value shorter than the span is raised
+# to it rather than honoured.
+analysis_span = "{analysis_span}"
 
 # Per-agent overrides (optional):
 # [agents.my-agent]
@@ -663,8 +726,18 @@ retention_days = 90
     # Output
     console.print()
     console.print("[ok]\u2713[/ok] Config written to [accent].tj/config.toml[/accent]")
-    console.print(f"[ok]\u2713[/ok] Ingest secret generated: "
-                  f"[dim]{ingest_secret[:8]}...[/dim]")
+    if secret_minted:
+        console.print(f"[ok]\u2713[/ok] Ingest secret generated: "
+                      f"[dim]{ingest_secret[:8]}...[/dim]")
+    else:
+        # Adopted, not generated: saying "generated" about a secret that
+        # already existed reads as a rotation, and would send the user looking
+        # for integrations to re-key that in fact still work.
+        console.print(
+            f"[ok]\u2713[/ok] Ingest secret: [dim]{ingest_secret[:8]}... "
+            f"(shared with {display_path(_global_config_path())})[/dim]",
+            soft_wrap=True,
+        )
     if budget and budget > 0:
         console.print(f"[ok]\u2713[/ok] Default daily budget: "
                       f"[bold]${budget:.2f}[/bold] per agent")
@@ -731,7 +804,7 @@ def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> N
     """Run first-signal verification if ``--verify`` was passed, or offer it
     interactively. No-op when neither applies (non-interactive without the flag).
 
-    ``persona`` is one of ``"sdk"``, ``"claude_code"``, ``"codex"`` and drives
+    ``persona`` is one of ``"sdk"``, ``"claude-code"``, ``"codex"`` and drives
     the instruction shown and the not-confirmed cause.
 
     Restart-dependent personas (claude_code / codex) are never OFFERED the
@@ -746,7 +819,7 @@ def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> N
     and the poll copy tells them to restart now).
     """
     if not verify:
-        if persona == "claude_code":
+        if persona == "claude-code":
             return
         if persona == "codex":
             console.print(
@@ -796,10 +869,10 @@ def _run_onboard_verification(
                 "\n[bold]Verifying\u2026[/bold] waiting for the first telemetry. If you "
                 "haven't yet, [bold]restart[/bold] the agent runtime now."
             )
-        console.print(f"[dim]Polling for up to {int(timeout_s)}s\u2026[/dim]")
-        result = poll_for_first_span(
-            cast(_ReadBackend, backend), since, timeout_s=timeout_s
-        )
+        with transient_status(f"Polling for up to {int(timeout_s)}s\u2026"):
+            result = poll_for_first_span(
+                cast(_ReadBackend, backend), since, timeout_s=timeout_s
+            )
     finally:
         close = getattr(backend, "close", None)
         if callable(close):
@@ -836,7 +909,7 @@ def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> N
 
     if claude_code or codex:
         global_path = Path.home() / ".config" / "tj" / "config.toml"
-        persona = "claude_code" if claude_code else "codex"
+        persona = "claude-code" if claude_code else "codex"
         config_path: Path | None = global_path if global_path.exists() else None
     else:
         found = resolve_config_path((ctx.obj or {}).get("config_path_override"))
@@ -902,6 +975,94 @@ def _prompt_plan(provider_label: str, choices: list[tuple[str, str]],
     return keys[int(raw) - 1]
 
 
+_ANALYSIS_SPAN_CHOICES = [
+    ("30d", "Last 30 days"),
+    ("90d", "Last 90 days"),
+    ("all", "All available — keep everything, never delete"),
+]
+
+
+def _prompt_analysis_span(current: str | None = None) -> str:
+    """Ask the one span question. Returns a key from ANALYSIS_SPAN_CHOICES.
+
+    Deliberately framed as "how far back should tj analyze" rather than "how
+    long should tj keep data": those were two settings that were free to
+    disagree, and they did — retention was quietly deleting the oldest history
+    the analyzers were still sizing their window against. There is one answer
+    now and storage follows it.
+    """
+    console.print("\nHow far back should tj analyze?")
+    for i, (_key, desc) in enumerate(_ANALYSIS_SPAN_CHOICES, start=1):
+        console.print(f"  [accent]{i}[/accent]) {desc}")
+    console.print(
+        "  [muted]Older data is deleted, so this also decides what is kept.[/muted]"
+    )
+    keys = [k for k, _ in _ANALYSIS_SPAN_CHOICES]
+    default_idx = keys.index(current) + 1 if current in keys else keys.index("90d") + 1
+    raw = click.prompt(
+        "Choose",
+        type=click.IntRange(1, len(_ANALYSIS_SPAN_CHOICES)),
+        default=default_idx,
+        show_default=True,
+    )
+    return keys[int(raw) - 1]
+
+
+def _apply_analysis_span(
+    config: object, span_override: str | None = None, *, reconfigure: bool = False,
+) -> None:
+    """Settle the analysis span on `config` before it is written.
+
+    The coupling lives in code, not in a comment: retention is derived from the
+    span (`core/analysis_span.retention_days_for`), and an explicit
+    `retention_days` shorter than the span is raised to it rather than honoured.
+    Lowering storage retention must not be able to silently retract a span the
+    product has already promised to analyze over, so the clamp only ever moves
+    retention UP, and it says so when it fires.
+
+    Idempotent and prompt-free once a span is on the config, so a flow that
+    writes the config more than once (or the combination flow, which runs two
+    of them over the same file) asks exactly once.
+    """
+    from tokenjam.core.analysis_span import (
+        DEFAULT_ANALYSIS_SPAN,
+        analysis_span_days,
+        parse_analysis_span,
+        retention_was_raised_to_span,
+        span_label,
+    )
+
+    storage = config.storage  # type: ignore[attr-defined]
+    if span_override:
+        # Validate before storing: an unparseable span written to disk would
+        # raise on every later read instead of here, where it can be corrected.
+        parse_analysis_span(span_override)
+        storage.analysis_span = span_override
+    elif storage.analysis_span is None:
+        if storage.retention_days is not None and not reconfigure:
+            # A config written before the coupling existed. Its kept history IS
+            # the most the product could ever have analyzed, so adopt it as the
+            # span rather than re-asking — nothing about this setup changes.
+            storage.analysis_span = f"{int(storage.retention_days)}d"
+        elif _is_interactive():
+            storage.analysis_span = _prompt_analysis_span(
+                f"{int(storage.retention_days)}d"
+                if storage.retention_days is not None else None
+            )
+        else:
+            storage.analysis_span = DEFAULT_ANALYSIS_SPAN
+    elif reconfigure and _is_interactive():
+        storage.analysis_span = _prompt_analysis_span(storage.analysis_span)
+
+    if retention_was_raised_to_span(storage):
+        console.print(
+            f"  Storage retention was shorter than the {span_label(storage)} "
+            f"analysis span; raised to match so nothing tj analyzes can be "
+            f"deleted underneath it."
+        )
+        storage.retention_days = analysis_span_days(storage)
+
+
 def _is_interactive() -> bool:
     """True when onboard is running against a terminal (a human is present).
 
@@ -916,7 +1077,7 @@ def _is_interactive() -> bool:
 
 
 _USAGE_PATH_CHOICES = [
-    ("claude_code", "Claude Code"),
+    ("claude-code", "Claude Code"),
     ("codex",       "Codex"),
     ("sdk",         "Your own agents (Python/TS SDK or API)"),
     ("combination", "A combination of the above"),
@@ -962,7 +1123,8 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
         from tokenjam.core.db import open_db
         db = open_db(config.storage)
         try:
-            result = ingest_codex(db, config=config)
+            with transient_status("Backfilling Codex sessions…"):
+                result = ingest_codex(db, config=config)
         finally:
             db.close()
     except Exception as exc:
@@ -995,51 +1157,6 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
         f"{total} total session{'s' if total != 1 else ''}{spend}"
     )
     return msg, True, total
-
-
-def _review_inbox_url(port: int, *, want_daemon: bool) -> str:
-    """Pointer to the web dashboard's review inbox (``#/review``), where every
-    detected fix is reviewed, applied, and one-click reverted. When the daemon
-    isn't running yet (``--no-daemon``), say so instead of printing a URL that
-    won't answer."""
-    if want_daemon:
-        return f"http://127.0.0.1:{port}/#/review"
-    return f"run `tj serve`, then open http://127.0.0.1:{port}/#/review"
-
-
-def _print_review_inbox_pointer(*, port: int, want_daemon: bool) -> None:
-    """Onboarding tail: point at the web dashboard's review inbox instead of
-    re-deriving and rendering findings in the terminal.
-
-    Onboard used to run the full relearn scan inline (tens of seconds over a
-    real corpus), dump the recurring-mistake list plus a #1-fix evidence
-    block, and ask an interactive "enable this fix now?" question. That scan
-    was purely compute-for-display: it called ``compute_relearn_finding``
-    directly, bypassing ``core.optimize.relearn_store``, so nothing it
-    produced was persisted or read by any other surface. The daemon's own
-    background job computes and caches the findings the review inbox renders,
-    on its own schedule, so onboarding just sends the user there. Removing
-    the ask also means onboard has one fewer blocking question.
-    """
-    console.print()
-    if want_daemon:
-        console.print(
-            "[heading]Recurring mistakes:[/heading] tj keeps watching your sessions "
-            "in the background."
-        )
-    else:
-        # The relearn job that produces this only runs under `tj serve` --
-        # under `--no-daemon` nothing is watching anything yet, and claiming
-        # otherwise would contradict the next line telling the user to start
-        # the server.
-        console.print(
-            "[heading]Recurring mistakes:[/heading] tj will watch your sessions "
-            "in the background once the server is running."
-        )
-    console.print(
-        f"[muted]  Review and apply fixes in the web dashboard:[/muted] "
-        f"[url]{_review_inbox_url(port, want_daemon=want_daemon)}[/url]"
-    )
 
 
 def _print_setup_complete_home(
@@ -1102,9 +1219,9 @@ def _prompt_daily_budget(budget: float | None, plan_tier: str | None) -> float:
 
 
 def _resolve_backfill_scope(
-    backfill_days: int | None, backfill_all: bool,
+    backfill_days: int | None, backfill_all: bool, config: object | None = None,
 ):
-    """Resolve the Claude Code backfill window (#443).
+    """Resolve the Claude Code backfill window (#443, #643).
 
     Returns ``(since, is_full, max_sessions)``:
       - ``is_full=True`` (``since``/``max_sessions`` both ``None``) means
@@ -1112,31 +1229,29 @@ def _resolve_backfill_scope(
       - Otherwise ``since`` is the cutoff for `ingest_claude_code`, and
         ``max_sessions`` is an additional cap (or ``None`` for none).
 
-    The "fast" default (interactive choice 1, and the non-interactive
-    fallback) pairs `since` with `max_sessions`. `since` alone measured as
-    NOT reliably bounding the work on an actively-used machine — the mtime
-    pre-filter it relies on barely excludes anything when most session files
-    have recent mtimes regardless of the conversation's actual age, so a
-    "last 30 days" on an old, huge history would still parse nearly
-    everything before the (correct but late) `ended_at` filter drops it.
-    `max_sessions` (mirroring `tj quickstart`'s `DEFAULT_MAX_SESSIONS` cap,
-    #13 — kept as the SAME constant so the two don't drift) guarantees
+    **One "how far back" question (#643).** Onboard used to ask the user twice —
+    once "How far back should tj analyze?" (the analysis span) and again
+    "Backfill your Claude Code history: 1) Last 30 days 2) Everything". Those
+    are the same intent. The backfill window is now DERIVED from the already-
+    resolved analysis span on ``config.storage`` (set by `_apply_analysis_span`
+    just before this runs): a bounded span ("30d"/"90d") backfills that many
+    days; an unbounded span ("all") backfills everything. No second prompt.
+
+    The bounded path still pairs `since` with `max_sessions`: `since` alone
+    doesn't reliably bound the work on an actively-used machine (the mtime
+    pre-filter barely excludes anything when most session files have recent
+    mtimes), so `max_sessions` (mirroring `tj quickstart`'s `DEFAULT_MAX_SESSIONS`
+    cap, #13 — kept as the SAME constant so the two don't drift) guarantees
     bounded work regardless of mtime patterns.
 
     `--backfill-days N` is a scripting flag and means exactly what it says —
     days only, no implicit cap — so automation gets what it asked for.
-    `--backfill-all` means everything, uncapped.
-
-    Precedence, matching the ``--plan``/``--budget`` non-interactive contract:
-    an explicit flag always skips the prompt. Otherwise an interactive
-    terminal gets a two-choice menu (default: fast/recent). A non-interactive
-    terminal (no TTY — CI, piped output, a non-interactive `uvx`/`npx`
-    install) can never answer a prompt, so it silently takes the same fast
-    default and prints one line explaining why, instead of hanging.
+    `--backfill-all` means everything, uncapped. Both still override the span.
     """
     from datetime import timedelta
 
     from tokenjam.cli.cmd_quickstart import DEFAULT_MAX_SESSIONS
+    from tokenjam.core.analysis_span import analysis_span_days
     from tokenjam.utils.time_parse import utcnow
 
     def _print_complete_later_tip(days: int) -> None:
@@ -1145,40 +1260,31 @@ def _resolve_backfill_scope(
             f"`tj backfill claude-code` afterwards for your full history.[/dim]"
         )
 
+    # Explicit scripting flags always win, unchanged from #443.
     if backfill_all:
         return None, True, None
     if backfill_days is not None:
         _print_complete_later_tip(backfill_days)
         return utcnow() - timedelta(days=backfill_days), False, None
 
-    if _is_interactive():
-        console.print()
-        console.print("[bold]Backfill your Claude Code history:[/bold]")
-        console.print(
-            f"  1) Last {DEFAULT_BACKFILL_DAYS} days "
-            f"[dim](most recent {DEFAULT_MAX_SESSIONS} sessions — fast, "
-            f"recommended)[/dim]"
-        )
-        console.print("  2) Everything")
-        choice = click.prompt(
-            "Choose", type=click.IntRange(1, 2), default=1, show_default=True,
-        )
-        if choice == 2:
-            return None, True, None
-        _print_complete_later_tip(DEFAULT_BACKFILL_DAYS)
-        return (
-            utcnow() - timedelta(days=DEFAULT_BACKFILL_DAYS), False,
-            DEFAULT_MAX_SESSIONS,
-        )
+    # Otherwise derive from the analysis span the user already answered.
+    span_days: int | None = DEFAULT_BACKFILL_DAYS
+    if config is not None:
+        try:
+            span_days = analysis_span_days(config.storage)  # type: ignore[attr-defined]
+        except Exception:
+            span_days = DEFAULT_BACKFILL_DAYS
 
-    console.print(
-        f"[dim]Non-interactive: backfilling the last {DEFAULT_BACKFILL_DAYS} "
-        f"days (most recent {DEFAULT_MAX_SESSIONS} sessions) by default. Run "
-        f"`tj backfill claude-code` afterwards for your full history, or pass "
-        f"--backfill-all next time.[/dim]"
-    )
+    if span_days is None:
+        # "all available" span → backfill everything, uncapped. No preamble
+        # line: the post-backfill "N new · N total sessions" result line is the
+        # honest count (sessionId-deduped), and a "~N sessions in scope"
+        # pre-count over transcript FILES over-reports badly (Critical Rule 34).
+        return None, True, None
+
+    _print_complete_later_tip(span_days)
     return (
-        utcnow() - timedelta(days=DEFAULT_BACKFILL_DAYS), False, DEFAULT_MAX_SESSIONS,
+        utcnow() - timedelta(days=span_days), False, DEFAULT_MAX_SESSIONS,
     )
 
 
@@ -1189,23 +1295,49 @@ def _print_next_steps_nudge(
     persona: str = "sdk",
     daemon_running: bool = False,
     port: int = 7391,
+    show_restart: bool = False,
 ) -> None:
     """Curated post-onboard nudge (#240), persona-aware.
 
-    Commands that work on the just-backfilled data *immediately* — no Claude
-    Code restart required. The Claude Code list is deliberately down to TWO
-    entries: the web dashboard (where the diagnosis actually lives, rendered
-    rather than re-derived per CLI invocation) and ``tj tokenmaxx`` (the
-    shareable card). ``tj context`` / ``tj quota-audit`` still exist as
-    commands; they are just not what a fresh user should be sent to first.
-    ``tjb`` is an SDK-persona workflow (re-run your own agent on a cheaper
-    model) so it only appears on the generic list. When onboarding just
-    installed the daemon, the dashboard is already serving — suggesting
-    ``tj serve`` there invites a port conflict, so that line says "already
-    running" instead. Copy stays honest (no promised savings — Critical
-    Rule 14).
+    Commands that work on the just-backfilled data *immediately*. The Claude
+    Code list is View the Web UI (Lens) and View your Token Efficiency Card
+    (``tj tokenmaxx``) — each an action label plus a concrete instruction —
+    followed, when ``show_restart`` is set (a ``claude`` session is currently
+    running), by an optional grey "restart Claude Code" line as the third item
+    (#675). Restarting is NOT required for completeness: the daemon's transcript
+    catch-up ingests running sessions from disk on its interval regardless, so
+    the line is stated as optional. ``tj context`` / ``tj quota-audit`` still
+    exist as commands; they are just not what a fresh user should be sent to
+    first. ``tjb`` is an SDK-persona workflow (re-run your own agent on a
+    cheaper model) so it only appears on the generic (non-Claude-Code) list. On
+    that list, when onboarding just installed the daemon, the dashboard is
+    already serving — suggesting ``tj serve`` there invites a port conflict, so
+    that line says "already running" instead. Copy stays honest (no promised
+    savings — Critical Rule 14).
     """
     console.print()
+    lens_url = f"http://127.0.0.1:{port}/"
+    if persona == "claude-code":
+        # Two action/instruction rows, plain header (founder review, demo trim).
+        console.print("[heading]▸ Next steps[/heading]")
+        console.print()
+        console.print(
+            "  [label]View the Web UI (Lens)[/label]  "
+            f"[go]open {lens_url} in a browser[/go]"
+        )
+        console.print(
+            "  [label]View your Token Efficiency Card[/label]  "
+            "[go]run tj tokenmaxx[/go]"
+        )
+        if show_restart:
+            console.print(
+                "  [muted]Optional: restart Claude Code to stream today's "
+                "active sessions live -- otherwise tj picks them up from disk "
+                "within a few minutes.[/muted]"
+            )
+        console.print()
+        _warn_if_tj_path_unresolved()
+        return
     if has_data:
         span = f"last {days} days" if days else "history"
         console.print(
@@ -1217,7 +1349,6 @@ def _print_next_steps_nudge(
             "[heading]▸ Next steps[/heading]  [muted]these work right now:[/muted]"
         )
     console.print()
-    lens_url = f"http://127.0.0.1:{port}/"
     if daemon_running:
         lens_line = (
             f"  [label]web dashboard[/label]  [muted]already running →[/muted] [url]{lens_url}[/url]"
@@ -1227,24 +1358,19 @@ def _print_next_steps_nudge(
             f"  [accent]tj serve[/accent]       "
             f"[muted]open the web dashboard at[/muted] [url]{lens_url}[/url]"
         )
-    tokenmaxx_line = (
+    console.print(
         "  [accent]tj tokenmaxx[/accent]   [muted]your shareable efficiency tier[/muted]"
     )
-    if persona == "claude_code":
-        console.print(lens_line)
-        console.print(tokenmaxx_line)
-    else:
-        console.print(tokenmaxx_line)
-        console.print(
-            "  [accent]tj optimize[/accent]    "
-            "[muted]cost-saving candidates from your usage[/muted]"
-        )
-        console.print(
-            "  [accent]tjb[/accent]            "
-            "[muted]prove a cheaper model still holds "
-            "(pip install tokenjam-bench)[/muted]"
-        )
-        console.print(lens_line)
+    console.print(
+        "  [accent]tj optimize[/accent]    "
+        "[muted]cost-saving candidates from your usage[/muted]"
+    )
+    console.print(
+        "  [accent]tjb[/accent]            "
+        "[muted]prove a cheaper model still holds "
+        "(pip install tokenjam-bench)[/muted]"
+    )
+    console.print(lens_line)
     console.print()
     _warn_if_tj_path_unresolved()
 
@@ -1464,25 +1590,6 @@ def _wire_claude_statusline(settings: dict) -> str:
     return "skipped"
 
 
-def _print_statusline_status(status: str) -> None:
-    """Render the statusLine wiring outcome in the onboard summary block."""
-    if status in ("written", "updated", "kept"):
-        verb = {"written": "wired", "updated": "updated", "kept": "already set"}[status]
-        console.print(
-            f"  Statusline:          {verb} "
-            f"([accent]tj statusline[/accent][muted], zero token cost[/muted])"
-        )
-    elif status == "skipped":
-        # Not yellow: this is one row inside a field list where every other row
-        # is plain, and a single coloured row there reads as a failure rather
-        # than as the "kept your config, here's how to opt in" note it is.
-        console.print(
-            "  Statusline:          left your existing statusLine untouched "
-            "[muted](set it to[/muted] [accent]tj statusline[/accent] "
-            "[muted]to enable tj's line).[/muted]"
-        )
-
-
 # --- zshrc OTEL export block (harness observability) ----------------------
 # Installed into ~/.zshrc so harness (Docker) sessions pick up the OTLP env
 # vars automatically. Delimited by a STABLE, content-based sentinel pair that
@@ -1508,14 +1615,88 @@ _ZSHRC_OTEL_LEGACY_MARKERS = (
 )
 
 
+def _report_secret_alignment(secret: str) -> None:
+    """Repair a project-local config carrying a stale ingest secret.
+
+    The global secret is the survivor, never the project-local one: the managed
+    shell block, the daemon unit file and every already-working integration
+    carry it, so adopting a project value would break all of them at once. A
+    left-over `.tj/config.toml` from an older install is silently rewritten to
+    match, and the repair is reported (a config file edited without a word is
+    exactly how a divergence goes unnoticed in the first place).
+    """
+    repaired = align_project_secret_to_global(secret)
+    if repaired is not None:
+        console.print(
+            f"  Aligned the ingest secret in {display_path(repaired)} with "
+            f"{display_path(_global_config_path())}.",
+            soft_wrap=True,
+        )
+
+
+_OTEL_HOST_ENV = "TJ_OTEL_HOST"
+_DOCKER_GATEWAY_HOST = "host.docker.internal"
+
+
+def _in_container() -> bool:
+    """True when this process is itself running inside a container.
+
+    Docker writes `/.dockerenv`; the cgroup path names the runtime under
+    Docker/Podman/containerd. Best-effort and never raising: an unreadable
+    cgroup file simply means "not detected", which lands on the loopback
+    default that is correct on a host.
+    """
+    if Path("/.dockerenv").exists():
+        return True
+    try:
+        cgroup = Path("/proc/self/cgroup").read_text()
+    except OSError:
+        return False
+    return any(rt in cgroup for rt in ("docker", "containerd", "podman", "kubepods"))
+
+
+def _otel_endpoint_host() -> str:
+    """The host an OTLP exporter configured by onboarding should send to.
+
+    `host.docker.internal` is the address a process INSIDE a container uses to
+    reach a service on its host. It was written unconditionally, including into
+    a host user's ~/.zshrc, where it does not resolve at all: every span an
+    agent session emitted failed at DNS and was dropped silently, leaving only
+    the delayed transcript backfill. Two event types have no transcript
+    equivalent (tool decisions and API errors), so those were lost outright.
+
+    So it is now conditional on actually being in that environment, and
+    overridable by `TJ_OTEL_HOST` for a setup this cannot detect (an exported
+    shell rc consumed inside a container, a remote daemon).
+    """
+    override = os.environ.get(_OTEL_HOST_ENV, "").strip()
+    if override:
+        return override
+    if _in_container() and _host_resolves(_DOCKER_GATEWAY_HOST):
+        return _DOCKER_GATEWAY_HOST
+    return "127.0.0.1"
+
+
+def _host_resolves(host: str) -> bool:
+    """True when `host` resolves via DNS on this machine. Never raises."""
+    import socket
+
+    try:
+        socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    return True
+
+
 def _zshrc_otel_block(port: int, secret: str) -> str:
     """Build one fresh sentinel-delimited OTEL export block for ~/.zshrc."""
+    host = _otel_endpoint_host()
     return (
         f"{_ZSHRC_OTEL_START}\n"
         f"export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
         f"export OTEL_LOGS_EXPORTER=otlp\n"
         f"export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n"
-        f"export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:{port}\n"
+        f"export OTEL_EXPORTER_OTLP_ENDPOINT=http://{host}:{port}\n"
         f'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer {secret}"\n'
         f"{_ZSHRC_OTEL_END}\n"
     )
@@ -1556,20 +1737,22 @@ def _onboard_claude_code(
     force: bool,
     reconfigure: bool = False,
     plan_override: str | None = None,
-    project_override: str | None = None,
     verify: bool = False,
     standalone: bool = True,
     backfill_days: int | None = None,
     backfill_all: bool = False,
     plan_usd_override: float | None = None,
+    analysis_span: str | None = None,
+    verbose: bool = False,
 ) -> None:
     """Configure Claude Code to send telemetry to tj.
 
     ``standalone`` is True on the single-path flow (`tj onboard --claude-code`)
-    and False when this runs as one leg of the combination flow (#432). On the
-    combination path the closing home banner must print exactly once, at the end
-    of `_onboard_combination` — so we suppress it here when not standalone. The
-    inline Claude Code backfill still runs (it is only ever invoked from here).
+    and False when this runs as one leg of the combination flow (#432). The
+    Claude Code flow itself ends right after the Next steps block (no closing
+    home banner — founder review, demo trim); the combination flow prints its
+    own closing banner once at the end of `_onboard_combination`. The inline
+    Claude Code backfill still runs (it is only ever invoked from here).
 
     ``plan_usd_override`` is the pre-collected API monthly spend ceiling that
     pairs with ``plan_override``: when the combination flow hoists the billing
@@ -1587,19 +1770,17 @@ def _onboard_claude_code(
     # ingest secret and one running daemon. Per-project configs cause the secret in
     # ~/.claude/settings.json to rotate on every project onboard, breaking auth for
     # every other project.
-    global_config_path = Path.home() / ".config" / "tj" / "config.toml"
+    global_config_path = _global_config_path()
 
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
 
     # Plan-first (#240): resolve the plan tier before prompting for the daily
     # budget — "How do you pay?" is the more important, more natural opener.
-    # The project-name prompt comes after BOTH agent questions (usage path,
-    # plan): it's dashboard bookkeeping, and wedging it between the two broke
-    # their natural grouping.
     if global_config_path.exists() and not force:
         config = load_config(str(global_config_path))
-        if agent_id not in config.agents:
+        is_new_agent = agent_id not in config.agents
+        if is_new_agent:
             config.agents[agent_id] = AgentConfig()
 
         # A config written before prompt/tool-input capture defaulted on has
@@ -1654,11 +1835,17 @@ def _onboard_claude_code(
         budget = _prompt_daily_budget(budget, plan)
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
-        namespace = _prompt_project_name(project_override, project_name)
         # Server-side project mapping so already-running sessions group by
         # project without restarting the agent (see AgentConfig.project).
-        config.agents[agent_id].project = namespace
+        # Only set it for a genuinely NEW agent — an existing one may carry a
+        # hand-entered name that differs from the derived one (the prompt
+        # this replaced let a user type anything), and silently overwriting
+        # that would orphan its dashboard history under a new identity, a
+        # data-loss-shaped bug even though no rows are deleted.
+        if is_new_agent or not config.agents[agent_id].project:
+            config.agents[agent_id].project = project_name
         config_path = global_config_path
+        _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
         console.print(f"  tj config updated: {display_path(config_path)}", soft_wrap=True)
     else:
@@ -1678,8 +1865,8 @@ def _onboard_claude_code(
                 usd = ceiling
         budget = _prompt_daily_budget(budget, plan)
         daily_usd = budget if budget and budget > 0 else None
-        namespace = _prompt_project_name(project_override, project_name)
-        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd), project=namespace)}
+        # No existing config at all — nothing stored to respect.
+        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd), project=project_name)}
         config = TjConfig(
             version="1",
             agents=agents,
@@ -1690,9 +1877,10 @@ def _onboard_claude_code(
         )
         config_path = global_config_path
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
         console.print(
-            f"[ok]\u2713[/ok] Config written to "
+            f"[check]\u2713[/check] Config written to "
             f"[accent]{display_path(config_path)}[/accent]",
             soft_wrap=True,
         )
@@ -1730,16 +1918,17 @@ def _onboard_claude_code(
             from tokenjam.core.db import open_db
             try:
                 since, _backfill_is_full, max_sessions = _resolve_backfill_scope(
-                    backfill_days, backfill_all,
+                    backfill_days, backfill_all, config,
                 )
+                # Used only to size the progress bar below. Deliberately NOT
+                # printed as a "~N sessions in scope" heads-up: it counts
+                # transcript FILES, which over-reports the true (sessionId-
+                # deduped) session count badly (Critical Rule 34) — the
+                # post-backfill "N new · N total sessions" line is the honest
+                # figure.
                 total_in_scope = count_claude_code_sessions_in_scope(
                     since=since, max_sessions=max_sessions,
                 )
-                if total_in_scope > _BACKFILL_HEADSUP_THRESHOLD:
-                    console.print(
-                        f"[dim]  ~{total_in_scope:,} sessions in scope — this "
-                        f"may take a few minutes.[/dim]"
-                    )
                 db = open_db(config.storage)
                 with backfill_progress(total_in_scope) as backfill_progress_cb:
                     result = ingest_claude_code(
@@ -1766,10 +1955,10 @@ def _onboard_claude_code(
                     if result.earliest and result.latest:
                         days = (result.latest - result.earliest).days
                     backfill_span_days = days
+                    backfill_sessions_total = result.sessions_total
                     # Report new / already-present / total so a re-run reads as
                     # "13 total" rather than "1 session" (#238).
                     total = result.sessions_total
-                    backfill_sessions_total = total
                     pieces = [
                         f"{result.sessions_new} new "
                         f"({result.sessions_existing} already present) · "
@@ -1826,6 +2015,7 @@ def _onboard_claude_code(
     # headers are replaced when the secret rotates.
     port = config.api.port
     secret = config.security.ingest_secret
+    _report_secret_alignment(secret)
     global_env: dict = global_settings.get("env", {})
     global_env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
     global_env["OTEL_LOGS_EXPORTER"] = "otlp"
@@ -1847,7 +2037,8 @@ def _onboard_claude_code(
     # could cross-leak a concurrent session's brief). Idempotent +
     # non-destructive (foreign SessionStart hooks preserved); removed by
     # `tj uninstall`.
-    resume_brief_status = _wire_claude_resume_brief_hook(global_settings)
+    # Installed silently — no printed status line (founder review, demo trim).
+    _wire_claude_resume_brief_hook(global_settings)
 
     # The output-trim PostToolUse hook was removed (measured negative: +5.6%
     # whole-session cost on Claude Code, see CLAUDE.md). Best-effort cleanup
@@ -1860,18 +2051,6 @@ def _onboard_claude_code(
             "[ok]✓[/ok] Removed the legacy output-trim hook "
             "(tj hook cap-output) — this feature was removed."
         )
-    _RESUME_BRIEF_STATUS_MSG = {
-        "written": "installed (SessionStart: resume|compact)",
-        "updated": "updated to current path",
-        "kept": "already installed",
-        "skipped": "skipped — ~/.claude/settings.json has malformed hooks "
-                   "(expected object with SessionStart list); fix and re-run",
-    }
-    console.print(
-        f"[ok]✓[/ok] Resume-brief hook (tj resume-brief --from-hook): "
-        f"{_RESUME_BRIEF_STATUS_MSG.get(resume_brief_status, resume_brief_status)}"
-    )
-
     # --- Project settings (<cwd>/.claude/settings.json) ---
     project_claude_dir = Path.cwd() / ".claude"
     project_claude_dir.mkdir(parents=True, exist_ok=True)
@@ -1908,9 +2087,10 @@ def _onboard_claude_code(
         projects_index.write_text(json_mod.dumps(known, indent=2) + "\n")
 
     # --- Shell env (~/.zshrc) ---
-    # Writes host.docker.internal endpoint so harness sessions (Docker) pick up
-    # the vars automatically via compose.yml passthrough — no manual setup needed.
-    # Native Claude Code uses settings.json (127.0.0.1) written above instead.
+    # The endpoint host is chosen by `_otel_endpoint_host()` for the machine
+    # being written to: loopback on a host, the Docker gateway only when this
+    # is genuinely running inside a container, and `TJ_OTEL_HOST` overrides
+    # both. Native Claude Code uses settings.json (127.0.0.1) written above.
     zshrc = Path.home() / ".zshrc"
     zshrc.touch(exist_ok=True)
     zshrc_text = zshrc.read_text()
@@ -1932,7 +2112,7 @@ def _onboard_claude_code(
     wrapper_files = _install_claude_wrapper()
 
     want_daemon = not no_daemon
-    _finish_onboard_serve(
+    daemon_result = _finish_onboard_serve(
         str(config_path.resolve()),
         want_daemon=want_daemon,
         plan_changed=plan_changed,
@@ -1940,7 +2120,27 @@ def _onboard_claude_code(
         secret_rotated=False,
         no_daemon=no_daemon,
         force=force,
+        # --claude-code completion (#675): the payoff screen reports via three
+        # `✓` lines, so suppress the internal Daemon/Server-restart status lines
+        # and defer the macOS "Background Items Added" heads-up to the bottom.
+        quiet_daemon=True,
     )
+    # `quiet_daemon` suppresses the routine daemon lines, but a daemon
+    # install/restart FAILURE must never be silently swallowed — a green
+    # completion screen while the server is actually down is worse than no line
+    # (Greptile, #675). A clean install returns "Daemon installed at ..."; a
+    # clean restart "restarted to pick up ..."; a skip "daemon already running".
+    # Anything else off the restart path (could-not-auto-restart / stopped-stale
+    # / restart-attempted-verify) means the server may not be up — surface it.
+    daemon_needs_attention = daemon_result is not None and daemon_result.startswith(
+        ("could not", "stopped stale server", "restart attempted")
+    )
+    if daemon_needs_attention:
+        console.print()
+        console.print(
+            f"[warn]Daemon:[/warn] {daemon_result}. "
+            "Verify with [accent]tj status[/accent]."
+        )
 
     # ── Completion screen (founder review, 2026-07): what got wired → the one
     # required action (restart, prominent, one why-first panel) → next steps →
@@ -1950,109 +2150,122 @@ def _onboard_claude_code(
     # "after restarting" pointer, and a "verify after restarting" line near
     # Connection details); consolidated back into one panel below.
     console.print()
-    console.print("[ok]\u2713 Claude Code observability configured.[/ok]")
-    _print_statusline_status(statusline_status)
-    console.print(
-        "  Telemetry:           Claude Code → tj, out-of-band "
-        "(global settings + ~/.zshrc)"
-    )
-    if wrapper_files:
-        console.print(
-            "  claude wrapper:      per-terminal dashboard tiles (~/.zshrc)"
+    # Lean payoff screen (#675): three green `\u2713` status lines (config written /
+    # observability configured / sessions backfilled), then the privacy note,
+    # then Next steps (with the optional restart as its third item), and the
+    # macOS "Background Items Added" heads-up last of all. The Daemon / Server-
+    # restart / Statusline / verbose "Backfilled: N new \u00b7 N total" status lines
+    # that used to interleave here are gone from the default screen; the
+    # connection-details block behind `--verbose` (and `tj doctor`) still has
+    # the mechanics for anyone who wants them.
+    console.print("[check]\u2713[/check] Claude Code observability configured.")
+    if backfill_has_data and backfill_sessions_total > 0:
+        # Omit the span for a same-day corpus (0 days or unknown) — "over 0
+        # days" reads odd and adds nothing.
+        span = (
+            f", over {backfill_span_days} day"
+            f"{'s' if backfill_span_days != 1 else ''}"
+            if backfill_span_days else ""
         )
-    if backfill_msg:
-        console.print(f"  Backfilled:          {backfill_msg}")
-    if want_daemon:
         console.print(
-            f"  Lens (web UI):       http://127.0.0.1:{port}/ "
-            "(the daemon keeps it running)"
+            f"[check]\u2713[/check] "
+            f"[bold]Claude Code sessions backfilled[/bold]: "
+            f"{backfill_sessions_total} session"
+            f"{'s' if backfill_sessions_total != 1 else ''}{span}."
         )
+    elif backfill_msg:
+        # Backfill ran but found no sessions, or was skipped (lock / error).
+        # Surface the reason as one plain line rather than a bare `\u2713`.
+        console.print(f"  [muted]Backfill: {backfill_msg}[/muted]")
     _print_capture_disclosure(config.capture.prompts, config.capture.tool_inputs)
-    console.print()
-    # tj is out-of-band for Claude Code: the statusline (zero model tokens),
-    # not an in-loop MCP server. Say so explicitly so users know where tj lives.
-    if statusline_status == "skipped":
-        console.print(
-            "[dim]tj did not touch your existing statusLine. To see tj's "
-            "re-read/quota line, set your Claude Code statusLine command to[/dim]  "
-            "tj statusline"
-        )
-    else:
-        console.print(
-            # `bold` nested inside `dim` renders as bold-dim, which is neither:
-            # it reads as a smudge rather than emphasis. Inside a dim sentence
-            # the only thing that earns a break from dim is the accent, and only
-            # for the thing the user actually types.
-            "[muted]tj is now in your Claude Code statusline (zero token "
-            "cost): it shows this session's re-read share and nudges[/muted] "
-            "[accent]/compact[/accent] [muted]when re-reading eats your "
-            "quota.[/muted]"
-        )
-    console.print()
-    _print_claude_code_restart_panel()
-    if not want_daemon:
-        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
+    # (`_print_next_steps_nudge` prints its own leading blank line.)
     _print_next_steps_nudge(
         has_data=backfill_has_data, days=backfill_span_days,
-        persona="claude_code", daemon_running=want_daemon, port=port,
+        persona="claude-code", daemon_running=want_daemon, port=port,
+        # The optional "restart Claude Code" line is now the third Next-steps
+        # item (#675); shown only when `claude` is actually running, since a
+        # fresh terminal with no open session needs no restart.
+        show_restart=_claude_code_is_running(),
     )
-    # Connection details, demoted to a dim footer: needed for debugging and
-    # harness setups, noise for the first-run payoff moment.
-    console.print("[dim]Connection details[/dim]")
-    console.print(
-        f"[dim]  Global settings:    {display_path(global_settings_path)}[/dim]",
-        soft_wrap=True,
-    )
-    console.print(
-        f"[dim]  Project settings:   {display_path(project_settings_path)}[/dim]",
-        soft_wrap=True,
-    )
-    if removed_resource_attr:
+    if not want_daemon:
+        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
+    # --verbose (#643): the connection-details block + internal mechanics.
+    # Off by default -- this is debug/reference noise on the first-run payoff
+    # moment, and `tj doctor` surfaces the same information on demand.
+    if verbose:
+        console.print("[dim]Connection details[/dim]")
         console.print(
-            # Informational, inside an all-dim details block: this is something
-            # tj did successfully, not something the user must act on.
-            "[muted]  Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from project "
-            "settings (the claude wrapper now sets it per terminal).[/muted]"
+            "  Telemetry:           Claude Code -> tj, out-of-band "
+            "(global settings + ~/.zshrc)"
         )
-    console.print(f"[dim]  Agent ID:           {agent_id}[/dim]")
-    if budget and budget > 0:
-        console.print(f"[dim]  Daily budget:       ${budget:.2f}[/dim]")
-    console.print(
-        f"[dim]  OTLP endpoint:      http://127.0.0.1:{port} (native) · "
-        f"http://host.docker.internal:{port} (harness)[/dim]"
+        if wrapper_files:
+            console.print(
+                "  claude wrapper:      per-terminal dashboard tiles "
+                "(~/.zshrc); claude --as <name> labels a terminal"
+            )
+        if statusline_status == "skipped":
+            console.print(
+                "[dim]  Statusline:          left untouched -- set your "
+                "Claude Code statusLine command to[/dim]  tj statusline"
+            )
+        console.print(
+            f"[dim]  Global settings:    {display_path(global_settings_path)}[/dim]",
+            soft_wrap=True,
+        )
+        console.print(
+            f"[dim]  Project settings:   {display_path(project_settings_path)}[/dim]",
+            soft_wrap=True,
+        )
+        if removed_resource_attr:
+            console.print(
+                "[muted]  Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from "
+                "project settings (the claude wrapper now sets it per "
+                "terminal).[/muted]"
+            )
+        console.print(f"[dim]  Agent ID:           {agent_id}[/dim]")
+        if budget and budget > 0:
+            console.print(f"[dim]  Daily budget:       ${budget:.2f}[/dim]")
+        console.print(
+            f"[dim]  OTLP endpoint:      http://127.0.0.1:{port} (native) . "
+            f"http://{_otel_endpoint_host()}:{port} (shell env)[/dim]"
+        )
+        if secret:
+            console.print(f"[dim]  Ingest secret:      {secret[:8]}...[/dim]")
+        from tokenjam.core.config import load_config as _lc
+        try:
+            _cfg = _lc(str(global_config_path))
+            _ab = _cfg.budgets.get("anthropic")
+            if _ab is not None and _ab.plan:
+                _line = f"[budget.anthropic] plan = \"{_ab.plan}\""
+                if _ab.usd:
+                    _line += f", usd = {_ab.usd}"
+                console.print(f"[dim]  Budget projection:  {escape(_line)}[/dim]")
+        except Exception:
+            pass
+        console.print()
+
+    _maybe_verify_onboarding(config, persona="claude-code", verify=verify)
+
+    # macOS "Background Items Added" heads-up last of all (#675): it was
+    # suppressed at daemon-install time (`quiet_daemon`) so it lands here, after
+    # Next steps, at the very bottom of the payoff screen. Gate it on a NEW
+    # background item having actually been registered — a fresh `_install_launchd`
+    # returns "Daemon installed at ..." — not merely on `want_daemon` (Greptile,
+    # #675). A skipped reinstall ("daemon already running"), a pure restart, or a
+    # failed install registers no new item, so no notification fires and the
+    # heads-up would be a lie.
+    daemon_installed_new = daemon_result is not None and daemon_result.startswith(
+        "Daemon installed"
     )
-    if secret:
-        console.print(f"[dim]  Ingest secret:      {secret[:8]}...[/dim]")
-    # Surface what we wrote for [budget.anthropic]: the user's plan tier, and
-    # the spending ceiling only when one is set (API users may opt in to one).
-    from tokenjam.core.config import load_config as _lc
-    try:
-        _cfg = _lc(str(global_config_path))
-        _ab = _cfg.budgets.get("anthropic")
-        if _ab is not None and _ab.plan:
-            _line = f"[budget.anthropic] plan = \"{_ab.plan}\""
-            if _ab.usd:
-                _line += f", usd = {_ab.usd}"
-            console.print(f"[dim]  Budget projection:  {escape(_line)}[/dim]")
-    except Exception:
-        pass
-    console.print()
+    if daemon_installed_new:
+        console.print()
+        _print_background_items_headsup()
 
-    _maybe_verify_onboarding(config, persona="claude_code", verify=verify)
-
-    # Shared closing banner (#448): every onboard path ends on the branded home
-    # screen + tailored next-best-actions. For Claude Code the success signal is
-    # the backfill ("N sessions backfilled"), NOT a live span — the log parse
-    # already ran above. On the combination path this is deferred to
-    # `_onboard_combination` so the banner prints exactly once (#432).
-    if standalone:
-        if backfill_has_data:
-            _print_review_inbox_pointer(port=port, want_daemon=want_daemon)
-        _print_setup_complete_home(
-            sessions_backfilled=backfill_sessions_total,
-            has_data=backfill_has_data,
-            days=backfill_span_days,
-        )
+    # The Claude Code flow ends right after the Next steps block (founder
+    # review, demo trim): no "Recurring mistakes" pointer and no "You're set up
+    # / full command list" footer. The other onboard paths keep those via
+    # `_print_setup_complete_home`. The backfilled-session count is reported on
+    # the "✓ Claude Code sessions backfilled" line above.
 
 
 def _onboard_codex(
@@ -2065,6 +2278,7 @@ def _onboard_codex(
     plan_usd_override: float | None = None,
     verify: bool = False,
     standalone: bool = True,
+    analysis_span: str | None = None,
 ) -> None:
     """Configure Codex CLI to send telemetry to tj.
 
@@ -2101,7 +2315,7 @@ def _onboard_codex(
     # `codex_exec` is project-agnostic by design (Codex hardcodes service.name
     # in its binary). Per-project TokenJam configs would rotate the secret on every
     # onboard, breaking the running server.
-    config_path = Path.home() / ".config" / "tj" / "config.toml"
+    config_path = _global_config_path()
 
     previous_secret: str | None = None
     if config_path.exists():
@@ -2158,6 +2372,7 @@ def _onboard_codex(
         budget = _prompt_daily_budget(budget, plan)
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
+        _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
         console.print(f"  tj config updated: {display_path(config_path)}", soft_wrap=True)
     else:
@@ -2187,6 +2402,7 @@ def _onboard_codex(
             )},
         )
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
         console.print(
             f"[ok]\u2713[/ok] Config written to "
@@ -2211,6 +2427,7 @@ def _onboard_codex(
 
     port = config.api.port
     secret = config.security.ingest_secret
+    _report_secret_alignment(secret)
     secret_rotated = bool(previous_secret) and previous_secret != secret
     want_daemon = not no_daemon
 
@@ -2459,10 +2676,10 @@ def _onboard_combination(
     no_daemon: bool,
     force: bool,
     plan_override: str | None = None,
-    project_override: str | None = None,
     verify: bool = False,
     backfill_days: int | None = None,
     backfill_all: bool = False,
+    analysis_span: str | None = None,
 ) -> None:
     """The "combination" path (#448): the user runs more than one kind of agent.
 
@@ -2529,9 +2746,9 @@ def _onboard_combination(
         _onboard_claude_code(
             ctx, cc_budget, no_daemon, force, reconfigure=False,
             plan_override=cc_plan, plan_usd_override=cc_usd,
-            project_override=project_override,
             verify=False, standalone=False,
             backfill_days=backfill_days, backfill_all=backfill_all,
+            analysis_span=analysis_span,
         )
         done.append("Claude Code")
 
@@ -2542,7 +2759,7 @@ def _onboard_combination(
         _onboard_codex(
             ctx, codex_budget, no_daemon, force, reconfigure=False,
             plan_override=codex_plan, plan_usd_override=codex_usd,
-            verify=False, standalone=False,
+            verify=False, standalone=False, analysis_span=analysis_span,
         )
         # Run the on-disk Codex backfill exactly once here. Passing
         # standalone=False above suppressed the per-path onboarder's own backfill
@@ -2617,59 +2834,65 @@ def _print_restart_banner(app_name: str) -> None:
     )
 
 
-def _print_claude_code_restart_panel() -> None:
-    """Render the consolidated restart-required panel for the Claude Code path.
+def _claude_code_is_running() -> bool:
+    """True when at least one ``claude`` process appears to be running (#643).
 
-    Every restart-adjacent instruction now lives in one why-first, numbered
-    panel instead of being scattered across four spots on the completion
-    screen: a panel, a separate "open a new terminal" paragraph, an
-    "after restarting, run" pointer, and a "verify after restarting" line
-    down near Connection details. The scattering made it easy to restart
-    without ever seeing the verify step, or to read a resume hint and assume a
-    plain restart wasn't needed.
+    The "restart Claude Code" block only matters for sessions that are ALREADY
+    open — they keep exporting to the pre-onboard endpoint until relaunched. A
+    fresh terminal with nothing open needs no restart, so we suppress the block
+    there. Detected via ``pgrep -f claude``.
 
-    Resume semantics are stated precisely rather than promised: ``claude -c``
-    only reopens THIS project's latest conversation, and ``claude --resume``
-    opens a picker the user must choose from; neither one "picks up exactly
-    where you left off" automatically, and resuming a conversation in one
-    terminal does nothing while other sessions for this project are still
-    running (they're still exporting to the stale endpoint too, which is why
-    step 1 is "every terminal", not "a terminal").
+    Fail-OPEN: if ``pgrep`` is missing (not on PATH), errors, or times out, we
+    can't prove there are no running sessions, so we return True and show the
+    block rather than risk silently dropping a needed restart instruction.
     """
-    from rich.panel import Panel
-    from rich.text import Text
+    import shutil
+    import subprocess
 
-    body = Text.from_markup(
-        "Running sessions keep sending telemetry to the old endpoint. "
-        "Today's activity won't reach TokenJam until they restart.\n\n"
-        "1. Quit Claude Code in [label]every terminal[/label] open on this "
-        "project.\n\n"
-        "2. Relaunch [accent]claude[/accent] in the same folder. Your history "
-        "is safe:\n"
-        "     [accent]claude -c[/accent]        → reopen this project's latest "
-        "conversation\n"
-        "     [accent]claude --resume[/accent]  → pick any earlier one from a "
-        "list\n"
-        # Two deliberately indented lines (not one auto-wrapped one): Rich
-        # wraps continuation text back to the panel margin, not to the
-        # sub-list's hanging indent, so a single long parenthetical rendered
-        # its second line flush-left under "2." instead of under the paren.
-        "     [muted](a fresh claude works too; resuming is optional.\n"
-        "      tj adds a recap of where you left off when you resume)[/muted]\n\n"
-        "3. Confirm data is flowing:  [accent]tj onboard --claude-code "
-        "--verify-only[/accent]"
-    )
-    console.print(
-        Panel(
-            body,
-            title="[warn.strong]Action required: restart Claude Code[/warn.strong]",
-            border_style="warn",
-            padding=(1, 2),
+    if shutil.which("pgrep") is None:
+        return True
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "claude"],
+            capture_output=True, text=True, timeout=3,
         )
-    )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    # pgrep exits 0 when a match is found, 1 when none, >1 on error. Treat any
+    # non-"clean no-match" outcome as "can't be sure" → show the block.
+    if result.returncode == 1:
+        return False
+    return True
+
+
+def _print_claude_code_restart_panel() -> None:
+    """One optional line for the Claude Code restart (#643; demo trim 2026-07-30).
+
+    Restarting is NOT required for completeness: the daemon's transcript
+    catch-up ingests running sessions from disk on its interval regardless
+    (the ``[ingest]`` auto_catch_up path). A restart only makes today's
+    currently-active sessions stream in live immediately, so this is stated as
+    optional, not an action gate.
+    """
     console.print(
-        "[muted]Each relaunched terminal shows as its own dashboard tile;[/muted] "
-        "[accent]claude --as <name>[/accent] [muted]labels it.[/muted]"
+        "[muted]Optional: restart Claude Code to stream today's active sessions "
+        "live -- otherwise tj picks them up from disk within a few minutes.[/muted]"
+    )
+
+
+def _print_background_items_headsup() -> None:
+    """The macOS "Background Items Added" heads-up (#675).
+
+    Only macOS surfaces this OS-level notification (launchd LaunchAgents), so
+    the line is gated on Darwin. Printed at the very bottom of the completion
+    screen — after Next steps — rather than mid daemon-install, so the payoff
+    screen reads top-to-bottom.
+    """
+    if platform.system() != "Darwin":
+        return
+    console.print(
+        "[warn]Heads up:[/warn] macOS will show a 'Background Items Added' "
+        "notification -- this is normal."
     )
 
 
@@ -2691,8 +2914,16 @@ def _finish_onboard_serve(
     secret_rotated: bool,
     no_daemon: bool,
     force: bool,
+    quiet_daemon: bool = False,
 ) -> str | None:
-    """Install or restart ``tj serve`` after onboard DB/config writes."""
+    """Install or restart ``tj serve`` after onboard DB/config writes.
+
+    ``quiet_daemon`` (the --claude-code completion, #675) suppresses the
+    internal "Daemon: installing.../already running" and "Server restart:"
+    status lines — the completion screen reports success via three `✓` lines
+    instead — and withholds the macOS "Background Items Added" heads-up so it
+    can print at the bottom of the payoff screen.
+    """
     if not config_path or not Path(config_path).exists():
         return None
 
@@ -2706,13 +2937,15 @@ def _finish_onboard_serve(
             and not stopped_for_db
             and not need_restart
         ):
-            console.print(
-                "  Daemon:              already running (skipped reinstall)"
-            )
+            if not quiet_daemon:
+                console.print(
+                    "  Daemon:              already running (skipped reinstall)"
+                )
             restart_msg = "daemon already running"
         else:
-            console.print("  Daemon:              installing...")
-            install_msg = _install_daemon(config_path)
+            if not quiet_daemon:
+                console.print("  Daemon:              installing...")
+            install_msg = _install_daemon(config_path, suppress_headsup=quiet_daemon)
             if install_msg:
                 restart_msg = install_msg
 
@@ -2723,8 +2956,11 @@ def _finish_onboard_serve(
             reason = "plan"
         else:
             reason = "db_update"
-        restart_msg = _restart_tj_server(config_path, no_daemon, reason=reason)
-        console.print(f"  Server restart:      {restart_msg}")
+        restart_msg = _restart_tj_server(
+            config_path, no_daemon, reason=reason, suppress_headsup=quiet_daemon,
+        )
+        if not quiet_daemon:
+            console.print(f"  Server restart:      {restart_msg}")
 
     return restart_msg
 
@@ -2772,6 +3008,7 @@ def _restart_tj_server(
     no_daemon: bool,
     *,
     reason: str = "secret",
+    suppress_headsup: bool = False,
 ) -> str:
     """Restart running tj serve to pick up config changes.
 
@@ -2796,7 +3033,7 @@ def _restart_tj_server(
             return f"stopped stale server; {hint}"
         return f"could not auto-restart in --no-daemon mode; {hint}"
 
-    daemon_msg = _install_daemon(config_path)
+    daemon_msg = _install_daemon(config_path, suppress_headsup=suppress_headsup)
     if daemon_msg:
         if reason == "secret":
             return "restarted to pick up new ingest secret"
@@ -3215,24 +3452,7 @@ def _derive_project_name() -> str:
     return Path.cwd().name.lower()
 
 
-def _prompt_project_name(project_override: str | None, default: str) -> str:
-    """Resolve the dashboard project name (the OTel ``service.namespace`` the
-    dashboard groups by).
-
-    A meta-repo (e.g. git repo "harness" holding all of "aquanode") wants a
-    human project name, so prompt with the repo name as default. ``--project``
-    skips the prompt for non-interactive use. Asked AFTER the two agent
-    questions (usage path, plan) — see the ordering note at the call sites.
-    """
-    if project_override:
-        return project_override
-    return click.prompt(
-        "Project name (groups related repos under one dashboard tile)",
-        default=default, show_default=True,
-    ).strip() or default
-
-
-def _onboard_add_project(ctx: click.Context, project_override: str | None) -> None:
+def _onboard_add_project(ctx: click.Context) -> None:
     """Register the current repo's Claude Code agent under a project
     namespace, without running any of the rest of the onboarding wizard.
 
@@ -3275,11 +3495,19 @@ def _onboard_add_project(ctx: click.Context, project_override: str | None) -> No
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
 
-    if agent_id not in config.agents:
+    is_new_agent = agent_id not in config.agents
+    if is_new_agent:
         config.agents[agent_id] = AgentConfig()
 
-    namespace = _prompt_project_name(project_override, project_name)
-    config.agents[agent_id].project = namespace
+    # Only set it for a genuinely NEW agent — an existing one may carry a
+    # hand-entered name from before --project was removed; respect it rather
+    # than silently overwriting (would orphan its dashboard history).
+    if is_new_agent or not config.agents[agent_id].project:
+        config.agents[agent_id].project = project_name
+    namespace = config.agents[agent_id].project
+    # Not a fresh onboard, so no span question — but the clamp still runs,
+    # so a config hand-edited to a shorter retention is corrected here too.
+    _apply_analysis_span(config)
     write_config(config, config_path)
 
     console.print(
@@ -3321,12 +3549,17 @@ def _daemon_already_running() -> bool:
     return False
 
 
-def _install_daemon(config_path: str) -> str | None:
-    """Install background daemon. Returns success message or None."""
+def _install_daemon(config_path: str, *, suppress_headsup: bool = False) -> str | None:
+    """Install background daemon. Returns success message or None.
+
+    ``suppress_headsup`` (macOS only) withholds the inline "Background Items
+    Added" heads-up so the --claude-code completion can print it at the bottom
+    of the payoff screen instead (#675).
+    """
     system = platform.system()
     try:
         if system == "Darwin":
-            return _install_launchd(config_path)
+            return _install_launchd(config_path, suppress_headsup=suppress_headsup)
         elif system == "Linux":
             return _install_systemd(config_path)
         else:
@@ -3411,7 +3644,66 @@ def _warn_no_durable_daemon_entrypoint(unit_kind: str) -> None:
     )
 
 
-def _install_launchd(config_path: str) -> str | None:
+def _parse_launchctl_arguments(output: str) -> list[str] | None:
+    """Extract the ``arguments = { ... }`` array `launchctl print` reports
+    for a loaded unit out of its text output.
+
+    Returns ``None`` when the block isn't present at all (unit not loaded,
+    or a launchctl version whose output this doesn't understand) so a
+    caller can tell "couldn't check" apart from "checked, and it's empty" —
+    the two must never be conflated into a false positive.
+    """
+    lines = output.splitlines()
+    in_block = False
+    found = False
+    args: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not in_block:
+            if stripped.startswith("arguments = {"):
+                in_block = True
+                found = True
+            continue
+        if stripped == "}":
+            break
+        if stripped:
+            args.append(stripped)
+    return args if found else None
+
+
+def _launchd_registration_matches(
+    target: str, program_args: list[str],
+) -> bool | None:
+    """Does the ACTIVELY loaded unit at `target` run `program_args` — the
+    plist that was just written?
+
+    `launchctl print` exiting 0 only proves SOME unit is registered under
+    this label; it says nothing about whether that's the registration this
+    run just wrote versus an old one `bootout` failed to clear (the label
+    is loaded either way, and "already bootstrapped" is exactly the signal
+    that the old one may still be active). Comparing the live argv against
+    what this run intended to install is what actually answers the
+    question. Returns `None` — not confirmed, not refuted — when the unit
+    isn't registered or its output can't be parsed at all.
+    """
+    verify = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
+    if verify.returncode != 0:
+        return None
+    active_args = _parse_launchctl_arguments(verify.stdout)
+    if active_args is None:
+        return None
+    return active_args == program_args
+
+
+def _launchd_target(label: str = "com.tokenjam.serve") -> tuple[str, str]:
+    """``(domain, service-target)`` for this user's GUI launchd domain —
+    ``gui/<uid>/<label>``, the specifier `bootstrap`/`bootout`/`enable`/`print`
+    all take (see the ``launchctl`` man page's SUBCOMMANDS section)."""
+    domain = f"gui/{os.getuid()}"
+    return domain, f"{domain}/{label}"
+
+
+def _install_launchd(config_path: str, *, suppress_headsup: bool = False) -> str | None:
     program_args = _daemon_program_args(config_path)
     if program_args is None:
         _warn_no_durable_daemon_entrypoint("launchd")
@@ -3442,31 +3734,101 @@ def _install_launchd(config_path: str) -> str | None:
 </dict>
 </plist>"""
     plist_path.write_text(plist_content)
-    # Unload any existing registration before loading the updated plist.
-    # Ignore errors — the service may not be registered yet on first install.
-    subprocess.run(
-        ["launchctl", "unload", "-w", str(plist_path)],
-        capture_output=True, text=True,
-    )
-    # `-w` clears the Disabled=true flag that `tj stop` writes via
-    # `launchctl unload -w`. Without `-w` here, the daemon stays disabled
-    # in launchd's database and load is a no-op even though it returns 0.
+
+    domain, target = _launchd_target()
+
+    # `bootstrap`/`bootout`/`enable` replace the legacy `load`/`unload` this
+    # used to call. The `launchctl` man page lists them as the "Recommended
+    # alternative subcommands" for load/unload, and spells out exactly why
+    # trusting load/unload's exit status is unsafe: "the load and unload
+    # subcommands will only return a non-zero exit code due to improper
+    # usage. Otherwise, zero is always returned." A registration that
+    # silently never took (the label just isn't re-loaded into launchd) is
+    # therefore INDISTINGUISHABLE from success by exit code alone under the
+    # legacy call — which is exactly the failure mode observed in production:
+    # the plist was present with RunAtLoad/KeepAlive both true and no
+    # Disabled key, yet `launchctl list` showed nothing loaded, with no
+    # crash and no stderr trace. Because of that, this install path no
+    # longer trusts ANY single call's exit code — see the independent
+    # `print` verification below.
+
+    # Remove any existing registration first, so re-onboarding is idempotent
+    # regardless of prior state. `bootout` on a label that isn't currently
+    # loaded exits non-zero ("Could not find service") — ignored, since
+    # "nothing to remove" is exactly the common first-install case.
+    subprocess.run(["launchctl", "bootout", target], capture_output=True, text=True)
+
+    # `enable` clears the persisted Disabled bit that `tj stop`'s `launchctl
+    # unload -w` sets (`cmd_stop.py`) — the modern equivalent of `load -w`'s
+    # disable-clearing half. Without it the daemon stays disabled in
+    # launchd's on-disk database and `bootstrap` below is a no-op even
+    # though it still reports success.
+    subprocess.run(["launchctl", "enable", target], capture_output=True, text=True)
+
     result = subprocess.run(
-        ["launchctl", "load", "-w", str(plist_path)],
+        ["launchctl", "bootstrap", domain, str(plist_path)],
         capture_output=True, text=True,
     )
-    if result.returncode != 0:
+    combined = f"{result.stdout}\n{result.stderr}".lower()
+    # "already bootstrapped" would mean the `bootout` above raced or no-op'd
+    # against a job still shutting down — treat it as success and fall
+    # through to the independent verification rather than failing an
+    # otherwise-fine idempotent re-install.
+    if result.returncode != 0 and "already bootstrapped" not in combined:
         console.print(f"[warn]Daemon plist written to {plist_path} but "
-                      f"launchctl load failed.[/warn]")
+                      f"launchctl bootstrap failed.[/warn]")
         console.print("[dim]Try loading manually:[/dim]")
-        console.print(f"  launchctl load {plist_path}")
+        console.print(f"  launchctl bootstrap {domain} {plist_path}")
         console.print("[dim]Or run the server directly:[/dim]")
         console.print("  tj serve &")
         return None
-    console.print(
-        "  [dim]macOS will show a 'Background Items Added' notification "
-        "-- this is normal.[/dim]"
-    )
+
+    # Verify registration independently rather than trusting bootstrap's exit
+    # status either — but "some unit is registered under this label" is the
+    # WRONG question when bootstrap reported "already bootstrapped": that
+    # means the old registration may still be the one actually loaded (bootout
+    # above raced or no-op'd against a job still shutting down), and a bare
+    # `launchctl print` happily confirms that stale unit — verifying the plist
+    # is on disk, not that it's what's running. Compare the ACTIVE unit's
+    # program arguments against what this run just wrote instead.
+    matches = _launchd_registration_matches(target, program_args)
+    if not matches:
+        # One retry of the full bootout -> enable -> bootstrap cycle before
+        # giving up — covers the "bootout raced" case outright.
+        subprocess.run(["launchctl", "bootout", target], capture_output=True, text=True)
+        subprocess.run(["launchctl", "enable", target], capture_output=True, text=True)
+        subprocess.run(
+            ["launchctl", "bootstrap", domain, str(plist_path)],
+            capture_output=True, text=True,
+        )
+        matches = _launchd_registration_matches(target, program_args)
+
+    if matches is None:
+        console.print(f"[warn]Daemon plist written to {plist_path} but "
+                      f"launchctl could not confirm it registered.[/warn]")
+        console.print(f"[dim]Check manually:[/dim]  launchctl print {target}")
+        console.print("[dim]Or run the server directly:[/dim]")
+        console.print("  tj serve &")
+        return None
+    if matches is False:
+        console.print(
+            f"[warn]Daemon plist written to {plist_path}, but launchd is "
+            f"still running an OLD registration under {target} — its active "
+            f"program arguments don't match what was just written, so the "
+            f"new config/executable is NOT in effect.[/warn]"
+        )
+        console.print("[dim]Force a clean reload, then re-check:[/dim]")
+        console.print(f"  launchctl bootout {target}")
+        console.print(f"  launchctl bootstrap {domain} {plist_path}")
+        console.print(f"  launchctl print {target}")
+        return None
+
+    # The --claude-code completion (#675) moves this heads-up to the very BOTTOM
+    # of the payoff screen (after Next steps) so it reads top-to-bottom, hence
+    # `suppress_headsup` there; every other onboard path prints it inline here as
+    # before.
+    if not suppress_headsup:
+        _print_background_items_headsup()
     return f"Daemon installed at {plist_path}"
 
 

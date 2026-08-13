@@ -65,10 +65,8 @@ the rollup's ``excluded`` channel instead, which states waste the headline did
 not sum in rather than dropping it silently.
 
 THE UNBOUNDED FIELDS ARE NOT TOUCHED. ``past_overspend_usd``/``_tokens`` on the
-cluster stay exactly as the detector wrote them. They are the write budget's
-pre-net gross (``core/optimize/write_budget.py``), and shrinking them in place
-would silently flip clusters between "worth a permanent rule" and net-negative.
-The contribution is a new, separately named field beside them.
+cluster stay exactly as the detector wrote them — the unbounded, full-corpus
+observation. The contribution is a new, separately named field beside them.
 
 ONE FIGURE FOR THE FLOOR, THE TAIL AND THE HEADLINE. Every row gets
 ``inbox_contribution_usd`` stamped on it, cost and relearn alike, so the noise
@@ -79,6 +77,7 @@ floor may not hide it and no combined figure may include it.
 """
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from tokenjam.core.optimize import cost_proposals as _cost_proposals_mod
@@ -135,8 +134,11 @@ def headline_window_days(cached: Any) -> int:
     """The window the Review inbox headline is LABELLED with.
 
     Read from the cost block's own ``cost_window_days`` (the window the
-    stored cost figures were observed over), falling back to the recompute
-    default when a cache predates the key or carries a zero. EVERY surface
+    stored cost figures were observed over), which is where the resolved
+    analysis span lands — so the headline follows the span the user chose with
+    no derivation of its own. The constant is reached only when a cache predates
+    the key or carries a zero, and labels a figure nobody can now attribute to a
+    window. EVERY surface
     that builds the headline resolves it through this one function -- the
     web ``/relearn/cost-proposals`` and ``/relearn/proposals`` routes and the
     CLI's ``tj relearn cost-proposals`` alike -- so a row can never publish a
@@ -150,7 +152,7 @@ def headline_window_days(cached: Any) -> int:
         days = int(raw or 0)
     except (TypeError, ValueError):
         days = 0
-    return days or _cost_proposals_mod.DEFAULT_COST_WINDOW_DAYS
+    return days or _cost_proposals_mod.FALLBACK_COST_WINDOW_DAYS
 
 
 def exact_window_label(
@@ -190,6 +192,109 @@ def _bucket(cluster: Mapping[str, Any], label: str) -> Mapping[str, Any] | None:
     return bucket if isinstance(bucket, Mapping) else None
 
 
+def _net_of_reread(bucket: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One bounded bucket's figure MINUS its measured re-read share, or ``None``.
+
+    The netting rule, in exactly one place, because two surfaces publish it: the
+    Review inbox row's contribution to the headline, and the Dashboard's relearn
+    waste tile (via :func:`window_scoped_finding_figure`). Both sit in a set
+    whose other members include the context re-send proposal, which prices
+    re-sent context in full — so both have to subtract the same component or
+    whichever one forgot bills the same tokens twice.
+
+    ``None`` means UNKNOWN. An unpriced bucket cannot be netted, and treating an
+    unknown re-read share as zero would publish a figure that double-counts
+    against resend. Unknown propagates rather than degrading to a number.
+    """
+    gross_usd = bucket.get("past_overspend_usd")
+    reread_usd = bucket.get("past_reread_usd")
+    if gross_usd is None or reread_usd is None:
+        return None
+    gross_tokens = int(bucket.get("past_overspend_tokens") or 0)
+    reread_tokens = int(bucket.get("past_reread_tokens") or 0)
+    return {
+        "usd": round(max(float(gross_usd) - float(reread_usd), 0.0), 6),
+        "tokens": max(gross_tokens - reread_tokens, 0),
+        "gross_usd": float(gross_usd),
+        "reread_usd": float(reread_usd),
+    }
+
+
+def window_scoped_finding_figure(
+    finding: Any, *, days: float | int | None,
+    applied_signatures: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    """Relearn's FINDING-level past overspend, on the window ``days`` names.
+
+    THE DEFECT THIS EXISTS FOR. ``RelearnFinding.past_overspend_usd`` is
+    deliberately UNBOUNDED — relearn's whole signal is recurrence across
+    history, so ``run(ctx)`` does not forward the report's ``since`` and the
+    field covers everything the detector retained. That is correct for the field
+    and wrong for the Dashboard's recoverable-waste row, which rendered it as a
+    peer beside five window-scoped tiles with nothing saying it was on another
+    footing. Measured on a real corpus the tile read $386.64 (all history) while
+    the Review inbox published $260.21 for the same analyzer over the same 30
+    days, and the correctly-bounded figure was already sitting unused on the
+    same payload.
+
+    So this SELECTS the finding's own precomputed bucket for that window and
+    nets it exactly the way an inbox row is netted. Nothing is rescaled, paced
+    or projected — same filter, same price, same subtraction. ``None`` when no
+    bucket EXACTLY matches (see this module's docstring on why there is no
+    nearest-match fallback): a surface must then say it has no figure on this
+    window's basis, never fall back to the unbounded one.
+
+    **SAME POPULATION AS THE INBOX, NOT JUST THE SAME WINDOW.** The
+    finding-level bucket covers EVERY cluster the detector retained, including
+    ones the user has already applied a fix for; the Review inbox sums the
+    OPEN clusters, because a headline answers what is still outstanding. Same
+    window, same netting, different population — so the two disagreed by
+    exactly the applied clusters' worth, and the Dashboard went on claiming
+    money the user had already recovered (apply a fix, watch the tile not
+    move). ``applied_signatures`` closes that: the figure is summed from the
+    open clusters through ``relearn_contribution_rows`` — the inbox's OWN
+    derivation, not a second one that agrees today — so the two surfaces are
+    equal by construction. The bucket still decides whether this window has a
+    basis at all, and still supplies the window labels.
+
+    Passing no signatures keeps the whole-population figure, which is correct
+    for a caller that genuinely wants every cluster (nothing applied is the
+    normal case, and then the two are identical anyway).
+
+    Immutable: reads the finding, returns a new dict, never writes to it.
+    """
+    if not isinstance(finding, Mapping):
+        return None
+    totals = finding.get("past_overspend_windows")
+    if not isinstance(totals, Mapping):
+        return None
+    label = exact_window_label(days, list(totals))
+    if not label:
+        return None
+    bucket = totals.get(label)
+    if not isinstance(bucket, Mapping):
+        return None
+    netted = _net_of_reread(bucket)
+    if netted is None:
+        return None
+    applied = {str(s) for s in applied_signatures}
+    if applied:
+        rows = relearn_contribution_rows(
+            finding, label=label, applied_signatures=applied,
+        )
+        netted = {
+            **netted,
+            "usd": sum((r.get("past_overspend_usd") or 0.0) for r in rows),
+            "tokens": sum((r.get("past_overspend_tokens") or 0) for r in rows),
+        }
+    return {
+        **netted,
+        "window": label,
+        "window_days": bucket.get("window_days"),
+        "basis": RELEARN_CONTRIBUTION_BASIS,
+    }
+
+
 def relearn_contribution(
     cluster: Mapping[str, Any], *, label: str | None,
 ) -> dict[str, Any] | None:
@@ -208,22 +313,13 @@ def relearn_contribution(
     bucket = _bucket(cluster, label)
     if bucket is None:
         return None
-    gross_usd = bucket.get("past_overspend_usd")
-    reread_usd = bucket.get("past_reread_usd")
-    if gross_usd is None or reread_usd is None:
-        # An unpriced bucket cannot be netted, and netting an UNKNOWN re-read
-        # share as zero would publish a figure that double-counts against the
-        # resend proposal. Unknown propagates.
+    netted = _net_of_reread(bucket)
+    if netted is None:
         return None
-    gross_tokens = int(bucket.get("past_overspend_tokens") or 0)
-    reread_tokens = int(bucket.get("past_reread_tokens") or 0)
     return {
-        "usd": round(max(float(gross_usd) - float(reread_usd), 0.0), 6),
-        "tokens": max(gross_tokens - reread_tokens, 0),
+        **netted,
         "window": label,
         "window_days": bucket.get("window_days"),
-        "gross_usd": float(gross_usd),
-        "reread_usd": float(reread_usd),
         "basis": RELEARN_CONTRIBUTION_BASIS,
     }
 
@@ -387,6 +483,89 @@ def unrepresented_relearn(
         "past_overspend_usd": round(usd, 6) if priced else None,
         "past_overspend_tokens": tokens,
     }
+
+
+def gather_rollup_population(
+    cost_proposals: Sequence[Any],
+    relearn_finding: Any,
+    *,
+    window_days: float | int,
+    relearn_applied_signatures: Iterable[str] = (),
+    cost_excluded: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """THE complete Review-inbox rollup: every cost proposal PLUS every open
+    relearn cluster's contribution, summed through
+    ``cost_proposals.past_overspend_rollup``.
+
+    **THIS IS THE ONLY PLACE IN THE TREE ALLOWED TO CALL THAT FUNCTION** —
+    pinned by ``tests/unit/test_cost_proposals.
+    test_the_rollup_can_only_be_reached_through_gather_rollup_population``.
+    Completeness used to be a caller CONVENTION: whoever assembled a rollup's
+    input list had to remember to separately fetch relearn's cache, turn it
+    into rows via ``relearn_contribution_rows``, and concatenate. Two call
+    sites remembered (the CLI's ``tj relearn cost-proposals`` and the API's
+    ``GET /relearn/cost-proposals``); a third (``cmd_quickstart``'s first-run
+    screen) did not, and its own comment asserted the two totals could never
+    disagree while silently handing the rollup a cost-proposals-only list.
+    Routing every caller through this one function turns "a caller
+    remembered to gather both feeds" into "a caller cannot omit either feed
+    without calling the lower-level function directly, which is the thing
+    the guard test above exists to catch."
+
+    ``relearn_finding`` accepts either shape already live in this codebase:
+
+      * a ``dict`` read back off ``relearn_store.read_cache()["finding"]``
+        (how the CLI and API routes reach it — relearn runs out of band, on
+        its own daemon cadence, and these callers read its last cached
+        result); or
+      * a live ``RelearnFinding`` dataclass straight off
+        ``report.findings["relearn"]`` (how a caller with no cache reaches
+        it — a freshly built, never-persisted report, e.g.
+        ``cmd_quickstart``'s transient in-memory run).
+
+    Normalised here with ``dataclasses.asdict`` (recursive, so the nested
+    ``RelearnCluster``/``RelearnWindowTotal`` dataclasses come along) into
+    the plain ``Mapping`` shape ``relearn_contribution_rows`` already reads —
+    so neither that function nor any caller of this one has to branch on
+    which shape arrived. ``None`` (the analyzer never ran, or a scope guard
+    left ``ctx.report.findings["relearn"]`` unset) degrades to "relearn
+    contributes nothing", exactly like any other absent finding on this
+    rollup.
+
+    ``window_days`` is NOT resolved here — it has to be the same window every
+    proposal in ``cost_proposals`` was already observed over, and that
+    resolution rule differs by caller shape (``headline_window_days`` off a
+    cached block, or a report's own window summary). Relearn's rows only
+    join when the finding carries a bucket whose span EXACTLY matches this
+    value (see this module's docstring on why there is no nearest-match
+    fallback); a mismatch is not an error, it surfaces through the returned
+    ``excluded`` channel instead of silently vanishing from the total.
+
+    A caller that genuinely needs a SUBSET of this population (not "forgot
+    the other feed", a deliberate exclusion) says so by reaching for
+    ``cost_proposals.past_overspend_rollup`` directly from this module,
+    naming the exclusion in its own docstring — never by working around this
+    function from outside it.
+    """
+    if is_dataclass(relearn_finding) and not isinstance(relearn_finding, type):
+        relearn_finding = asdict(relearn_finding)
+    applied = {str(s) for s in relearn_applied_signatures}
+    label = contribution_window_label(relearn_finding, window_days)
+    relearn_rows = relearn_contribution_rows(
+        relearn_finding, label=label, applied_signatures=applied,
+    )
+    unrepresented = unrepresented_relearn(
+        relearn_finding, label=label, applied_signatures=applied,
+    )
+    excluded = {
+        **(dict(cost_excluded) if cost_excluded else {}),
+        **relearn_excluded_entry(unrepresented, reason=NO_BOUNDED_WINDOW_REASON),
+    }
+    return _cost_proposals_mod.past_overspend_rollup(
+        list(cost_proposals) + relearn_rows,
+        window_days=int(window_days),
+        excluded=excluded,
+    )
 
 
 def relearn_excluded_entry(

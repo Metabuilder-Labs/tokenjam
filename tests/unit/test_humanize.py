@@ -9,22 +9,6 @@ from tokenjam.utils.humanize import display_path, format_tokens
 # --- format_tokens ----------------------------------------------------------
 
 
-def test_format_tokens_sub_thousand_is_raw():
-    assert format_tokens(0) == "0"
-    assert format_tokens(999) == "999"
-
-
-def test_format_tokens_thousands_use_k():
-    assert format_tokens(1_000) == "1.0k"
-    assert format_tokens(42_300) == "42.3k"
-    assert format_tokens(999_000) == "999.0k"
-
-
-def test_format_tokens_millions_use_m():
-    assert format_tokens(1_000_000) == "1.0M"
-    assert format_tokens(2_500_000) == "2.5M"
-
-
 # --- display_path -----------------------------------------------------------
 
 

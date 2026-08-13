@@ -13,8 +13,13 @@ correctness risk beyond what they already accept.
 
 This module is the cache: one small JSON file per transcript under a cache
 directory, keyed on ``(path, size, mtime)`` — the exact staleness signal the
-callers already trust. A cache hit skips the original file's read + parse
-entirely; a miss (cold entry, or a changed file) recomputes and rewrites
+callers already trust — plus a full-content fingerprint (a streaming hash of
+the whole file) as a belt-and-suspenders check: size+mtime alone can't tell
+an in-place rewrite that happens to land in the same mtime tick (or
+preserves both) from an unchanged file. A cache hit still re-reads the
+source bytes to hash them, but skips the ``json.loads``-per-line parse that
+profiling showed dominates (hashing a 2MB transcript costs ~1/9th of
+parsing it); a miss (cold entry, or a changed file) recomputes and rewrites
 atomically (temp file + rename), so a concurrent reader never observes a
 partial write.
 
@@ -69,14 +74,48 @@ def _cache_key(path: Path) -> str:
     return f"{digest}.json"
 
 
+#: Read block size for the streaming content hash — an I/O buffer only, NOT a
+#: bound on how much of the file is hashed (every byte is).
+_HASH_BLOCK = 1024 * 1024
+
+
+def _fingerprint(path: Path) -> str | None:
+    """Content check: a streaming hash of the file's ENTIRE contents.
+
+    Exists to catch an in-place rewrite that ``(size, mtime)`` alone would
+    miss — e.g. two same-size edits landing in the same filesystem mtime
+    tick. Hashing every byte (rather than bounded head/tail chunks) is what
+    makes a middle-only rewrite of a large transcript visible; it is still
+    far cheaper than the parse it saves, since it skips ``json.loads``
+    entirely. Returns ``None`` (never raises) if the file can't be read,
+    matching the tolerant-of-missing-files contract the rest of this module
+    follows.
+    """
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as f:
+            for block in iter(lambda: f.read(_HASH_BLOCK), b""):
+                digest.update(block)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def cached_read_records(path: Path, cache_dir: Path) -> list[dict[str, Any]]:
     """``read_records(path)``, transparently cached under ``cache_dir``.
 
-    Cache validity is ``(size, mtime)`` matching the live file's current
-    stat — the exact pair both analyzers already trust for their own mtime
-    filter. A stat failure (the transcript vanished mid-scan) degrades to
-    ``[]``, matching ``read_records``'s own tolerant-of-missing-files
-    contract rather than raising.
+    Cache validity is ``(size, mtime, fingerprint)`` matching the live
+    file's current stat and content — ``size``/``mtime`` are the pair both
+    analyzers already trust for their own mtime filter, and ``fingerprint``
+    (see ``_fingerprint``) is a whole-content check that catches an in-place
+    rewrite the other two miss. A stat failure (the transcript vanished
+    mid-scan) degrades to ``[]``, matching ``read_records``'s own
+    tolerant-of-missing-files contract rather than raising.
+
+    An unreadable-but-stattable file yields a ``None`` fingerprint on BOTH
+    sides of the comparison, so its entry still validates: the parse would
+    return ``[]`` for such a file anyway, and rejecting it here would mean
+    re-parsing and rewriting the same unusable entry on every lookup.
     """
     from tokenjam.core.transcript import _parse_records
 
@@ -88,17 +127,46 @@ def cached_read_records(path: Path, cache_dir: Path) -> list[dict[str, Any]]:
 
     cache_path = cache_dir / _cache_key(path)
     cached = _load(cache_path)
+    fingerprint_before_parse: str | None = None
+    fingerprint_was_checked = False
     if (
         cached is not None
         and cached.get("size") == size
         and cached.get("mtime") == mtime
     ):
-        records = cached.get("records")
-        if isinstance(records, list):
-            return records
+        fingerprint_before_parse = _fingerprint(path)
+        fingerprint_was_checked = True
+        if (
+            "fingerprint" in cached
+            and cached.get("fingerprint") == fingerprint_before_parse
+        ):
+            records = cached.get("records")
+            if isinstance(records, list):
+                return records
 
     records = _parse_records(path)
-    _store(cache_path, path, size, mtime, records)
+    try:
+        st_after = path.stat()
+    except OSError:
+        return records
+    fingerprint_after_parse = _fingerprint(path)
+    if (
+        st_after.st_size != size
+        or st_after.st_mtime != mtime
+        or (
+            fingerprint_was_checked
+            and fingerprint_after_parse != fingerprint_before_parse
+        )
+    ):
+        return records
+    _store(
+        cache_path,
+        path,
+        st_after.st_size,
+        st_after.st_mtime,
+        fingerprint_after_parse,
+        records,
+    )
     return records
 
 
@@ -115,13 +183,20 @@ def _store(
     source: Path,
     size: int,
     mtime: float,
+    fingerprint: str | None,
     records: list[dict[str, Any]],
 ) -> None:
     """Atomic temp-file + rename write. Best-effort — a cache write must
     never break the scan it exists to speed up; any OSError is swallowed."""
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"path": str(source), "size": size, "mtime": mtime, "records": records}
+        payload = {
+            "path": str(source),
+            "size": size,
+            "mtime": mtime,
+            "fingerprint": fingerprint,
+            "records": records,
+        }
         # Per-pid temp name so two processes racing the same cache entry (a
         # CLI run and a live `tj serve`) never collide mid-write — the loser
         # just overwrites the winner's file a moment later with the same

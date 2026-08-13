@@ -10,17 +10,28 @@ C1 — MCP dead weight: enumerate the MCP servers configured for a session
 — all read-only, this module never writes to any of them) and count how
 often each server's tools are actually INVOKED (``mcp__<server>__<tool>``
 tool_use blocks) across the window's sessions. A server present in at least
-``MIN_SESSIONS_DEADWEIGHT`` distinct sessions with ZERO invocations across all
-of them is dead weight: its tool schemas are still injected into context for
-no return.
+one session, with nothing attributable to it firing anywhere in the trailing
+``UNUSED_RECENCY_WINDOW_DAYS``-day recency window (and with enough corpus
+history to trust that negative), is unused: its tool schemas are still
+injected into context for no return. This is also the plugin lane's
+liveness standard (Part B/C below) — one recency question, answered the same
+way for every always-resident surface this module covers.
+
+Both per-call sizes are MEASURED per server, not assumed:
+``core/optimize/mcp_probe`` starts each configured server, asks it for its
+tools, and counts the serialized schemas. A server that cannot be measured is
+excluded from every priced figure rather than billed a default (see
+``SchemaMeasurement`` and ``ServerDeadweight.schema_tokens_measured``).
 
 Deferred-tools caveat (mandatory, spec hard rule). When a session's
 transcript shows a deferred/ToolSearch-style listing naming a server's tools,
 that server's full schemas were NOT loaded that turn — only a short
 name+description line per tool appears in the listing, so the real per-turn
-tax is much smaller. This module detects that marker per session and blends
-``DEFERRED_SCHEMA_TAX_TOKENS`` into the estimate for those sessions; it never
-claims the full ``FULL_SCHEMA_TAX_TOKENS`` tax for a deferred session.
+tax is much smaller. This module detects that marker per session and prices
+those calls at ``SchemaMeasurement.deferred_tokens`` — the name+description
+listing measured off the SAME ``tools/list`` response as the full schema, so
+neither lane is an assumption — and never claims a deferred call cost the full
+``SchemaMeasurement.tokens``.
 
 C2 — always-injected context tax table (report-only, no proposals): a ranked,
 per-source, per-session token-tax table for what actually shows up verbatim
@@ -44,71 +55,77 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from json.decoder import scanstring
 from pathlib import Path
 from typing import Any
 
+from tokenjam.core.fixes import fix_text
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.span_pricing import blended_rates, price_span, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
+from tokenjam.core.summarize.invocations import invoked_names_in_record
 from tokenjam.core.transcript import _SYSTEM_REMINDER_RE, read_records, resolve_projects_root
 from tokenjam.core.usage import AssistantUsage, assistant_message_key, parse_usage
 
 # --- Tunables ------------------------------------------------------------
 
-#: A server must be configured-present in at least this many DISTINCT
-#: sessions, with zero invocations across all of them, before it's flagged
-#: dead weight. Originally 10 (spec: "start N=10"); lowered to 5 after an
-#: audit of all twelve analyzers found this the single biggest one-shot fix
-#: for analyzers that rarely fire on a normal user's window — a server
-#: configured-but-never-called is unlikely to be a fluke even at a much
-#: lower bar. False-positive shape (modeling each session as an independent
-#: Bernoulli trial with per-session use probability p): a server actually
-#: needed 1-in-4 sessions has a (1-p)^N ~= 42% chance of a spurious
-#: zero-invocation read at N=3, vs ~24% at N=5, vs ~6% at N=10 -- N=5 keeps
-#: that chance in the same order of magnitude as the old default while
-#: needing HALF the silent evidence to surface, materially increasing how
-#: often this analyzer fires. N=3 was considered and rejected: it nearly
-#: doubles the false-positive rate over N=5 for the same occasional-use
-#: server, and this finding is apply-capable (see the removal machinery
-#: below), so a wrongly-flagged server costs a real (user-approved, but
-#: still avoidable) config edit, not just a noisy card. The module's own
-#: DEADWEIGHT_HONESTY_CAVEAT and review-before-apply gate remain the
-#: backstop for whatever residual false-positive risk N=5 still carries.
-MIN_SESSIONS_DEADWEIGHT = 5
+#: A configured MCP server or a resident plugin component (skill, agent, or
+#: plugin-contributed MCP server) is UNUSED when nothing attributable to it
+#: fired within this many trailing days. Founder direction: 20.
+#:
+#: Replaces two separate, disagreeing standards this analyzer used to run:
+#: the MCP lane's ``MIN_SESSIONS_DEADWEIGHT`` (a session-COUNT floor, "present
+#: in >= N sessions with 0 invocations") and the plugin lane's
+#: ``usage_count == 0`` (a cumulative, non-timestamped counter out of
+#: ``~/.claude.json``, which structurally cannot answer a recency question —
+#: see ``core/agent_config.plugin_usage``'s own docstring on why it is kept
+#: as informational context only, never as the liveness signal). A session
+#: count is also opaque to a user: "not present in 5 sessions" says nothing
+#: about how long ago that was. A trailing-day window answers the actual
+#: question ("would removing this change anything going forward") the same
+#: way for both lanes.
+#:
+#: This is DIFFERENT from the report's own ``since``..``until`` window
+#: (``[optimize] scan_window_days``, default 30d): that knob decides how far
+#: back the PRICED figures look, and a user can widen or narrow it. This
+#: constant decides a separate question — how recent is "recent enough to
+#: still count as used" — and stays fixed regardless of the report window, so
+#: a `--since 7d` run cannot make everything look unused just because the
+#: report itself only looked at a week. See ``_scan_recency_window`` for how
+#: the two windows are reconciled: the recency check is its OWN independent
+#: scan, anchored at the report's `until`, never narrowed or widened by
+#: `since`.
+UNUSED_RECENCY_WINDOW_DAYS = 20
 
 #: How many example session ids a dead server's card carries as evidence
 #: (mirrors relearn.py's MAX_EXAMPLE_SESSIONS convention).
 MAX_EXAMPLE_SESSIONS = 3
 
-#: Full MCP-connector schema-injection tax, PER CALL, when its tool schemas
-#: are loaded (not deferred). This is an ASSUMPTION carried into this module,
-#: not a measurement taken here or anywhere in this repo: the on-disk
-#: transcript has no per-schema token count to measure against (see
-#: core/context_diagnostic.py's MCP_INJECTION_PARK_NOTE, the one real in-repo
-#: source for the "~25K tokens/call" figure) — and that note itself describes
-#: the tax for ALL of a session's attached MCP servers COMBINED, not for one
-#: server. This module nonetheless charges the full 25K flat to EVERY
-#: individual server, every call, regardless of how many tools that server
-#: actually exposes. Do not treat this as measured or as a per-server figure
-#: just because it is used that way below — it is neither. Do not change the
-#: value here; a re-derived, era-correct constant is tracked separately.
-#: The server's tool definitions ride in the `tools` array of EVERY call in
-#: the session, not just the first — this is the FIRST call's token count;
-#: subsequent calls in the same session re-send it too but are priced at the
-#: cache-read rate, not this rate again (see the per-session multiplier in
-#: the tax loop below).
-FULL_SCHEMA_TAX_TOKENS = 25_000
-
-#: When a session's transcript shows this server's tools in a DEFERRED
-#: listing (ToolSearch-style), its schemas are NOT loaded that call — only a
-#: short name+description line per tool appears in the listing.
-#: Conservative estimate: ~10 tools x ~40 tokens/line for a typically-sized
-#: server. Never used to claim the full tax for a deferred call. Like
-#: FULL_SCHEMA_TAX_TOKENS, this is the first call's count; the same
-#: per-session multiplier applies to later calls.
-DEFERRED_SCHEMA_TAX_TOKENS = 400
+# THE SCHEMA TAX IS MEASURED PER SERVER, AND THERE IS NO CONSTANT TO FALL BACK
+# ON. This module used to carry `FULL_SCHEMA_TAX_TOKENS = 25_000` and charge it
+# flat to EVERY individual server, every call, regardless of how many tools that
+# server exposed. Its own docstring conceded the number was an assumption, and
+# conceded worse: the only in-repo source for "~25K" (`core/context_diagnostic
+# .py`'s MCP_INJECTION_PARK_NOTE) describes the tax for ALL of a session's
+# attached servers COMBINED. So a per-server loop over an all-servers-combined
+# figure made `past_overspend_usd` — the field every surface renders — linear in
+# an unmeasured constant AND multiplied by however many servers the user had
+# configured.
+#
+# `core/optimize/mcp_probe` measures each server instead: start it, ask for its
+# tools, serialize those schemas as they are injected, count that. The
+# deferred/ToolSearch lane comes off the same response (name + description per
+# tool, no input schema), so both lanes are measured rather than one measured
+# and one assumed.
+#
+# A server that could not be measured contributes NOTHING to any priced figure
+# and says so on its own row and in the finding's coverage note. There is
+# deliberately no default: a default is what made the old figure wrong, and an
+# unmeasured server billed at a default is indistinguishable from a measured
+# one. Both lanes are still FIRST-CALL counts — the schema rides in the `tools`
+# array of every call in the session, and later calls are priced at the
+# cache-read rate by the per-session multiplier in the tax loop below.
 
 #: Chars-per-token conversion for text measured directly off transcripts
 #: (system-reminder blocks) — same convention as prompt_bloat.py's
@@ -118,16 +135,21 @@ CHARS_PER_TOKEN = 4
 DEADWEIGHT_HONESTY_CAVEAT = (
     "Structural detection off configured MCP servers and their measured "
     "tool-call counts, not a judgment about whether the server is useful. "
-    "Review the window before removing a server; a low-traffic server can "
+    "Review the window before removing a server. A low-traffic server can "
     "still be load-bearing for an occasional task."
 )
 
 
 # --- MCP config enumeration (read-only; never writes a config file) -------
-
-_PROJECT_CONFIG_RELPATHS = (
-    ".mcp.json", ".claude/settings.json", ".claude/settings.local.json",
-)
+#
+# WHICH config files declare a server, and where the global one lives, are
+# stated once in `core/agent_config` (`PROJECT_MCP_RELPATHS` /
+# `GLOBAL_MCP_RELPATH`) — this module used to hold a second copy of that list
+# and its own lazy `~/.claude.json` resolver. Both moved with the walk itself
+# when enumeration became an ingestion step; the lazy resolution rule did not
+# change, and `core/agent_config._settings_paths` still resolves the global
+# path against an explicit `claude_home` so a scoped run never reads the
+# operator's real file.
 
 
 def _read_json_safe(path: Path) -> dict:
@@ -145,17 +167,6 @@ def _mcp_server_names(path: Path) -> set[str]:
     return {str(name) for name in servers if str(name).strip()}
 
 
-def _global_config_path(claude_home: Path | None = None) -> Path:
-    # Resolved LAZILY (never at import time) so a test patching HOME sees the
-    # fake home, never the developer's real ~/.claude.json. `claude_home`
-    # scopes it further: under an explicit `--projects-root` the global MCP
-    # config read must stay inside the root the caller drew, or a scoped run
-    # still reports servers from the operator's real machine.
-    if claude_home is not None:
-        return claude_home / ".claude.json"
-    return Path.home() / ".claude.json"
-
-
 @dataclass
 class ConfiguredServer:
     """One MCP server as read off config, and where it reaches."""
@@ -171,67 +182,93 @@ class ConfiguredServer:
     #: these, chosen deterministically; the rest are named so a caller never
     #: silently treats the aggregate claim as fixed by editing just one.
     source_cwds: dict[str, set[str]] = field(default_factory=dict)
+    #: This server's own launch spec as declared in ``source`` (command/args/
+    #: env, or a url + transport type). Carried because the schema measurement
+    #: needs it and re-reading the config file to get it back would put the
+    #: filesystem walk back in the middle of the analysis.
+    spec: dict[str, Any] = field(default_factory=dict)
+    #: Ingested-record id of the CANONICAL source, and of every source. The
+    #: measurement is cached against these, so it survives between analysis
+    #: runs — see ``core/agent_config`` and ``core/optimize/mcp_probe``.
+    config_id: str = ""
+    config_ids: dict[str, str] = field(default_factory=dict)
 
 
 def enumerate_configured_servers(
     repo_cwds: set[str], *, claude_home: Path | None = None,
+    store: "Any | None" = None, seen_at: datetime | None = None,
 ) -> dict[str, ConfiguredServer]:
-    """Read-only enumeration of MCP servers across the three config
-    locations: project ``.mcp.json`` / ``.claude/settings*.json`` under each
-    given session cwd, plus the global ``~/.claude.json``. Never edits a
-    config file (advise-only in v1 — see the module docstring).
+    """MCP servers as INGESTED, not as re-read off disk at analysis time.
 
-    A user-scoped (global) server always wins scope over a same-named
-    project entry: the global entry already reaches every session, so
-    downgrading it to "project" would only narrow its true presence.
+    The walk still happens — nothing else can discover a config file — but it is
+    now the POPULATION step of ``core/agent_config``: it writes one record per
+    (server name, declaring config file) into the agent-config store, and this
+    function then builds its answer by reading those records back. That is what
+    lets the schema measurement in ``core/optimize/mcp_probe`` be cached against
+    a server's spec hash instead of re-taken (which means re-STARTING the
+    server) on every analysis pass.
 
-    ``repo_cwds`` is iterated in SORTED order and each project-scoped
-    server's ``source`` is chosen AFTER the full scan (most-cwds-covered
-    first, path string as the tie-break) — never "whichever cwd a raw
-    ``set`` iteration happened to visit first". The same server name
-    independently declared across several cwds (a duplicated ``.mcp.json``
-    committed into multiple worktrees, say) used to hand its ONE apply
-    target to whichever path a hash-seed-dependent set order visited first,
-    so the exact same claim's fix could stop between a sliver and nearly
-    all of the claimed tax depending on nothing but interpreter hash
-    randomization. Deterministic now, and the deterministic choice is also
-    the one that actually matters most (most sessions covered).
+    ``store`` defaults to a fresh in-memory store, so a caller with no database
+    gets exactly the enumeration the walk produced and no persistence. The
+    registered ``run(ctx)`` passes a DuckDB-backed one.
+
+    Behaviour is otherwise unchanged. A user-scoped (global) server still wins
+    scope over a same-named project entry: the global entry already reaches
+    every session, so downgrading it to "project" would only narrow its true
+    presence. Roots are still visited in SORTED order and each project-scoped
+    server's ``source`` is still chosen AFTER the full scan (most-cwds-covered
+    first, path string as the tie-break) — never "whichever cwd a raw ``set``
+    iteration happened to visit first", which used to hand the ONE apply target
+    to a hash-seed-dependent winner.
     """
+    from tokenjam.core import agent_config as ac
+
+    store = store if store is not None else ac.InMemoryAgentConfigStore()
+    at = ac.ingest_agent_config(
+        store,
+        roots=sorted(c for c in repo_cwds if c),
+        claude_home=claude_home,
+        kinds=(ac.KIND_MCP_SERVER,),
+        seen_at=seen_at,
+    )
+
     servers: dict[str, ConfiguredServer] = {}
-
-    global_path = _global_config_path(claude_home)
-    if global_path.is_file():
-        for name in _mcp_server_names(global_path):
-            servers[name] = ConfiguredServer(name=name, scope="user", source=str(global_path))
-
-    for cwd in sorted(repo_cwds):
-        if not cwd:
+    # (server name, declaring file) -> that file's own declaration of it. The
+    # canonical `source` is only settled after the whole scan, so the spec and
+    # the record id must both be resolvable per source until then — reading them
+    # off "whichever record was seen last" would attach one file's launch
+    # command to another file's chosen fix target.
+    specs: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in store.select(kind=ac.KIND_MCP_SERVER, seen_at=at):
+        spec = {k: v for k, v in record.detail.items() if k != "spec_hash"}
+        specs[(record.name, record.path)] = spec
+        if record.scope == ac.SCOPE_GLOBAL:
+            servers[record.name] = ConfiguredServer(
+                name=record.name, scope="user", source=record.path,
+                spec=spec, config_id=record.config_id,
+                config_ids={record.path: record.config_id},
+            )
             continue
-        base = Path(cwd)
-        if not base.is_dir():
-            continue
-        for rel in _PROJECT_CONFIG_RELPATHS:
-            path = base / rel
-            if not path.is_file():
-                continue
-            for name in _mcp_server_names(path):
-                existing = servers.get(name)
-                if existing is not None and existing.scope == "user":
-                    continue  # already global, broaden nothing
-                entry = servers.setdefault(
-                    name, ConfiguredServer(name=name, scope="project", source=str(path)),
-                )
-                entry.cwds.add(cwd)
-                entry.source_cwds.setdefault(str(path), set()).add(cwd)
+        existing = servers.get(record.name)
+        if existing is not None and existing.scope == "user":
+            continue  # already global, broaden nothing
+        entry = servers.setdefault(
+            record.name,
+            ConfiguredServer(name=record.name, scope="project", source=record.path),
+        )
+        entry.cwds.add(record.root)
+        entry.source_cwds.setdefault(record.path, set()).add(record.root)
+        entry.config_ids[record.path] = record.config_id
 
     for entry in servers.values():
-        if entry.scope != "project" or len(entry.source_cwds) <= 1:
-            continue
-        # Most cwds covered wins; a path-string tie-break makes the choice
-        # fully deterministic even when two sources cover the same count.
-        entry.source = min(
-            entry.source_cwds.items(), key=lambda kv: (-len(kv[1]), kv[0]),
-        )[0]
+        if entry.scope == "project" and len(entry.source_cwds) > 1:
+            # Most cwds covered wins; a path-string tie-break makes the choice
+            # fully deterministic even when two sources cover the same count.
+            entry.source = min(
+                entry.source_cwds.items(), key=lambda kv: (-len(kv[1]), kv[0]),
+            )[0]
+        entry.config_id = entry.config_ids.get(entry.source, entry.config_id)
+        entry.spec = specs.get((entry.name, entry.source), entry.spec)
     return servers
 
 
@@ -400,7 +437,7 @@ def render_mcp_remove(pre_image: str | None, server_name: str) -> tuple[str | No
     try:
         doc = json.loads(pre_image)
     except ValueError as exc:
-        return None, f"that file is not valid JSON ({exc}) — refusing to edit it."
+        return None, f"that file is not valid JSON ({exc}). Refusing to edit it."
     servers = doc.get("mcpServers") if isinstance(doc, dict) else None
     if not isinstance(servers, dict) or server_name not in servers:
         return None, f"`{server_name}` is not in that file's mcpServers block any more."
@@ -408,7 +445,7 @@ def render_mcp_remove(pre_image: str | None, server_name: str) -> tuple[str | No
     if span is None:
         return None, (
             f"could not locate `{server_name}`'s entry precisely in the file "
-            f"text — refusing a risky edit."
+            f"text. Refusing a risky edit."
         )
     start, end = span
     return pre_image[:start] + pre_image[end:], ""
@@ -430,14 +467,14 @@ def mcp_remove_precheck(source_path: str, server_name: str) -> dict:
         )}
     path = Path(source_path).expanduser()
     if not path.is_file():
-        return {"ok": False, "reason": f"{path} no longer exists on disk — nothing to edit."}
+        return {"ok": False, "reason": f"{path} no longer exists on disk. Nothing to edit."}
     try:
         json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return {"ok": False, "reason": f"{path} is not valid JSON ({exc}) — refusing to edit it."}
+        return {"ok": False, "reason": f"{path} is not valid JSON ({exc}). Refusing to edit it."}
     if not server_still_configured(server_name, str(path)):
         return {"ok": False, "reason": (
-            f"`{server_name}` is no longer in {path}'s mcpServers block — it may "
+            f"`{server_name}` is no longer in {path}'s mcpServers block. It may "
             f"already have been removed by hand."
         )}
     return {"ok": True, "reason": "", "target_path": str(path)}
@@ -492,13 +529,16 @@ def _mcp_server_from_tool_name(tool_name: str) -> str | None:
 
 
 def _session_cwd(records: list[dict[str, Any]]) -> str:
-    """Best-effort session cwd, from the first record that carries one
-    (mirrors relearn.py's ``_repo_cwd_map_for``)."""
-    for record in records[:5]:
-        cwd = record.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            return cwd
-    return ""
+    """Best-effort session cwd, from the first record that carries one.
+
+    Delegates to ``core.transcript.first_recorded_cwd``, which is the one
+    extractor this question has — relearn's repo-label map and rule placement
+    read it too, and three copies of the same loop is three chances for them to
+    disagree about which repo a session ran in.
+    """
+    from tokenjam.core.transcript import first_recorded_cwd
+
+    return first_recorded_cwd(records)
 
 
 def _bucket_for_doc(label: str) -> str:
@@ -654,46 +694,182 @@ def _dominant_model(model_counts: dict[str, int]) -> str:
     return max(model_counts.items(), key=lambda kv: kv[1])[0]
 
 
+# --- Recency-window liveness (Part A: replaces session-count liveness) ----
+#
+# ONE independent scan answers "did anything attributable to this name fire
+# in the last UNUSED_RECENCY_WINDOW_DAYS days" for BOTH lanes (MCP servers and
+# plugin components alike), plus whether the corpus even HOLDS that much
+# history to trust a negative answer. Deliberately its own pass rather than
+# reusing `per_session` / `session_paths` from the report's own since..until
+# scan: the report window is a user-facing knob (`--since`, default 30d) and
+# can be narrower than the recency window, which would make "nothing fired in
+# the sessions we happened to load" a false positive rather than a real
+# absence. Anchored at `until` (the report's own end, "now" for a live run),
+# never at `since`. The transcript parse cache (`cache_dir`) makes the
+# resulting overlap with the report's own scan cheap rather than a second
+# full read.
+
+
+@dataclass(frozen=True)
+class RecencyScan:
+    """What fired, and whether the corpus is deep enough to trust a "no"."""
+
+    #: Names (MCP server names, skill/agent slugs — whatever the caller feeds
+    #: `_bump`-style bare-suffix matching) seen attributable to at least one
+    #: call/invocation inside the trailing recency window.
+    used_names: frozenset[str] = frozenset()
+    #: True when the corpus holds a session at or before the window's own
+    #: start (`until - UNUSED_RECENCY_WINDOW_DAYS`) — i.e. enough history was
+    #: actually observed to make "nothing fired" a real negative rather than
+    #: "we only started watching five minutes ago". False means every
+    #: consumer must render "not enough history yet", never a finding.
+    corpus_sufficient: bool = False
+
+
+def _recency_matches(used_names: frozenset[str], name: str) -> bool:
+    """Whether `name` (a slug/server name a caller is asking about) was seen
+    in the recency scan — bare name OR, for a plugin-namespaced invocation
+    (`plugin:slug`), its bare suffix, mirroring
+    `core.summarize.invocations._bump`'s aliasing so a plugin's own skill
+    directory name (never namespaced on disk) still matches an invocation
+    Claude Code recorded with the plugin prefix."""
+    if not name:
+        return False
+    if name in used_names:
+        return True
+    return any(u.rsplit(":", 1)[-1] == name for u in used_names if ":" in u)
+
+
+def _scan_recency_window(
+    root: Path, until: datetime, *, cache_dir: Path | None,
+) -> RecencyScan:
+    """Independent pass over the transcript tree answering the recency
+    question for every name any caller might ask about at once — cheaper than
+    one scan per server/plugin, and the corpus-depth answer is necessarily
+    global anyway (see `RecencyScan.corpus_sufficient`).
+
+    Never raises: mirrors this module's "unreadable transcript is skipped,
+    not fatal" contract.
+    """
+    if not root.exists():
+        return RecencyScan()
+    recency_since = until - timedelta(days=UNUSED_RECENCY_WINDOW_DAYS)
+    used: set[str] = set()
+    earliest_mtime: datetime | None = None
+    for path in sorted(root.rglob("*.jsonl")):
+        if path.parent.name == "subagents":
+            continue
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        if mtime >= until:
+            continue
+        if earliest_mtime is None or mtime < earliest_mtime:
+            earliest_mtime = mtime
+        if mtime < recency_since:
+            continue
+        try:
+            records = read_records(path, cache_dir=cache_dir)
+        except Exception:
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            blocks = content if isinstance(content, list) else []
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    server = _mcp_server_from_tool_name(str(block.get("name") or ""))
+                    if server:
+                        used.add(server)
+            for name in invoked_names_in_record(record):
+                if name:
+                    used.add(name)
+    corpus_sufficient = earliest_mtime is not None and earliest_mtime <= recency_since
+    return RecencyScan(used_names=frozenset(used), corpus_sufficient=corpus_sufficient)
+
+
+def _measurement_note(measurement: Any) -> str:
+    """How this server's per-call size was arrived at, in the card's own words.
+
+    Always states the PROVENANCE, never only the number: the whole defect this
+    replaced was a figure that read as measured because it was rendered the same
+    way a measured one would be.
+    """
+    if measurement is None:
+        return "This server's schema size was not measured, so nothing is priced for it."
+    if not getattr(measurement, "ok", False):
+        detail = str(getattr(measurement, "detail", "") or "").strip()
+        return (
+            "This server's schema size could NOT be measured"
+            + (f" ({detail})" if detail else "")
+            + ". It is excluded from every priced figure here rather than "
+            "billed a default."
+        )
+    tools = int(getattr(measurement, "tool_count", 0) or 0)
+    cached = (
+        " Re-used from the last measurement. The server's launch spec is "
+        "unchanged since."
+    ) if getattr(measurement, "from_cache", False) else ""
+    return (
+        f"Measured from this server's OWN tools/list response: {tools} tool "
+        f"schema(s), serialized as they are injected.{cached}"
+    )
+
+
 def _tax_construction_note(
     non_deferred: int, deferred_sessions: int, sessions_present: int,
     *, model: str = "", input_per_mtok: float | None = None,
     usd_per_session: float | None = None,
     avg_calls_per_session: float = 1.0,
     cache_read_ratio: float = 0.0,
+    full_tokens: int | None = None,
+    deferred_tokens: int | None = None,
+    measurement: Any = None,
 ) -> str:
     if sessions_present == 0:
         return ""
+    if full_tokens is None:
+        return _measurement_note(measurement)
+    deferred_shown = deferred_tokens if deferred_tokens is not None else 0
     if deferred_sessions == 0:
         note = (
-            f"{FULL_SCHEMA_TAX_TOKENS:,} tok on the first call (full schema "
-            f"injection), cited estimate, not a live per-call measurement."
+            f"{full_tokens:,} tok on the first call (full schema injection). "
+            f"{_measurement_note(measurement)}"
         )
     elif non_deferred == 0:
         note = (
-            f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok on the first call; ToolSearch "
-            f"deferred this server's schemas in every observed session (name "
-            f"and description line only, never the full schema tax)."
+            f"{deferred_shown:,} tok on the first call. ToolSearch deferred "
+            f"this server's schemas in every observed session (name and "
+            f"description line only, never the full schema tax). "
+            f"{_measurement_note(measurement)}"
         )
     else:
         note = (
-            f"{FULL_SCHEMA_TAX_TOKENS:,} tok on the first call when fully "
-            f"loaded ({non_deferred} of {sessions_present} sessions) blended "
-            f"with {DEFERRED_SCHEMA_TAX_TOKENS:,} tok when ToolSearch defers "
-            f"this server's schemas ({deferred_sessions} of {sessions_present} "
-            f"sessions); never claims the full tax for a deferred call."
+            f"{full_tokens:,} tok on the first call when fully loaded "
+            f"({non_deferred} of {sessions_present} sessions). This blends "
+            f"with {deferred_shown:,} tok when ToolSearch defers this "
+            f"server's schemas ({deferred_sessions} of {sessions_present} "
+            f"sessions). Never claims the full tax for a deferred call. "
+            f"{_measurement_note(measurement)}"
         )
     if cache_read_ratio > 0:
         note += (
             f" The schema rides in the `tools` array of every call in the "
-            f"session, not just the first: priced at the input rate once, "
-            f"then at the cache-read rate (~{cache_read_ratio * 100:.0f}% of "
-            f"input) on every later call (avg {avg_calls_per_session:.1f} "
-            f"call(s)/session across these sessions, from each session's own "
-            f"actual call count, never a global mean/median). Simplification: "
-            f"assumes every call in a session lands inside Anthropic's "
-            f"5-minute cache TTL; a call after a longer gap would instead "
-            f"re-write the schema at the higher cache-write rate for that "
-            f"call, so this understates sessions with long gaps between calls."
+            f"session, not just the first. It is priced at the input rate "
+            f"once, then at the cache-read rate (~{cache_read_ratio * 100:.0f}% "
+            f"of input) on every later call. The call count used is avg "
+            f"{avg_calls_per_session:.1f} call(s)/session across these "
+            f"sessions, from each session's own actual call count, never a "
+            f"global mean/median. Simplification: this assumes every call in "
+            f"a session lands inside Anthropic's 5-minute cache TTL. A call "
+            f"after a longer gap would instead re-write the schema at the "
+            f"higher cache-write rate for that call. This understates "
+            f"sessions with long gaps between calls."
         )
     else:
         note += (
@@ -710,8 +886,8 @@ def _pricing_note(model: str, input_per_mtok: float | None, usd_per_session: flo
     """
     if not model or input_per_mtok is None or usd_per_session is None:
         return (
-            "No dollar estimate: no priced model observed across these "
-            "sessions (core/pricing.py has no rate for it); tokens only."
+            "No dollar estimate: no priced model was observed across these "
+            "sessions (core/pricing.py has no rate for it). Tokens only."
         )
     return (
         f"Priced at {model}'s input rate (${input_per_mtok:.2f}/MTok via "
@@ -730,7 +906,13 @@ class ServerDeadweight:
     sessions_present:                 int
     invocations:                      int
     deferred_sessions:                int
-    dead:                             bool
+    #: True only when this server was PRESENT in at least one session AND
+    #: nothing attributable to it fired anywhere in the trailing
+    #: `UNUSED_RECENCY_WINDOW_DAYS`-day recency window AND the corpus holds
+    #: enough history to trust that negative (`not insufficient_history`).
+    #: Replaces the old session-count gate (`MIN_SESSIONS_DEADWEIGHT`) — see
+    #: `_scan_recency_window`.
+    unused:                           bool
     #: The LITERAL (undiscounted) count of schema-injection tokens sent —
     #: the schema rides in the `tools` array of every call regardless of
     #: caching, so this is bytes actually transmitted, never the
@@ -757,6 +939,10 @@ class ServerDeadweight:
     estimated_tax_tokens_window:      int
     tax_construction:                 str
     fix:                              str
+    #: True when the corpus does not reach back far enough to answer the
+    #: recency question at all — never both this AND `unused`. A caller must
+    #: render "not enough history yet", never a finding, when this is set.
+    insufficient_history:             bool = False
     example_sessions:                 list[str] = field(default_factory=list)
     #: Dollar conversion of the token tax, priced through core/pricing.py at
     #: the dominant model observed across this server's present sessions.
@@ -778,6 +964,118 @@ class ServerDeadweight:
     #: aggregated across multiple source files must not let its one fix
     #: action silently imply full coverage.
     primary_source_sessions:         int = 0
+    #: Tokens THIS server's own tool schemas were measured to inject on a call
+    #: (`core/optimize/mcp_probe`). ``None`` means the measurement did not
+    #: happen — never a default, and never a zero, because a zero here would
+    #: read as "this server costs nothing".
+    schema_tokens_measured:          int | None = None
+    #: The same measurement for the deferred/ToolSearch listing (name and
+    #: description per tool, no input schema), off the same response.
+    deferred_tokens_measured:        int | None = None
+    #: How many tool schemas that measurement covered.
+    measured_tool_count:             int = 0
+    #: ``core/agent_config``'s MEASURE_* vocabulary: which of "measured",
+    #: "unreachable", "unsupported" or "skipped" happened.
+    measurement_status:              str = ""
+    #: Why, in words, when it did not succeed.
+    measurement_detail:              str = ""
+
+
+@dataclass
+class PluginComponent:
+    """One always-resident piece a plugin contributes: a skill, an agent, or
+    a plugin-contributed MCP server. The unit Part C's rollup reasons over —
+    enable/disable is whole-plugin only (`claude plugin disable <name>`;
+    `enabledPlugins` is a binary map, verified against the shipping CLI), so
+    there is no per-component fix, only a per-component USED signal that
+    decides whether the PLUGIN'S fix may be offered at all.
+    """
+    kind:                str    # "skill" | "agent" | "mcp_server"
+    name:                str    # slug (skill/agent) or server name
+    #: This component's own resident tokens. `None` for an `mcp_server` whose
+    #: schema could not be measured — never a zero, which would read as "this
+    #: component costs nothing" (identical convention to
+    #: `ServerDeadweight.schema_tokens_measured`).
+    resident_tokens:     int | None
+    #: `None` = insufficient corpus history to say either way. `True` = fired
+    #: within the recency window. `False` = did not.
+    used:                bool | None
+    #: Why `resident_tokens` is `None`, when it is. Empty otherwise.
+    measurement_note:    str = ""
+
+
+@dataclass
+class PluginDeadweight:
+    """One INSTALLED Claude Code plugin, and whether it costs anything.
+
+    The MCP lane's shape applied to a different dependency: something installed
+    once, paid for continuously, and possibly never used, whose fix is a
+    one-line reversible edit.
+
+    Every installed plugin gets a row, including the ones that cost nothing —
+    "disabled, so free" and "we never looked" must not be the same absence, and
+    a user deciding whether to ENABLE something large is exactly who needs the
+    disabled rows.
+
+    Three-state gating (root anti-pattern 22 in the meta-repo `CLAUDE.md`):
+    a component's `used` can be unknown (`insufficient_history`), known-unused
+    (`unused`, only when EVERY component agrees), or known-used-somewhere
+    (`partial_use_no_fix` when some but not all components fired — the
+    all-or-nothing toggle means there is genuinely no fix to offer there, so
+    the row must say so plainly rather than dangle a number with no action
+    behind it).
+    """
+    name:                     str
+    enabled:                  bool
+    install_scope:            str
+    #: Both gates passed: enabled AND installed at a scope that loads globally.
+    resident:                 bool
+    #: Which gate it failed, in words. Empty when resident.
+    not_resident_because:     str
+    #: Every skill, agent and plugin-contributed MCP server this plugin owns.
+    #: Empty for a non-resident plugin (nothing is resident to enumerate) —
+    #: see `unused`'s vacuous-truth guard for why an empty list must never
+    #: read as "every component agrees".
+    components:               list[PluginComponent] = field(default_factory=list)
+    skills:                   int = 0
+    agents:                   int = 0
+    #: Sum of every MEASURED component's own `resident_tokens` — the `name:
+    #: description` listing surface (skills, agents) plus any
+    #: plugin-contributed MCP server's measured schema size, and NOTHING
+    #: else. A skill/agent BODY arrives on invocation, not at session start,
+    #: so counting bodies would not be a conservative overestimate; it would
+    #: be a different number about a different thing. Components that could
+    #: not be measured (`PluginComponent.resident_tokens is None`) are
+    #: excluded, so this is a FLOOR when `components_unmeasured` is nonzero.
+    resident_tokens:          int = 0
+    #: How many of `components` are an `mcp_server` whose schema could not be
+    #: measured. The blind spot `resident_tokens` doesn't disclose on its own.
+    components_unmeasured:    int = 0
+    #: `pluginUsage` count out of `~/.claude.json`. `None` means Claude Code
+    #: never recorded this plugin at all, which is not the same statement as
+    #: "recorded and never used". INFORMATIONAL ONLY: this is a cumulative,
+    #: non-timestamped counter (see `core/agent_config.plugin_usage`), so it
+    #: never decides `unused` — only the recency scan does.
+    usage_count:              int | None = None
+    sessions_present:         int = 0
+    #: True only when `components` is non-empty, at least one component was
+    #: actually priced (`resident_tokens > 0`), and EVERY component's `used`
+    #: resolved to `False` (never vacuously true over an empty or
+    #: all-unknown set — see the module's recency-scan docs).
+    unused:                   bool = False
+    #: True when at least one component's `used` is `None` (insufficient
+    #: corpus history) and no component is positively known used — renders as
+    #: "not enough history yet", never a number, never a fix arrow.
+    insufficient_history:     bool = False
+    #: True when components disagree (some used, some not) — the toggle is
+    #: whole-plugin, so there is genuinely no fix to offer; the row must name
+    #: the unused components and say plainly that no action is available.
+    partial_use_no_fix:       bool = False
+    estimated_tax_tokens_window: int = 0
+    estimated_tax_usd_window:    float | None = None
+    priced_model:             str = ""
+    tax_construction:         str = ""
+    fix:                      str = ""
 
 
 @dataclass
@@ -796,7 +1094,23 @@ class DeadweightFinding:
     sessions_scanned:             int = 0
     configured_servers:           int = 0
     servers:                      list[ServerDeadweight] = field(default_factory=list)
-    dead_servers:                 list[ServerDeadweight] = field(default_factory=list)
+    #: Configured MCP servers nothing invoked within the recency window (see
+    #: `UNUSED_RECENCY_WINDOW_DAYS`). Named `unused_servers`, not `dead_servers`
+    #: — "dead" implied a judgment about the server; this is a structural
+    #: recency observation about the WINDOW.
+    unused_servers:               list[ServerDeadweight] = field(default_factory=list)
+    #: Every INSTALLED plugin, resident or not (see `PluginDeadweight`).
+    plugins:                      list[PluginDeadweight] = field(default_factory=list)
+    #: Resident plugins whose every component is unused — the ones with a fix.
+    #: A plugin with SOME unused components but at least one used one is
+    #: never here (see `PluginDeadweight.partial_use_no_fix`): the toggle is
+    #: whole-plugin, so partial disuse has no fix to offer.
+    unused_plugins:               list[PluginDeadweight] = field(default_factory=list)
+    #: How many installed plugins actually reach the model. The gap between
+    #: this and `len(plugins)` is the whole point of the two gates: on a real
+    #: machine most of what is installed is not loaded, and a figure built from
+    #: installed-ness overstates by orders of magnitude.
+    plugins_resident:             int = 0
     tax_table:                    list[ContextTaxRow] = field(default_factory=list)
     past_overspend_tokens: int | None = None
     past_overspend_usd:    float | None = None
@@ -833,6 +1147,16 @@ class DeadweightFinding:
     #: has to infer "vanished repo" vs. "genuinely no config" from silence.
     #: Mirrors `context_resend._coverage_note` / `_relearn_coverage_note`.
     coverage_note:                    str = ""
+    #: How many configured servers had their schema size actually measured, and
+    #: how many did not. The second number is the size of this finding's blind
+    #: spot: those servers are excluded from every priced figure, so a small
+    #: total with a large `servers_unmeasured` is "we could not look", never
+    #: "there is little here".
+    servers_measured:                 int = 0
+    servers_unmeasured:               int = 0
+    #: Plain-language statement of that blind spot, empty when nothing was
+    #: unmeasured. Rendered beside the figure, never instead of it.
+    measurement_note:                 str = ""
 
 
 # --- Unresolvable-path coverage (Defect 1: silence when a cwd is gone) ----
@@ -843,9 +1167,11 @@ def _session_usage_from_records(records: list[dict[str, Any]]) -> AssistantUsage
     ``core.usage.session_usage``, just replayed over records this module
     already parsed once rather than re-reading the raw lines a second time.
 
-    This is real usage (what the session actually cost), never to be
-    confused with ``FULL_SCHEMA_TAX_TOKENS``/``DEFERRED_SCHEMA_TAX_TOKENS``
-    above, which model the MCP schema-injection TAX, not actual spend.
+    This is real usage (what the session actually cost), never to be confused
+    with the per-server measurements in ``SchemaMeasurement`` (surfaced on the
+    finding as ``ServerDeadweight.schema_tokens_measured`` /
+    ``deferred_tokens_measured``), which size the MCP schema-injection TAX
+    rather than actual spend.
     """
     by_key: dict[str, AssistantUsage] = {}
     for line_no, record in enumerate(records, start=1):
@@ -936,7 +1262,7 @@ def _unresolvable_coverage_note(finding: DeadweightFinding) -> str:
     elif finding.unresolvable_tokens:
         parts.append(
             f"~{finding.unresolvable_tokens:,} tok of usage sits behind "
-            f"those sessions; no priced model was observed across them, so "
+            f"those sessions. No priced model was observed across them, so "
             f"no dollar figure is stated."
         )
     parts.append(
@@ -947,6 +1273,249 @@ def _unresolvable_coverage_note(finding: DeadweightFinding) -> str:
     return " ".join(parts)
 
 
+def _plugin_rows(
+    store: Any,
+    *,
+    claude_dir: Path | None,
+    claude_home: Path | None,
+    seen_at: datetime | None,
+    session_calls: list[int],
+    input_per_mtok: float | None,
+    cache_read_ratio: float,
+    priced_model: str,
+    recency: RecencyScan,
+    measure_schemas: bool,
+    schema_measurer: Any | None = None,
+) -> list[PluginDeadweight]:
+    """The plugin lane: what an ENABLED, IN-SCOPE plugin costs every session,
+    rolled up to ONE verdict per plugin because enable/disable is whole-plugin
+    only (verified against the shipping CLI: `enabledPlugins` is a binary map,
+    `claude plugin disable <name>` the real command — there is no way to
+    disable one skill inside a plugin).
+
+    Two RESIDENCY gates, and neither is visible on the filesystem — a plugin
+    being installed on disk says nothing about whether it reaches the model.
+    ``core/agent_config.scan_plugins`` applies both and also enumerates each
+    resident plugin's skills, agents, and its own contributed MCP servers
+    (``detail["components"]`` plus sibling ``KIND_MCP_SERVER`` records tagged
+    ``detail["plugin"]``); this function prices what survives, against the
+    same per-session call multiplier the MCP lane uses (the listing rides in
+    the system prompt of every call, so later calls are cache-read rather
+    than re-charged at the input rate), and a SEPARATE liveness gate per
+    component: whether anything attributable to it fired within
+    ``recency`` (see ``_scan_recency_window``) — never the old
+    session-count/usage-count gates.
+
+    A resident plugin is present in EVERY session, which is what makes it a
+    standing cost rather than a per-project one — and what makes the decision to
+    enable one worth seeing priced before it is made.
+    """
+    from tokenjam.core import agent_config as ac
+    from tokenjam.core.optimize.mcp_probe import resolve_schema_measurements
+
+    at = ac.ingest_agent_config(
+        store, kinds=(ac.KIND_PLUGIN,), claude_dir=claude_dir, seen_at=seen_at,
+    )
+    usage = ac.plugin_usage(claude_home)
+    sessions_present = len(session_calls)
+
+    # Plugin-contributed MCP servers landed in the SAME ingest pass as
+    # KIND_MCP_SERVER records tagged with their owning plugin (`scan_plugins`
+    # emits both kinds together). Grouped by plugin so each plugin's
+    # `resolve_schema_measurements` call sees only ITS OWN servers, keyed by
+    # their real bare name — the name that rides in `mcp__<name>__<tool>` and
+    # must stay correct for both the schema measurement and the recency
+    # attribution below, never a composite key that would corrupt it.
+    servers_by_plugin: dict[str, dict[str, ConfiguredServer]] = {}
+    for record in store.select(kind=ac.KIND_MCP_SERVER, seen_at=at):
+        plugin = record.detail.get("plugin")
+        if not plugin:
+            continue
+        spec = {k: v for k, v in record.detail.items() if k not in ("spec_hash", "plugin")}
+        servers_by_plugin.setdefault(str(plugin), {})[record.name] = ConfiguredServer(
+            name=record.name, scope="plugin", source=record.path,
+            spec=spec, config_id=record.config_id,
+        )
+
+    rows: list[PluginDeadweight] = []
+    for record in store.select(kind=ac.KIND_PLUGIN, seen_at=at):
+        detail = record.detail
+        resident = bool(detail.get("resident"))
+        count = usage.get(record.name)
+
+        components: list[PluginComponent] = []
+        if resident:
+            for c in detail.get("components") or []:
+                slug = str(c.get("slug") or "")
+                kind = str(c.get("kind") or "")
+                tokens = ac.tokens_for_chars(int(c.get("chars") or 0))
+                used = (
+                    _recency_matches(recency.used_names, slug)
+                    if recency.corpus_sufficient else None
+                )
+                components.append(PluginComponent(
+                    kind=kind, name=slug, resident_tokens=tokens, used=used,
+                ))
+            plugin_servers = servers_by_plugin.get(record.name, {})
+            measurements = (
+                resolve_schema_measurements(
+                    plugin_servers, store=store,
+                    enabled=measure_schemas, measurer=schema_measurer,
+                ) if plugin_servers else {}
+            )
+            for server_name, server in sorted(plugin_servers.items()):
+                measurement = measurements.get(server_name)
+                mtokens = measurement.tokens if measurement is not None else None
+                used = (
+                    _recency_matches(recency.used_names, server_name)
+                    if recency.corpus_sufficient else None
+                )
+                components.append(PluginComponent(
+                    kind="mcp_server", name=server_name, resident_tokens=mtokens,
+                    used=used,
+                    measurement_note="" if mtokens is not None else _measurement_note(measurement),
+                ))
+
+        resident_tokens = sum(c.resident_tokens or 0 for c in components)
+        components_unmeasured = sum(
+            1 for c in components if c.kind == "mcp_server" and c.resident_tokens is None
+        )
+
+        tax_window = 0
+        if resident and resident_tokens:
+            for calls in session_calls:
+                tax_window += round(
+                    resident_tokens * (1.0 + (max(calls, 1) - 1) * cache_read_ratio)
+                )
+        usd_window = (
+            round(tax_window / 1_000_000 * input_per_mtok, 6)
+            if input_per_mtok is not None and tax_window else None
+        )
+
+        # Three-state rollup. `recency.corpus_sufficient is False` means every
+        # component's `used` above is `None` (insufficient history) — never
+        # mix that with a positive "unused" claim. `all()`/`any()` over an
+        # EMPTY `components` list would otherwise read as vacuously unused
+        # (Critical Rule 42 in `.claude/rules/optimize-analyzers.md`);
+        # `bool(components) and resident_tokens > 0` is the guard against
+        # exactly that (a plugin with zero skills/agents/servers, or only
+        # unmeasured MCP servers, has nothing priced and gets no verdict at
+        # all).
+        insufficient_history = resident and bool(components) and not recency.corpus_sufficient
+        unused = False
+        partial_use_no_fix = False
+        if resident and components and recency.corpus_sufficient:
+            all_used = all(c.used for c in components)
+            none_used = not any(c.used for c in components)
+            unused = none_used and resident_tokens > 0
+            partial_use_no_fix = not all_used and not none_used
+
+        skills = sum(1 for c in components if c.kind == "skill")
+        agents = sum(1 for c in components if c.kind == "agent")
+        mcp_count = sum(1 for c in components if c.kind == "mcp_server")
+
+        parts: list[str] = []
+        if resident:
+            if skills or agents:
+                parts.append(
+                    f"{sum(c.resident_tokens or 0 for c in components if c.kind != 'mcp_server'):,} "
+                    f"tok resident per call: the `name: description` line of "
+                    f"each of this plugin's {skills} skill(s) and {agents} "
+                    f"agent(s), measured off the installed files. BODIES are "
+                    f"NOT counted. A body arrives when the skill/agent is "
+                    f"invoked, not at session start."
+                )
+            if mcp_count:
+                measured_mcp = mcp_count - components_unmeasured
+                note = (
+                    f"Plus {mcp_count} plugin-contributed MCP server(s), "
+                    f"{measured_mcp} measured via core/optimize/mcp_probe "
+                    f"(same live-probe path a user-declared server uses)."
+                )
+                if components_unmeasured:
+                    note += (
+                        f" {components_unmeasured} could not be measured and "
+                        f"are excluded from the total."
+                    )
+                parts.append(note)
+            if not parts:
+                parts.append(
+                    "No skill, agent or MCP server was found for this "
+                    "plugin. Nothing to price."
+                )
+        else:
+            parts.append(
+                f"Not resident: {detail.get('not_resident_because') or 'gated off'}. "
+                f"Nothing is priced for it."
+            )
+        construction = " ".join(parts)
+
+        fix = ""
+        if unused:
+            names = ", ".join(f"{c.kind} `{c.name}`" for c in components)
+            fix = (
+                f"`{record.name}` unused: nothing fired for {names} in "
+                f"{UNUSED_RECENCY_WINDOW_DAYS} days. "
+                + fix_text("deadweight.disable_unused_plugin")
+            )
+        elif partial_use_no_fix:
+            unused_names = ", ".join(
+                f"{c.kind} `{c.name}`" for c in components if c.used is False
+            )
+            fix = (
+                f"`{record.name}`: {unused_names} unused, another component "
+                f"used. " + fix_text("deadweight.plugin_partial_use_no_fix")
+            )
+
+        rows.append(PluginDeadweight(
+            name=record.name,
+            enabled=bool(detail.get("enabled")),
+            install_scope=str(detail.get("install_scope") or ""),
+            resident=resident,
+            not_resident_because=str(detail.get("not_resident_because") or ""),
+            components=components,
+            skills=skills,
+            agents=agents,
+            resident_tokens=resident_tokens,
+            components_unmeasured=components_unmeasured,
+            usage_count=count,
+            sessions_present=sessions_present if resident else 0,
+            unused=unused,
+            insufficient_history=insufficient_history,
+            partial_use_no_fix=partial_use_no_fix,
+            estimated_tax_tokens_window=tax_window,
+            estimated_tax_usd_window=usd_window,
+            priced_model=priced_model if usd_window is not None else "",
+            tax_construction=construction,
+            fix=fix,
+        ))
+    rows.sort(key=lambda p: (not p.resident, -p.estimated_tax_tokens_window, p.name))
+    return rows
+
+
+def _measurement_coverage_note(finding: DeadweightFinding) -> str:
+    """State, in words, how much of the configured surface was actually measured.
+
+    The counterpart to ``_unresolvable_coverage_note`` for the other blind spot
+    this analyzer has. A figure built from three of eleven servers is a FLOOR,
+    and a reader who is shown only the figure has no way to know that — the same
+    class of defect as the flat constant this measurement replaced, just one
+    layer up.
+    """
+    if finding.servers_unmeasured <= 0:
+        return ""
+    total = finding.servers_measured + finding.servers_unmeasured
+    return (
+        f"MEASUREMENT COVERAGE. {finding.servers_measured:,} of {total:,} "
+        f"configured MCP server(s) had their schema size measured from the "
+        f"server's own tools/list response. The other "
+        f"{finding.servers_unmeasured:,} could not be measured and contribute "
+        f"NOTHING to any figure here. They are excluded rather than billed a "
+        f"default, so every total on this finding is a floor. Each server's "
+        f"own row says which of them it is and why."
+    )
+
+
 # --- Orchestration (pure, no ctx dependency — testable directly) ----------
 
 def compute_deadweight_finding(
@@ -955,8 +1524,11 @@ def compute_deadweight_finding(
     *,
     projects_root: Path | str | None = None,
     claude_home: Path | None = None,
-    min_sessions: int = MIN_SESSIONS_DEADWEIGHT,
+    claude_dir: Path | None = None,
     cache_dir: Path | None = None,
+    store: Any | None = None,
+    measure_schemas: bool = True,
+    schema_measurer: Any | None = None,
 ) -> DeadweightFinding:
     """Full pipeline over a window of Claude Code transcripts. Never raises —
     a missing projects root, an unreadable transcript, or a malformed config
@@ -969,10 +1541,13 @@ def compute_deadweight_finding(
     ratio on top of every cost analyzer's window figure alike, so a window
     parameter has nothing left to do here.
 
-    ``min_sessions`` overrides ``MIN_SESSIONS_DEADWEIGHT`` (config-overridable
-    via ``core.config.OptimizeConfig.min_sessions_deadweight``); the module
-    constant remains the default so a caller that omits it sees today's
-    behaviour unchanged.
+    Liveness (which servers/plugin components are UNUSED) is answered by an
+    independent recency scan anchored at ``until`` — see
+    ``UNUSED_RECENCY_WINDOW_DAYS`` / ``_scan_recency_window`` — never by a
+    session-count threshold against ``since``..``until``. That window is a
+    fixed product constant, not a parameter: `since`/`until` still bound
+    everything this function PRICES (the tax figures stay window-scoped,
+    past-tense observations), they just no longer decide what counts as used.
 
     ``cache_dir``, when given, transparently caches each transcript's parsed
     records on disk (``core.transcript_cache``) so a re-run over an unchanged
@@ -1067,10 +1642,83 @@ def compute_deadweight_finding(
         finding.unresolvable_unpriced_sessions = unpriced_sessions
         finding.coverage_note = _unresolvable_coverage_note(finding)
 
-    configured = enumerate_configured_servers(repo_cwds, claude_home=claude_home)
+    from tokenjam.core import agent_config as ac
+    from tokenjam.core.optimize.mcp_probe import resolve_schema_measurements
+
+    config_store = store if store is not None else ac.InMemoryAgentConfigStore()
+    # ONE recency scan answers "unused?" for every MCP server AND every
+    # plugin component below — see the module docstring above
+    # `_scan_recency_window` for why this is its own independent pass rather
+    # than a re-read of `per_session`/`since`.
+    recency = _scan_recency_window(root, until, cache_dir=cache_dir)
+    # The plugin lane. Runs BEFORE the `if not configured: return` below and is
+    # independent of it: a user with no MCP servers at all can still be paying
+    # for an enabled plugin every session, and hanging this off the MCP early
+    # return would make it silent in exactly that case.
+    window_models: dict[str, int] = {}
+    window_volume_at: list[tuple[datetime | None, float]] = []
+    for session_id, signal in per_session.items():
+        for model, count in signal.models.items():
+            window_models[model] = window_models.get(model, 0) + count
+            window_volume_at.append((session_mtimes.get(session_id), float(count)))
+    window_model = _dominant_model(window_models)
+    window_rate: float | None = None
+    window_cache_ratio = 0.0
+    if window_model:
+        from tokenjam.core.pricing import provider_for_model as _provider
+
+        rates = blended_rates(
+            _provider(window_model) or "unknown", window_model, window_volume_at,
+        )
+        if rates is not None and rates.input_per_mtok > 0:
+            window_rate = rates.input_per_mtok
+            window_cache_ratio = rates.cache_read_per_mtok / rates.input_per_mtok
+        else:
+            window_model = ""
+    # A caller that scoped the MCP read away from the operator's real machine
+    # meant to scope the PLUGIN read too. Deriving the plugin directory from
+    # `claude_home` when it was not given explicitly is what stops an isolated
+    # run from silently reading the operator's real `~/.claude/plugins` — the
+    # same escape `_settings_paths` documents one level up.
+    plugin_dir = claude_dir
+    if plugin_dir is None:
+        plugin_dir = (claude_home / ".claude") if claude_home is not None else None
+    finding.plugins = _plugin_rows(
+        config_store,
+        claude_dir=plugin_dir,
+        claude_home=claude_home,
+        seen_at=None,
+        session_calls=[max(s.assistant_turns, 1) for s in per_session.values()],
+        input_per_mtok=window_rate,
+        cache_read_ratio=window_cache_ratio,
+        priced_model=window_model,
+        recency=recency,
+        measure_schemas=measure_schemas,
+        schema_measurer=schema_measurer,
+    )
+    finding.plugins_resident = sum(1 for p in finding.plugins if p.resident)
+    finding.unused_plugins = [p for p in finding.plugins if p.unused]
+
+    configured = enumerate_configured_servers(
+        repo_cwds, claude_home=claude_home, store=config_store,
+    )
     finding.configured_servers = len(configured)
     if not configured:
+        _finish_totals(finding, configured=configured)
         return finding
+
+    # The per-server schema measurement (see `core/optimize/mcp_probe`). Cached
+    # in the same store the enumeration just populated, keyed on the server's
+    # spec hash, so an unchanged server is measured ONCE rather than started
+    # again on every analysis pass.
+    measurements = resolve_schema_measurements(
+        configured, store=config_store,
+        enabled=measure_schemas, measurer=schema_measurer,
+    )
+    finding.servers_measured = sum(
+        1 for m in measurements.values() if m.tokens is not None
+    )
+    finding.servers_unmeasured = len(measurements) - finding.servers_measured
 
     from tokenjam.core.pricing import provider_for_model
 
@@ -1136,7 +1784,20 @@ def compute_deadweight_finding(
                 deferred_calls = 0
             session_presence.append((max(deferred_calls, 0), total_calls - max(deferred_calls, 0)))
 
-        dead = sessions_present >= min_sessions and invocations == 0
+        # Liveness is the recency scan's answer, not a session-count floor
+        # (Critical Rule / Part A: retires MIN_SESSIONS_DEADWEIGHT). A server
+        # must have been PRESENT at least once this window (there is a real
+        # standing tax to report) AND unseen anywhere in the trailing
+        # `UNUSED_RECENCY_WINDOW_DAYS`-day window AND the corpus must hold
+        # enough history to trust that negative — never vacuously true for a
+        # server present zero times, which is what keeps a $0 row from ever
+        # carrying a disable arrow (Part C).
+        insufficient_history = sessions_present > 0 and not recency.corpus_sufficient
+        unused = (
+            sessions_present > 0
+            and recency.corpus_sufficient
+            and not _recency_matches(recency.used_names, server.name)
+        )
         non_deferred = max(sessions_present - deferred_sessions, 0)
 
         # Price the token tax through core/pricing.py at the dominant model
@@ -1182,20 +1843,40 @@ def compute_deadweight_finding(
         # answer "how many tokens were actually sent" rather than silently
         # reporting a $-shaped number through a field named `tokens`
         # (Critical Rule 28: both fields must answer the same question).
+        #
+        # BOTH per-call bases come from this server's own measurement. When it
+        # has none, every quantity below stays at zero and the row is excluded
+        # from the finding's priced totals — never billed a stand-in, which is
+        # the exact defect the flat 25K constant was.
+        measurement = measurements.get(server.name)
+        measured_full = measurement.tokens if measurement is not None else None
+        measured_deferred = (
+            measurement.deferred_tokens if measurement is not None else None
+        )
+        if measured_full is not None and measured_deferred is None:
+            # A cached measurement predating the deferred lane. The deferred
+            # size is genuinely unknown, so deferred calls are charged nothing
+            # rather than charged the full schema they demonstrably did not
+            # carry — understating a deferred session beats overstating it.
+            measured_deferred = 0
+
         tax_window = 0
         tokens_window_real = 0
         total_calls = 0
+        full_base = measured_full or 0
+        deferred_base = measured_deferred or 0
         for deferred_calls, full_calls in session_presence:
-            if deferred_calls > 0:
-                tax_window += round(
-                    DEFERRED_SCHEMA_TAX_TOKENS * (1.0 + (deferred_calls - 1) * cache_read_ratio)
-                )
-                tokens_window_real += DEFERRED_SCHEMA_TAX_TOKENS * deferred_calls
-            if full_calls > 0:
-                tax_window += round(
-                    FULL_SCHEMA_TAX_TOKENS * (1.0 + (full_calls - 1) * cache_read_ratio)
-                )
-                tokens_window_real += FULL_SCHEMA_TAX_TOKENS * full_calls
+            if measured_full is not None:
+                if deferred_calls > 0:
+                    tax_window += round(
+                        deferred_base * (1.0 + (deferred_calls - 1) * cache_read_ratio)
+                    )
+                    tokens_window_real += deferred_base * deferred_calls
+                if full_calls > 0:
+                    tax_window += round(
+                        full_base * (1.0 + (full_calls - 1) * cache_read_ratio)
+                    )
+                    tokens_window_real += full_base * full_calls
             total_calls += deferred_calls + full_calls
         tax_per_session = round(tax_window / sessions_present) if sessions_present else 0
         tokens_per_session_real = (
@@ -1205,7 +1886,7 @@ def compute_deadweight_finding(
 
         usd_per_session: float | None = None
         usd_window: float | None = None
-        if input_per_mtok is not None:
+        if input_per_mtok is not None and measured_full is not None:
             usd_per_session = round(tax_per_session / 1_000_000 * input_per_mtok, 6)
             usd_window = round(tax_window / 1_000_000 * input_per_mtok, 6)
 
@@ -1225,21 +1906,24 @@ def compute_deadweight_finding(
         # left to narrow: offering "project-scope it" there is a no-op that
         # would deliver $0 of the claim, not a genuine second option.
         action = "Remove or project-scope" if server.scope == "user" else "Remove"
+        # GROUNDING here, POLICY in the catalog. The rule about a server
+        # declared in several files — that editing one stops the tax only for
+        # the sessions reaching it through that file — used to be APPENDED to
+        # this string with `+=`, which the prose guard did not inspect at all.
+        # So a durable instruction lived here, unlinted, hidden behind a
+        # grounded sentence. What is left below is only this row's evidence.
         fix = (
-            f"{action} the `{server.name}` MCP server ({server.source}); "
-            f"zero tool calls across {sessions_present} session(s) in this "
-            f"window."
+            f"{action} the `{server.name}` MCP server ({server.source}). "
+            f"Zero tool calls across {sessions_present} session(s) in this "
+            f"window. " + fix_text("deadweight.remove_unused_server")
         )
         if other_sources:
             plural = "" if len(other_sources) == 1 else "s"
             fix += (
-                f" `{server.name}` is ALSO independently declared in "
-                f"{len(other_sources)} other location{plural}, not touched "
-                f"by this edit: {'; '.join(other_sources)}. Removing only "
-                f"{server.source} stops the tax for {primary_source_sessions} "
-                f"of the {sessions_present} session(s) counted here; the "
-                f"remaining {sessions_present - primary_source_sessions} "
-                f"session(s) need their own location edited too."
+                f" Also declared in {len(other_sources)} other "
+                f"location{plural}: {'; '.join(other_sources)}. Editing "
+                f"{server.source} covers {primary_source_sessions} of the "
+                f"{sessions_present} session(s) counted here."
             )
 
         row = ServerDeadweight(
@@ -1249,7 +1933,7 @@ def compute_deadweight_finding(
             sessions_present=sessions_present,
             invocations=invocations,
             deferred_sessions=deferred_sessions,
-            dead=dead,
+            unused=unused,
             estimated_tax_tokens_per_session=tokens_per_session_real,
             estimated_tax_tokens_window=tokens_window_real,
             tax_construction=_tax_construction_note(
@@ -1258,17 +1942,33 @@ def compute_deadweight_finding(
                 usd_per_session=usd_per_session,
                 avg_calls_per_session=avg_calls_per_session,
                 cache_read_ratio=cache_read_ratio,
+                full_tokens=measured_full,
+                deferred_tokens=measured_deferred,
+                measurement=measurement,
             ),
             fix=fix,
+            insufficient_history=insufficient_history,
             example_sessions=example_sessions,
             priced_model=priced_model,
             estimated_tax_usd_per_session=usd_per_session,
             estimated_tax_usd_window=usd_window,
             other_sources=other_sources,
             primary_source_sessions=primary_source_sessions,
+            schema_tokens_measured=measured_full,
+            deferred_tokens_measured=measured_deferred if measured_full is not None else None,
+            measured_tool_count=(
+                int(getattr(measurement, "tool_count", 0) or 0)
+                if measurement is not None else 0
+            ),
+            measurement_status=(
+                str(getattr(measurement, "status", "")) if measurement is not None else ""
+            ),
+            measurement_detail=(
+                str(getattr(measurement, "detail", "")) if measurement is not None else ""
+            ),
         )
         finding.servers.append(row)
-        if sessions_present > 0:
+        if sessions_present > 0 and measured_full is not None:
             tax_rows.append(ContextTaxRow(
                 source=f"MCP schema: {server.name}",
                 sessions=sessions_present,
@@ -1279,8 +1979,8 @@ def compute_deadweight_finding(
             ))
 
     finding.servers.sort(key=lambda s: s.sessions_present, reverse=True)
-    finding.dead_servers = sorted(
-        (s for s in finding.servers if s.dead),
+    finding.unused_servers = sorted(
+        (s for s in finding.servers if s.unused),
         key=lambda s: s.sessions_present, reverse=True,
     )
 
@@ -1311,25 +2011,60 @@ def compute_deadweight_finding(
     finding.tax_table = tax_rows
 
     # Dedup rule (spec, Component C): the recoverable total is ONLY the
-    # dead-weight servers' own tax. The C2 tax table repeats a "MCP schema:
-    # <name>" row for EVERY configured server (dead or alive) for visibility,
-    # but that row never feeds this sum — so a server's tax is never counted
-    # twice between the tax table and a dead-weight proposal.
-    if finding.dead_servers:
+    # unused servers' own tax. The C2 tax table repeats a "MCP schema:
+    # <name>" row for EVERY configured server (unused or alive) for
+    # visibility, but that row never feeds this sum — so a server's tax is
+    # never counted twice between the tax table and an unused-server proposal.
+    _finish_totals(finding, configured=configured)
+    return finding
+
+
+def _finish_totals(finding: DeadweightFinding, *, configured: dict) -> DeadweightFinding:
+    """Roll the recoverable totals up and state what is missing from them.
+
+    Split out because it has to run on BOTH exits from the pipeline: a window
+    with no configured MCP server can still carry an unused plugin, and leaving
+    this behind the MCP early return would make the plugin lane silent in
+    exactly the case where it is the only thing there is to say.
+    """
+    measured_unused = [
+        s for s in finding.unused_servers if s.schema_tokens_measured is not None
+    ]
+    unmeasured_unused = len(finding.unused_servers) - len(measured_unused)
+    if measured_unused:
         finding.past_overspend_tokens = sum(
-            s.estimated_tax_tokens_window for s in finding.dead_servers
+            s.estimated_tax_tokens_window for s in measured_unused
         )
         priced = [
-            s.estimated_tax_usd_window for s in finding.dead_servers
+            s.estimated_tax_usd_window for s in measured_unused
             if s.estimated_tax_usd_window is not None
         ]
-        basis = (
-            f"sum of each dead server's schema-injection tax observed over "
-            f"this window ({FULL_SCHEMA_TAX_TOKENS:,} tok/session full, "
-            f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok/session when deferred); the "
-            f"tax table's own MCP-schema rows are informational only and "
-            f"never double-count into this total."
+        sizes = sorted(
+            s.schema_tokens_measured for s in measured_unused
+            if s.schema_tokens_measured is not None
         )
+        # The RANGE, not one number: each server is measured separately now, so
+        # a single figure here would recreate exactly the "one constant stands
+        # for every server" claim this measurement replaced.
+        span = (
+            f"{sizes[0]:,} tok/session" if sizes[0] == sizes[-1]
+            else f"{sizes[0]:,}-{sizes[-1]:,} tok/session"
+        )
+        basis = (
+            f"sum of each unused server's schema-injection tax observed over "
+            f"this window. Each server's per-call size is MEASURED from "
+            f"its own tools/list response rather than assumed ({span} across "
+            f"the {len(measured_unused)} of {len(finding.unused_servers)} unused "
+            f"server(s) that could be measured). The tax table's own "
+            f"MCP-schema rows are informational only and never double-count "
+            f"into this total."
+        )
+        if unmeasured_unused:
+            basis += (
+                f" {unmeasured_unused} unused server(s) could not be measured "
+                f"and contribute nothing to this figure. It is a floor, not a "
+                f"total."
+            )
         if priced:
             finding.past_overspend_usd = round(sum(priced), 6)
             basis += (
@@ -1337,22 +2072,87 @@ def compute_deadweight_finding(
                 "at the dominant model observed in that server's sessions "
                 "(never a hardcoded rate)."
             )
-            if len(priced) < len(finding.dead_servers):
+            if len(priced) < len(measured_unused):
                 basis += (
-                    f" {len(finding.dead_servers) - len(priced)} of "
-                    f"{len(finding.dead_servers)} dead server(s) had no "
+                    f" {len(measured_unused) - len(priced)} of "
+                    f"{len(measured_unused)} measured unused server(s) had no "
                     f"priced model observed and are excluded from the "
                     f"dollar sum (token figure still includes them)."
                 )
         finding.estimate_basis = basis
+    elif finding.unused_servers:
+        # Unused servers exist but not one of them could be measured. Saying
+        # "nothing cleared the bar" here would be the report asserting more
+        # than its data supports in the most misleading direction available:
+        # the servers ARE unused, the analyzer just cannot say what they cost.
+        finding.notes.append(
+            f"{len(finding.unused_servers)} configured MCP server(s) had "
+            f"nothing attributable fire in the last "
+            f"{UNUSED_RECENCY_WINDOW_DAYS} days. None of them could be "
+            f"measured, so no token or dollar figure is stated for them. See "
+            f"each row's own construction note for why."
+        )
     elif configured:
         finding.notes.append(
-            f"No configured MCP server cleared the dead-weight bar "
-            f"(>= {min_sessions} sessions present, 0 invocations). Lower "
-            f"[optimize] min_sessions_deadweight in tj.toml to see servers "
-            f"present in fewer sessions."
+            f"No configured MCP server went {UNUSED_RECENCY_WINDOW_DAYS} days "
+            f"with nothing attributable firing (or the corpus doesn't hold "
+            f"that much history yet for some of them; see each server's own "
+            f"row)."
         )
 
+    # The plugin lane adds to the same totals — it is the same shape of waste
+    # (an installed dependency paid for continuously and never used) and the
+    # populations do not overlap, so there is nothing to double-count between
+    # them. Kept as a separate summand rather than folded into the server loop
+    # so a reader can always see which lane a figure came from.
+    plugin_tokens = sum(p.estimated_tax_tokens_window for p in finding.unused_plugins)
+    plugin_usd = [
+        p.estimated_tax_usd_window for p in finding.unused_plugins
+        if p.estimated_tax_usd_window is not None
+    ]
+    if plugin_tokens:
+        finding.past_overspend_tokens = (finding.past_overspend_tokens or 0) + plugin_tokens
+        finding.estimate_basis = (finding.estimate_basis or "") + (
+            f" Plus {len(finding.unused_plugins)} enabled plugin(s) with "
+            f"nothing attributable firing in the last "
+            f"{UNUSED_RECENCY_WINDOW_DAYS} days. Their skill/agent `name: "
+            f"description` listing (plus any plugin-contributed MCP server's "
+            f"measured schema) is resident in every session, priced per call "
+            f"at the window's dominant model. BODIES are never counted. A "
+            f"body arrives on invocation, not at session start."
+        ).lstrip()
+    if plugin_usd:
+        finding.past_overspend_usd = round(
+            (finding.past_overspend_usd or 0.0) + sum(plugin_usd), 6,
+        )
+    resident_plugins = [p for p in finding.plugins if p.resident]
+    insufficient_plugins = [p for p in resident_plugins if p.insufficient_history]
+    partial_plugins = [p for p in resident_plugins if p.partial_use_no_fix]
+    if insufficient_plugins:
+        finding.notes.append(
+            f"{len(insufficient_plugins)} of {finding.plugins_resident} "
+            f"resident plugin(s) don't have {UNUSED_RECENCY_WINDOW_DAYS} "
+            f"days of session history yet, so no unused claim can be made "
+            f"for them. Not a finding, just not enough evidence."
+        )
+    if partial_plugins:
+        finding.notes.append(
+            f"{len(partial_plugins)} resident plugin(s) have some "
+            f"components that fired in the last "
+            f"{UNUSED_RECENCY_WINDOW_DAYS} days and some that did not. "
+            f"Enable/disable is whole-plugin only, so no fix is offered "
+            f"for a partially-used plugin. See each one's own row."
+        )
+    if resident_plugins and not finding.unused_plugins and not insufficient_plugins and not partial_plugins:
+        finding.notes.append(
+            f"{finding.plugins_resident} of {len(finding.plugins)} installed "
+            f"plugin(s) are actually resident (the rest are disabled or scoped "
+            f"to one project, and cost nothing). Every resident one had "
+            f"something attributable fire in the last "
+            f"{UNUSED_RECENCY_WINDOW_DAYS} days, so no plugin is flagged."
+        )
+
+    finding.measurement_note = _measurement_coverage_note(finding)
     return finding
 
 
@@ -1369,6 +2169,7 @@ def run(ctx: AnalyzerContext) -> None:
     repeat HTTP request against a live ``tj serve`` — skips re-parsing every
     session it already has a fresh cache entry for.
     """
+    from tokenjam.core.agent_config import store_for
     from tokenjam.core.optimize.scope import resolve_analyzer_scope
     from tokenjam.core.transcript_cache import default_cache_dir
 
@@ -1382,13 +2183,19 @@ def run(ctx: AnalyzerContext) -> None:
         return
 
     optimize_cfg = getattr(ctx.config, "optimize", None)
-    min_sessions = getattr(
-        optimize_cfg, "min_sessions_deadweight", MIN_SESSIONS_DEADWEIGHT,
-    )
+    # Measuring means STARTING each configured MCP server, so it is gated on a
+    # config flag and only ever happens on this out-of-band analyzer pass —
+    # never inline on a request. A scoped run (`--projects-root` / an explicit
+    # `--db`) never gets here at all, because the scope gate above already
+    # returned: measuring would start the operator's real servers on behalf of a
+    # run that was explicitly asked to stay out of their environment.
+    measure_schemas = bool(getattr(optimize_cfg, "measure_mcp_schemas", True))
     ctx.report.findings["deadweight"] = compute_deadweight_finding(
         ctx.since, ctx.until,
         projects_root=scope.projects_root,
         claude_home=scope.claude_home,
-        min_sessions=min_sessions,
+        claude_dir=scope.claude_home,
         cache_dir=default_cache_dir(ctx.config),
+        store=store_for(getattr(ctx, "conn", None), getattr(ctx, "write_lock", None)),
+        measure_schemas=measure_schemas,
     )

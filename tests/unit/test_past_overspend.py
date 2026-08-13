@@ -27,7 +27,10 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import re
 import pytest
+
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
 
 from tokenjam.core.optimize.cost_proposals import (
     CostProposal,
@@ -95,9 +98,9 @@ def _resend_finding():
 
 
 def _relearn_finding():
-    """A relearn finding shaped like a real gated run: some clusters have no
-    fix template, some are net-negative to codify — both still cost real
-    money, which lands on this finding's ``past_overspend_*``.
+    """A relearn finding shaped like a real run: some clusters have no fix
+    template, some are advise-only — both still cost real money, which lands
+    on this finding's ``past_overspend_*``.
 
     It produces NO ``CostProposal`` any more: relearn's one aggregate card
     carried only the retired total-observed-cost field, so the card went with
@@ -108,20 +111,17 @@ def _relearn_finding():
     only resend would not exercise.
     """
     from tokenjam.core.optimize.analyzers.relearn import RelearnCluster
-    from tokenjam.core.optimize.write_budget import REASON_NET_NEGATIVE, REASON_PLACEHOLDER
 
     clusters = [
         RelearnCluster(
             signature="no-fix", family_key=None, title="No fix template",
-            sessions=3, occurrences=5, repos=["demo"], rung=1, scope="project",
-            proposed_fix="", write_offered=False,
-            write_blocked_reason=REASON_PLACEHOLDER,
+            sessions=3, occurrences=5, repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
+            proposed_fix="",
         ),
         RelearnCluster(
-            signature="net-neg", family_key=None, title="Net-negative rule",
-            sessions=4, occurrences=6, repos=["demo"], rung=1, scope="project",
-            proposed_fix="Add a rule.", write_offered=False,
-            write_blocked_reason=REASON_NET_NEGATIVE,
+            signature="advise-only", family_key=None, title="Advise-only rule",
+            sessions=4, occurrences=6, repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
+            proposed_fix="Add a rule.", advise_only=True,
         ),
     ]
     return RelearnFinding(
@@ -380,18 +380,6 @@ def test_no_pacing_ratio_is_applied_to_a_past_overspend_figure():
         past_overspend_rollup(props, active_days=10, n_sessions=200)  # type: ignore[call-arg]
 
 
-def test_past_overspend_reads_the_netted_figure_not_the_gross_one():
-    # A write-bearing card is netted against what its rule costs to KEEP. The
-    # observed figure must follow the netting, not the pre-net gross, or the
-    # card would state an overspend larger than the product's own arithmetic
-    # says it is.
-    prop = _with_past_overspend(_proposal(
-        signature="cost:reuse", analyzer="reuse",
-        past_overspend_usd=4.0, gross_recoverable_usd=9.0,
-    ))
-    assert prop.past_overspend_usd == 4.0
-
-
 # --- the single-number vs paired-number rule ------------------------------- #
 
 def test_every_card_renders_exactly_one_number():
@@ -411,8 +399,7 @@ def test_every_card_renders_exactly_one_number():
     assert resend.past_overspend_usd == 703.78
     assert "resend basis" in resend.past_overspend_basis
     row = asdict(resend)
-    # `gross_recoverable_usd` (the netting disclosure's pre-net figure) is not set
-    # here, so the canonical field is the only one carrying a number at all.
+    # The canonical field is the only `_usd` field carrying a number at all.
     assert {f for f in row if f.endswith("_usd") and row[f] is not None} == {
         "past_overspend_usd"
     }
@@ -530,7 +517,7 @@ def test_summarize_is_a_cost_analyzer_producing_a_real_peer_card():
     assert p.advise_only is True
     assert p.apply_capable is False
     assert p.apply_kind == ""
-    assert p.rung == 0
+    assert p.delivery == ""
 
 
 def test_summarize_card_empty_with_no_candidates_or_no_priced_evidence():
@@ -618,14 +605,14 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
     )
     dead_server = ServerDeadweight(
         name="apollo", scope="project", source="/repo/.mcp.json",
-        sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
+        sessions_present=10, invocations=0, deferred_sessions=0, unused=True,
         estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_window=225_000,
         tax_construction="25,000 tok/session, cited estimate.",
         fix="Remove or project-scope apollo.", example_sessions=["s0"],
     )
     deadweight = DeadweightFinding(
         sessions_scanned=10, configured_servers=1,
-        servers=[dead_server], dead_servers=[dead_server],
+        servers=[dead_server], unused_servers=[dead_server],
         tax_table=[ContextTaxRow(source="MCP schema: apollo", sessions=10,
                                  avg_tokens_per_session=25_000, total_tokens_window=250_000)],
         past_overspend_tokens=225_000,
@@ -718,35 +705,54 @@ def test_ui_never_derives_a_past_overspend_figure_client_side(ui):
 
 
 def test_the_observed_figure_renders_from_the_server_block_only(ui):
-    # The Dashboard hero band was removed and the inbox band became a compact
-    # tile, so this figure now has exactly ONE
-    # render site. The guarantee that survives is the one that mattered: it is
-    # read from the server's `past_overspend` block, never reduced client-side,
-    # so what renders cannot drift from what the endpoint computed.
-    assert ui.count("<${PastOverspendTile}") == 1
-    assert "PastOverspendBand" not in ui, "the removed band must not linger"
+    # SUPERSEDES the prior "exactly one render site" contract. The Dashboard
+    # hero band this test used to pin as removed shipped again on explicit
+    # founder direction (lead with one clubbed avoidable-dollar figure), and
+    # this time it brought its own fetch of the SAME endpoint with it -- the
+    # rule the old removal comment left behind for exactly this moment ("the
+    # number must come from GET /relearn/cost-proposals' own past_overspend
+    # block ... re-add the fetch WITH the band, not before it"). The
+    # invariant that actually mattered survives unchanged: every render site
+    # reads the server's `past_overspend` block verbatim, never reduces it
+    # client-side, so none of them can drift from what the endpoint computed
+    # or from each other.
+    assert ui.count("<${PastOverspendTile}") == 1, "the Review inbox's own tile"
+    assert "PastOverspendBand" not in ui, "the OLD hero's retired name must not linger"
     assert "setCostPastOverspend(r.past_overspend || null)" in ui
-    # One render site now has exactly one reader. The Dashboard used to keep its
-    # own `heroPast` copy of this read for a band it no longer renders, so the
-    # page paid for a request per mount and displayed nothing from it; it is gone.
-    # This assertion is the same guarantee stated the other way round: nothing may
-    # read that block except the surface that renders it.
-    assert "setHeroPast" not in ui
-    dash = ui[ui.index("function DashboardView"):ui.index("// Two lenses, one router")]
-    # The FETCH, not the string: a comment in that view still names the endpoint,
-    # deliberately, to say where the figure must come from if it is re-added.
-    assert "api('/relearn/cost-proposals')" not in dash
-    # If a Dashboard summary of this figure is ever re-added, it must read the
-    # server's own `past_overspend` block rather than reduce over rendered cards.
-    # That rule now lives in a comment at the old render site, so keep it findable.
-    assert "past_overspend` block, the same one" in ui
+    # Bounded by the next TOP-LEVEL declaration. This used to end at a
+    # "// Two lenses, one router" comment, which vanished with the dead
+    # Improve/Observe lens and took the assertions below down with it: an
+    # extractor anchored on prose is only as durable as the prose.
+    _start = ui.index("function DashboardView")
+    _nxt = re.search(r"\n(?:function|const|class) ", ui[_start + 10:])
+    assert _nxt, "no top-level declaration follows DashboardView; update this extractor"
+    dash = ui[_start:_start + 10 + _nxt.start()]
+    # The Dashboard hero (`HeroBand`) and the Total opportunity tile now both
+    # read this endpoint through `rollupFig` (`rollupFigure()`), computed
+    # ONCE per render and passed to both as the SAME object -- one fetch,
+    # one number, two consumers, never two independent reductions.
+    assert "api('/relearn/cost-proposals'" in dash
+    assert dash.count("const rollupFig = rollupFigure(costProposalsRead);") == 1
+    assert "<${HeroBand} fig=${rollupFig}" in dash
+    assert "<${TotalOpportunityTile} fig=${rollupFig}" in dash
+    # `rollupFigure()` reads `past_overspend_usd`/`_tokens` verbatim off the
+    # payload -- see test_lens_ui_regression.py's
+    # test_rollup_figure_reads_the_wire_total_verbatim_never_a_client_side_sum
+    # for the JS-level pin of that arithmetic-free contract.
+    assert "function rollupFigure(read)" in ui
 
 
 def test_ui_labels_are_past_tense_and_carry_no_recovery_vocabulary(ui):
     band = ui[ui.index("function PastOverspendTile"):]
     band = band[:band.index("\n}")]
-    # The headline is the AVOIDABLE amount, and the tile's own label says so.
-    assert "What you could have avoided" in band
+    # The headline is money ALREADY SPENT, and the tile's own label says so in the
+    # past tense. The wording is the founder's ("You Overspent", replacing "What
+    # you could have avoided"); what this pins is the TENSE, not the phrasing —
+    # the tile carries its own tense in a screenshot, so a forward-looking or
+    # conditional label here would make the figure read as a projection.
+    assert "You Overspent" in band
+    for forward in ("you could save", "you will save", "projected", "per month"):
+        assert forward not in band.lower(), forward
     assert "recoverable" not in band
     assert "could save" not in ui
     # No ratio framing ("recovering $X of a $Y problem") anywhere.
@@ -807,7 +813,9 @@ def test_the_card_states_what_its_figure_does_not_cover(ui):
     # happens and is invisible without it.
     card = ui[ui.index("function CostProposalCard"):]
     card = card[:card.index("\n// The headline band")]
-    assert "${prop.coverage_note}" in card
+    # `coverage_note` now renders through `proseParagraphs()` (it carries
+    # blank-line-separated paragraphs), not as a bare interpolation.
+    assert "${proseParagraphs(prop.coverage_note)}" in card
     assert "<summary>What this figure does and does not cover</summary>" in card
     assert "observedCostSentence" not in card
 
@@ -830,7 +838,13 @@ def test_the_basis_is_reachable_from_the_card_not_only_on_hover(ui):
     card = card[:card.index("\n// The headline band")] if "\n// The headline band" in card else card
     assert 'title=${prop.past_overspend_basis' in card
     assert "How this number was derived" in card
-    assert "${prop.past_overspend_basis}" in card
+    # The body-rendered copy now goes through `proseParagraphs()`, not a bare
+    # interpolation. Asserted as its own pattern (distinct from the bare
+    # `title=${prop.past_overspend_basis` hover attribute checked above) so
+    # this cannot pass on the tooltip alone -- a body-only regression would
+    # still leave the hover-attribute assertion above green, and a
+    # tooltip-only regression would fail this one.
+    assert "${proseParagraphs(prop.past_overspend_basis)}" in card
 
 
 def test_the_observed_figure_is_visually_separated_from_recoverable_tiles(ui):

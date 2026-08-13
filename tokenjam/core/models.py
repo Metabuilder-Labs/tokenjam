@@ -63,6 +63,11 @@ class NormalizedSpan:
     name:           str
     kind:           SpanKind
     status_code:    SpanStatus
+    # Always a REAL observed instant. Ingest may neither substitute a default
+    # (a zero epoch drags every MIN() and day union back by decades; `now`
+    # silently dates historical work to whenever tj received it) nor leave it
+    # unset — a record with no observed time is rejected at the boundary
+    # instead. See `api/routes/logs.py` and `core/backfill.py`.
     start_time:     datetime
     parent_span_id: str | None     = None
     session_id:     str | None     = None
@@ -200,6 +205,22 @@ class SessionRecord:
     # it to render a parent tree (flat list when no parent edges exist).
     run_id:           str | None    = None
     parent_session_id: str | None   = None
+    # What PRODUCED this session — 'claude-code' / 'codex' / 'sdk' — recorded
+    # at ingest from the strongest signal the writing path has (migration 21).
+    # None for a row written before this column existed, or a live-path
+    # session whose agent_id classifies as neither known coding tool (a
+    # genuine SDK workflow already reads as "sdk", so a bare None here really
+    # does mean "not yet backfilled" — see core/agent_kind.py, which this
+    # value is derived from at write time but never re-derives at read time).
+    source:           str | None    = None
+    # Masked/hashed first-user-prompt identity + the model that ran the bulk
+    # of the session (migration 21) — the "did this repeat prior work" signal
+    # `core.optimize.repeat_task` needs, persisted so it survives Claude
+    # Code's ~30-day transcript rotation instead of requiring the raw prompt
+    # be re-read from a transcript that may already be gone. Never the raw
+    # prompt text itself.
+    task_statement_hash: str | None = None
+    dominant_model:   str | None    = None
 
     @property
     def duration_seconds(self) -> float | None:
@@ -409,7 +430,7 @@ class CostRow:
     input_tokens: int         = 0
     output_tokens: int        = 0
     cache_tokens: int         = 0   # cache-READ tokens
-    cache_write_tokens: int   = 0   # cache-CREATE tokens (the hidden cost driver, #17)
+    cache_write_tokens: int   = 0   # cache-CREATE tokens (the hidden cost driver)
     cost_usd:     float       = 0.0
     call_count:   int         = 0   # span count in this bucket — the only honest metric
                                      # for `group_by="tool"`, whose spans carry no cost/tokens
@@ -491,6 +512,15 @@ class TraceFilters:
     # Cost-floor filter: only traces whose summed cost_usd is >= this value.
     # Applied via HAVING on the same per-trace aggregate, no extra scan.
     min_cost_usd: float | None = None
+    # One side of the dashboard's "Viewing as" persona picker, or `None` for
+    # every trace. Bucketed by `alerts.is_interactive_coding_agent` over
+    # `agent_id` — the same single source of truth `GET /sessions` and
+    # `framing.agent_persona_mix` use, never a second rule and never
+    # `spans.source` (which records the ingestion path, an unrelated axis).
+    # It belongs on the FILTERS rather than at the route, so the row list, the
+    # total count and the outlier quartiles are all computed over one
+    # population: an unscoped `total_count` beside a scoped list is its own bug.
+    persona:    str | None   = None
 
 
 @dataclass
@@ -507,6 +537,11 @@ class CostFilters:
     feature:        str | None = None
     environment:    str | None = None
     prompt_version: str | None = None
+    # One side of the "Viewing as" persona picker, or `None` for all spend.
+    # Same `alerts.is_interactive_coding_agent` bucketing every other
+    # persona-scoped surface uses. On the FILTERS so the grouped rows and any
+    # total computed from the same filters cover one population.
+    persona:        str | None = None
 
 
 @dataclass
@@ -517,3 +552,8 @@ class AlertFilters:
     type:      AlertType | None = None
     unread:    bool          = False
     limit:     int           = 100
+    # One side of the "Viewing as" persona picker, or `None` for every alert.
+    # Same `alerts.is_interactive_coding_agent` bucketing the alert ENGINE
+    # already gates several of its checks on, applied to the history so the
+    # list matches the surface the reader is looking at.
+    persona:   str | None   = None

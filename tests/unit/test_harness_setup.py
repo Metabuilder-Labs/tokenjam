@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from tokenjam.core.harness_setup import (
-    HELPER_RELPATH,
     MAX_SPAWN_HITS,
     build_run_env_helper,
     python_launcher_snippet,
@@ -88,6 +87,3 @@ def test_scan_detects_otel_instrumentation_point(tmp_path):
 def test_scan_missing_dir_returns_empty(tmp_path):
     assert scan_spawn_points(tmp_path / "nope") == []
 
-
-def test_helper_relpath_is_under_tj():
-    assert HELPER_RELPATH.startswith(".tj/")

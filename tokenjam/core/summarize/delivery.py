@@ -90,12 +90,55 @@ class RunResult:
     cost_unknown: bool = False
 
 
+#: Session name for tj's own rewrite calls. Naming the session is also what stops the CLI making a
+#: SEPARATE model call to invent a title for it — a call that re-sends the whole source file for a
+#: label nobody reads, on a code path whose entire job is to spend fewer tokens.
+_CLAUDE_SESSION_NAME = "tokenjam-summarize"
+
+
+def _claude_argv(system_rules: str) -> list[str]:
+    """The `claude -p` invocation for a rewrite: rules on the system channel, no ambient anything.
+
+    Every flag here is load-bearing; see the note on each. Verified against the installed CLI by
+    capturing the request it actually puts on the wire.
+    """
+    return [
+        "claude", "-p",
+        # A rewrite of one instruction file must not run inside a session that has OTHER instruction
+        # files loaded as live directives. Without this the call inherits the user's CLAUDE.md,
+        # hooks, skills, plugins and MCP servers, which can steer the rewrite and are billed to a
+        # call that is supposed to concern exactly one file. Deliberately NOT `--bare`: that also
+        # stops the CLI reading OAuth/keychain credentials, and this path exists precisely for the
+        # user whose only credential is a subscription — `--via api` is the one that needs a key.
+        "--safe-mode",
+        # Zero tools. This call transforms text and has no business holding Edit/Write, which is a
+        # far shorter route to a destroyed instruction file than a hijacked rewrite is. The
+        # empty-string form is what actually sends an empty tool list.
+        "--tools", "",
+        # A mechanical rewrite is not a coding session; keep tj's own calls out of the transcript
+        # corpus that tj's analyzers later read back as evidence of how the user works.
+        "--no-session-persistence",
+        "--name", _CLAUDE_SESSION_NAME,
+        # The rewrite contract travels on the system channel and the source on stdin, so the file's
+        # own text can no longer compete with the instruction to rewrite it. NOT
+        # `--append-system-prompt`: that would bolt a text-rewriting contract onto Claude Code's
+        # coding-agent persona, which has nothing to do with this job. Note this raises the bar but
+        # is not a security boundary — a model can still follow instructions arriving in the user
+        # turn, which is why the envelope and the structure gate do the actual catching.
+        "--system-prompt", system_rules,
+    ]
+
+
 def _via_claude(wrapped_prompt: str, system_rules: str) -> DeliveryResult:
-    """Run the user's local ``claude -p`` headless: combined prompt on stdin, stdout = the summary."""
-    prompt = f"{system_rules}\n\n{wrapped_prompt}"
+    """Run the user's local ``claude -p`` headless: enveloped source on stdin, stdout = the summary.
+
+    stdin carries the source and NOTHING else. Concatenating the rules onto it, as this once did,
+    left a file whose CONTENT is instructions competing with the instruction to rewrite it — and on
+    a large, imperative instruction file the file wins, which is every file this analyzer targets.
+    """
     try:
-        proc = subprocess.run(["claude", "-p"], input=prompt, capture_output=True, text=True,
-                              timeout=_CLAUDE_TIMEOUT_S)
+        proc = subprocess.run(_claude_argv(system_rules), input=wrapped_prompt,
+                              capture_output=True, text=True, timeout=_CLAUDE_TIMEOUT_S)
     except FileNotFoundError as e:
         raise DeliveryError(
             "Claude Code isn't installed — install it, use `--via api`, or enter manual mode "
@@ -228,7 +271,11 @@ def summarize_via(
     _p(f"Rewriting via {mode} — this can take a few seconds")
     delivered = deliver(config, mode, prep.wrapped_prompt, prep.system_rules)
     _p("Verifying structure + staging")
-    verdict = session.check(config, path, delivered.summary, prep.source_sha256, produced_by=mode)
+    # prep and check are one transaction here, so the envelope nonce and the word budget both carry
+    # across — this is the path where the gate can verify the most, and it should.
+    verdict = session.check(config, path, delivered.summary, prep.source_sha256, produced_by=mode,
+                            source_nonce=prep.source_nonce,
+                            target_prose_words=prep.target_prose_words)
 
     amortization: Amortization | None = None
     if delivered.rewrite_usd is not None:
@@ -251,7 +298,7 @@ def summarize_via(
         model = config.summarize.api_model
         assert model is not None  # rewrite_usd is set only on the api path, which required a model
         rates_known = get_rates("anthropic", model) is not None   # else the $ used default rates (#4)
-        if verdict.structure_ok:
+        if verdict.structure_ok and verdict.est_tokens_saved is not None:
             saving = calculate_cost("anthropic", model, verdict.est_tokens_saved, 0)
             break_even = math.ceil(delivered.rewrite_usd / saving) if saving > 0 else None
         else:

@@ -102,6 +102,31 @@ def test_is_informational_when_no_transcripts_exist(
     assert check["level"] == "info"
 
 
+def test_escalates_to_error_when_the_daemon_is_not_running(
+    db: DuckDBBackend, projects_root: Path,
+) -> None:
+    """A gap that nothing is positioned to close automatically must FAIL, not
+    warn — daemon down means `auto_catch_up` structurally cannot run."""
+    _write_session(projects_root, "sess-dropped")
+
+    check = _check_transcript_ingest_gap(TjConfig(version="1"), db, daemon_alive=False)
+
+    assert check["level"] == "error"
+    assert "background daemon is not running" in check["message"]
+
+
+def test_stays_a_warning_when_the_daemon_is_running_and_auto_catch_up_is_on(
+    db: DuckDBBackend, projects_root: Path,
+) -> None:
+    """Explicit True (matching the default) still self-heals — a live daemon
+    with auto-catch-up on should close the gap on its own next pass."""
+    _write_session(projects_root, "sess-dropped")
+
+    check = _check_transcript_ingest_gap(TjConfig(version="1"), db, daemon_alive=True)
+
+    assert check["level"] == "warning"
+
+
 def test_never_raises_when_the_comparison_fails(
     db: DuckDBBackend, projects_root: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

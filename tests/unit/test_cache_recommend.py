@@ -460,3 +460,180 @@ def test_render_cache_recommend_snippet_uses_plain_console_print(db, capsys):
     out = capsys.readouterr().out
 
     assert c.cache_control_snippet in out
+
+
+# --- the system prefix is stored compactly, not as text -----------------------
+#
+# It used to be stored whole: 92,514 spans each holding a ~43 KB copy of one of
+# 61 distinct files, 4.06 GB of database to carry 1.84 MB of distinct text. The
+# analyzer never read it as text — it hashed a fixed head, kept 120 characters
+# for display, and compared a length. These pin that the compact form carries
+# all three answers, that legacy spans still work, and that nothing silently
+# reintroduces the weight.
+
+
+def test_backfill_stores_a_fingerprint_not_the_file(tmp_path):
+    """The defect, stated as a property: a big CLAUDE.md must not make a big span."""
+    from tokenjam.core.backfill import _read_project_claude_md, _system_prefix_attrs
+    from tokenjam.otel.semconv import TjAttributes
+
+    marker = "PROJECT-RULES-MARKER"
+    (tmp_path / "CLAUDE.md").write_text(marker + ("\nrule line" * 6000), encoding="utf-8")
+
+    text = _read_project_claude_md(str(tmp_path))
+    attrs = _system_prefix_attrs(text)
+
+    assert len(text) > 50_000, "fixture should be a genuinely large file"
+    stored = sum(len(str(v)) for v in attrs.values())
+    assert stored < 300, f"stored {stored} bytes of a {len(text)}-byte file"
+    assert TjAttributes.SYSTEM_PREFIX_CONTENT not in attrs
+    assert not any(marker in str(v) for k, v in attrs.items()
+                   if k != TjAttributes.SYSTEM_PREFIX_SAMPLE), \
+        "only the display sample may quote the file"
+
+
+def test_stored_hash_matches_what_the_analyzer_computes_from_text():
+    """Identity must survive the change of storage.
+
+    A span stamped with the compact hash and a legacy span carrying the same
+    text have to land in the SAME candidate. If they didn't, one project's
+    calls would split across two candidates after the upgrade and both
+    occurrence counts would be wrong with nothing failing.
+    """
+    from tokenjam.core.backfill import _system_prefix_attrs
+    from tokenjam.core.optimize.analyzers.cache_recommend import _prefix_hash
+    from tokenjam.otel.semconv import TjAttributes
+
+    text = "# rules\n" + ("a repeated instruction line\n" * 500)
+    stamped = _system_prefix_attrs(text)[TjAttributes.SYSTEM_PREFIX_HASH]
+
+    assert stamped == _prefix_hash(text)
+
+
+def test_hash_window_is_single_sourced():
+    """The analyzer's window and the parser's must be one constant.
+
+    They were two copies of the same three lines. Divergence has no symptom —
+    it just quietly regroups spans — so the guard is that both route through
+    `core.system_prefix`.
+    """
+    from tokenjam.core import system_prefix
+    from tokenjam.core.optimize.analyzers.cache_recommend import PREFIX_HASH_BYTES
+
+    assert PREFIX_HASH_BYTES == system_prefix.HASH_CHARS
+
+
+def test_two_prefixes_differing_after_the_window_are_one_candidate():
+    """States what the window MEANS, so a change to it is a deliberate one.
+
+    Anything shared past HASH_CHARS is the same cacheable prefix by this
+    product's definition; the tail is what a breakpoint would not cover.
+    """
+    from tokenjam.core import system_prefix
+
+    head = "x" * system_prefix.HASH_CHARS
+    assert system_prefix.prefix_hash(head + "tail A") == \
+           system_prefix.prefix_hash(head + "tail B")
+    assert system_prefix.prefix_hash("y" + head) != system_prefix.prefix_hash(head)
+
+
+def test_short_prefix_keeps_its_real_length(tmp_path):
+    """Below the cacheable floor the analyzer must still be able to skip it."""
+    from tokenjam.core.backfill import _read_project_claude_md, _system_prefix_attrs
+    from tokenjam.otel.semconv import TjAttributes
+
+    (tmp_path / "CLAUDE.md").write_text("tiny", encoding="utf-8")
+    attrs = _system_prefix_attrs(_read_project_claude_md(str(tmp_path)))
+
+    assert attrs[TjAttributes.SYSTEM_PREFIX_LENGTH] == 4
+
+
+def test_capture_off_strips_every_system_prefix_key():
+    """Turning capture off must not leave a fingerprint of the file behind."""
+    from tokenjam.core.ingest import strip_captured_content
+    from tokenjam.otel.semconv import TjAttributes
+
+    attrs = {
+        TjAttributes.SYSTEM_PREFIX_CONTENT: "the whole file",
+        TjAttributes.SYSTEM_PREFIX_HASH: "deadbeefdeadbeef",
+        TjAttributes.SYSTEM_PREFIX_SAMPLE: "first 120 chars",
+        TjAttributes.SYSTEM_PREFIX_LENGTH: 40000,
+        "keep.me": "untouched",
+    }
+    stripped = strip_captured_content(attrs, CaptureConfig(prompts=False))
+
+    assert stripped.get("keep.me") == "untouched"
+    for key in (TjAttributes.SYSTEM_PREFIX_CONTENT, TjAttributes.SYSTEM_PREFIX_HASH,
+                TjAttributes.SYSTEM_PREFIX_SAMPLE, TjAttributes.SYSTEM_PREFIX_LENGTH):
+        assert key not in stripped, key
+
+
+def _seed_prefix_spans(db, *, attrs: dict, count: int, start_offset: int = 0):
+    """Insert N spans carrying an arbitrary system-prefix attribute shape."""
+    start = datetime(2026, 5, 10, tzinfo=timezone.utc)
+    for i in range(count):
+        db.insert_span(make_llm_span(
+            agent_id="test-agent", provider="anthropic", billing_account="anthropic",
+            model="claude-sonnet-4-6", input_tokens=2500, cost_usd=0.005,
+            start_time=start + timedelta(minutes=start_offset + i),
+            extra_attributes=dict(attrs),
+        ))
+
+
+def _cache_finding(db):
+    return build_report(
+        db=db, config=_config(capture_prompts=True),
+        since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        until=datetime(2026, 5, 30, tzinfo=timezone.utc),
+        findings=["cache-recommend"],
+    ).findings["cache-recommend"]
+
+
+def test_compact_prefix_spans_produce_a_candidate(db):
+    """End-to-end: the analyzer works off the stored fingerprint alone."""
+    from tokenjam.core.backfill import _system_prefix_attrs
+
+    text = "# global rules\n" + ("an instruction that repeats\n" * 400)
+    _seed_prefix_spans(db, attrs=_system_prefix_attrs(text), count=5)
+
+    finding = _cache_finding(db)
+
+    assert finding.enabled
+    assert len(finding.candidates) == 1
+    assert finding.candidates[0].occurrences == 5
+    assert finding.candidates[0].sample_chars  # display survives the change
+
+
+def test_legacy_and_compact_spans_land_in_one_candidate(db):
+    """The upgrade must not split a project's history in two.
+
+    Every span backfilled before this change carries the text; every one after
+    carries the fingerprint. They describe the SAME prefix, so they have to
+    group together — otherwise the day the release ships, one project's calls
+    appear as two candidates and both occurrence counts are understated, with
+    nothing failing to say so.
+    """
+    from tokenjam.core.backfill import _system_prefix_attrs
+    from tokenjam.otel.semconv import TjAttributes
+
+    text = "# global rules\n" + ("an instruction that repeats\n" * 400)
+
+    _seed_prefix_spans(db, attrs={TjAttributes.SYSTEM_PREFIX_CONTENT: text},
+                       count=4, start_offset=0)
+    _seed_prefix_spans(db, attrs=_system_prefix_attrs(text),
+                       count=3, start_offset=100)
+
+    finding = _cache_finding(db)
+
+    assert len(finding.candidates) == 1, \
+        f"history split into {len(finding.candidates)} candidates"
+    assert finding.candidates[0].occurrences == 7
+
+
+def test_a_prefix_under_the_floor_is_still_skipped(db):
+    """The length gate has to work off the stored length, not the sample."""
+    from tokenjam.core.backfill import _system_prefix_attrs
+
+    _seed_prefix_spans(db, attrs=_system_prefix_attrs("too short to cache"), count=5)
+
+    assert _cache_finding(db).candidates == []

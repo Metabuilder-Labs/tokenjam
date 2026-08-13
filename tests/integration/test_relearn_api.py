@@ -4,7 +4,7 @@
   1. Mutating endpoints (apply/enable/disable/revert/refresh) require the
      always-on local write token, independent of ``api.auth.enabled``.
   2. ``/apply`` refuses a ``target_path`` outside the user's home directory
-     (defense-in-depth allowlist) and — for rung 1 — a target that isn't an
+     (defense-in-depth allowlist) and — for a CLAUDE.md rule — a target that isn't an
      allowlisted note file (see test_relearn_apply.py for the relearn_apply
      unit-level version of that same guard).
 
@@ -16,12 +16,34 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE, DELIVERY_INJECTING_HOOK
+
 from tokenjam.api.app import create_app
 from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
 from tokenjam.core.optimize import relearn_apply as pa
 from tests.factories import make_session
+
+
+@pytest.fixture(autouse=True)
+def _quiescent_relearn_computing_flag():
+    """Isolate each test from the process-global ``relearn`` compute flag.
+
+    ``report_store.is_computing()`` reads a module-level ``threading.Event``
+    (``_COMPUTING``). An earlier test that triggers a background recompute sets
+    it and does not join the worker thread, so whether the event is still set
+    when a later test runs depends on thread scheduling — which is exactly why
+    ``test_relearn_proposals_carries_persona_when_never_run`` flaked on one
+    matrix leg (``computing``) while the others saw ``never_run``. Clear it
+    around every test so each starts from a quiescent store. Test-isolation
+    only; it changes no production behavior.
+    """
+    from tokenjam.core.optimize.report_store import _COMPUTING
+
+    _COMPUTING.clear()
+    yield
+    _COMPUTING.clear()
 
 
 @pytest.fixture
@@ -72,7 +94,7 @@ def stored_proposal(config) -> str:
     cluster = RelearnCluster(
         signature="cwd_confusion", family_key="cwd_confusion",
         title="cwd / relative-path confusion", sessions=5, occurrences=9,
-        repos=["demo"], rung=1, scope="project",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Verify an absolute cwd before a relative Read.",
     )
     relearn_store.write_cache(RelearnFinding(clusters=[cluster]), config=config)
@@ -212,7 +234,7 @@ async def test_apply_allows_target_inside_home(app, client, monkeypatch, tmp_pat
     assert r.json()["dry_run"] is False
 
 
-# --- must-fix #2 (routed through the API): rung-1 note target allowlist -------
+# --- must-fix #2 (routed through the API): note target allowlist -------------
 
 async def test_apply_note_route_refuses_non_markdown_target(
     app, client, monkeypatch, tmp_path, stored_proposal,
@@ -257,7 +279,7 @@ def _store_cost_proposal(config, **overrides) -> str:
         "target_key": {}, "evidence": "", "baseline": {},
         "advise_text": "Route explore to the cheaper same-family model.",
         "proposed_fix": "Route explore to the cheaper same-family model.",
-        "rung": 0, "scope": "project", "apply_capable": True,
+        "delivery": "", "scope": "project", "apply_capable": True,
         "apply_kind": "agent_model", "agent_name": "explore",
         "current_model": "claude-opus-4-8", "proposed_model": "claude-haiku-4-5",
     }
@@ -405,7 +427,7 @@ async def test_apply_refuses_a_stored_proposal_missing_a_required_field(
     assert target.read_text() == _AGENT_FILE
 
 
-async def test_rung_ladder_apply_opens_no_cost_window(
+async def test_delivery_apply_opens_no_cost_window(
     app, client, config, monkeypatch, tmp_path, stored_proposal,
 ):
     """A plain note fix has no priced metric, so it must not create a cost
@@ -463,7 +485,8 @@ async def test_apply_rejects_a_client_constructed_cluster_payload(
     target.write_text("# Repo\n", encoding="utf-8")
 
     body = _apply_body(str(target), proposal_id=stored_proposal)
-    body.update({"signature": "attacker", "rung": 3, "title": "not from the detector",
+    body.update({"signature": "attacker", "delivery": DELIVERY_INJECTING_HOOK,
+                 "title": "not from the detector",
                  "proposed_fix": "rm -rf /"})
     r = await client.post(
         "/api/v1/relearn/apply", json=body,
@@ -607,7 +630,7 @@ async def test_proposals_flag_example_sessions_that_resolve(config, db, client):
     cluster = RelearnCluster(
         signature="cwd_confusion", family_key="cwd_confusion",
         title="cwd / relative-path confusion", sessions=2, occurrences=3,
-        repos=["demo"], rung=1, scope="project",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Verify an absolute cwd before a relative Read.",
         examples=[
             RelearnExample(session_id="ingested-1", repo="demo", ts=None, snippet="a"),
@@ -641,7 +664,7 @@ async def test_advise_only_proposals_carry_their_reason_in_the_payload(config, c
     advise = RelearnCluster(
         signature="http_call:peer closed", family_key=None,
         title="peer closed the connection", sessions=3, occurrences=9,
-        repos=["billing-svc"], rung=1, scope="project",
+        repos=["billing-svc"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Retry the upstream call with backoff.",
         examples=[RelearnExample(session_id="s1", repo="billing-svc", ts=None, snippet="e")],
         advise_only=True,
@@ -649,7 +672,7 @@ async def test_advise_only_proposals_carry_their_reason_in_the_payload(config, c
     workspace = RelearnCluster(
         signature="cwd_confusion", family_key="cwd_confusion",
         title="cwd / relative-path confusion", sessions=4, occurrences=12,
-        repos=["demo"], rung=1, scope="project",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Verify an absolute cwd before a relative Read.",
     )
     relearn_store.write_cache(RelearnFinding(clusters=[advise, workspace]), config=config)

@@ -17,13 +17,6 @@ def test_demo_list_shows_all_scenarios():
     assert "hallucination-drift" in result.output
 
 
-def test_demo_list_shows_descriptions():
-    runner = CliRunner()
-    result = runner.invoke(cli, ["demo"])
-    assert result.exit_code == 0
-    assert len(result.output.strip()) > 0
-
-
 def test_demo_retry_loop_exits_zero():
     runner = CliRunner()
     result = runner.invoke(cli, ["demo", "retry-loop"])

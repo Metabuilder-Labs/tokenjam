@@ -2,6 +2,7 @@ import os
 from typing import TYPE_CHECKING
 
 import click
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.config import load_config
 from tokenjam.core.db import open_db
 
@@ -10,7 +11,43 @@ if TYPE_CHECKING:
     from tokenjam.core.db import DuckDBBackend
 
 
+def _lock_holder_hint() -> str:
+    """Name the ACTUAL process holding the DuckDB write lock, when we can —
+    not just the configured api.{host,port} the error above already names.
+
+    The two can disagree: `config.api.{host,port}` is whatever THIS
+    invocation's config resolves to, but the lock holder wrote
+    `~/.local/share/tj/server.state` with the host/port/config IT booted
+    with, which can be a different config file, port, or a daemon that has
+    since died leaving the DB locked by a crashed process. Best-effort: a
+    missing/stale/corrupt state file degrades to "" (the surrounding message
+    already covers that case), never raises.
+    """
+    from tokenjam.core.server_state import (
+        is_pid_alive,
+        is_serve_process,
+        read_server_state,
+    )
+
+    state = read_server_state()
+    if state is None:
+        return ""
+    if not (is_pid_alive(state.pid) and is_serve_process(state.pid)):
+        # The state file names a PID that's gone or isn't `tj serve` anymore
+        # -- a crashed daemon can leave the DB lock held without a live
+        # process to name, or the lock is held by something else entirely.
+        return (
+            f"`server.state` names PID {state.pid}, which is no longer a "
+            "running `tj serve` -- the lock may be held by a crashed "
+            "process or a different tool. "
+        )
+    where = f"port {state.port}" if state.port else "an unknown port"
+    cfg = f" (config: {state.config_path})" if state.config_path else ""
+    return f"Held by `tj serve` (PID {state.pid}) on {where}{cfg}. "
+
+
 @click.group(
+    cls=TjGroup,
     invoke_without_command=True,
     epilog="Upgrade with: tj upgrade (installs the new package AND "
            "restarts the daemon). Verify with `tj --version`.",
@@ -76,6 +113,10 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     no_db_commands = {
         "stop", "uninstall", "onboard", "mcp", "demo", "policy",
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",
+        # `rules` reads the proposal cache the optimize pass already wrote —
+        # config only, no analyzer sweep — so it works while `tj serve` holds
+        # the DuckDB write lock.
+        "rules",
         "statusline", "upgrade",
         # `ping` emits a test span through the SDK (which resolves its own
         # HTTP-vs-direct path); it must not take the CLI's DuckDB lock (#80).
@@ -109,6 +150,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
                 raise click.ClickException(
                     "Database is locked (tj serve is running?) and the API "
                     f"is not reachable at http://{config.api.host}:{config.api.port}. "
+                    f"{_lock_holder_hint()}"
                     "Start tj serve or stop the process holding the DB lock."
                 ) from e
             ctx.obj["api_mode"] = True
@@ -214,3 +256,6 @@ cli.add_command(cmd_demo, name="demo")
 
 from tokenjam.cli.cmd_summarize import cmd_summarize  # noqa: E402
 cli.add_command(cmd_summarize, name="summarize")
+
+from tokenjam.cli.cmd_rules import cmd_rules  # noqa: E402
+cli.add_command(cmd_rules, name="rules")
