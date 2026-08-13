@@ -37,7 +37,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 # --- Caps & trims (bounded payload) -----------------------------------------
 
@@ -173,6 +173,64 @@ def _locate_transcript(session_id: str, projects_root: Path) -> Path | None:
     if not matches:
         return None
     return Path(matches[0])
+
+
+#: How far into a transcript to look for the working directory. Claude Code
+#: stamps ``cwd`` on its opening records, so a hit comes immediately or not at
+#: all; reading further would cost a full parse for nothing.
+CWD_RECORD_LOOKAHEAD = 5
+
+
+def first_recorded_cwd(records: list[dict[str, Any]]) -> str:
+    """The working directory a session recorded, or ``""``.
+
+    THE extractor for this question. Three call sites need it — the dead-MCP
+    analyzer resolving per-repo configs, relearn's repo-label map, and rule
+    placement deciding which CLAUDE.md a rule belongs in — and each used to
+    carry its own copy of the same five-record loop. They agree today; a fourth
+    copy is how they stop agreeing, and a placement that disagreed with
+    deadweight about which repo a session ran in would put a rule in a file the
+    evidence says nothing about.
+    """
+    for record in records[:CWD_RECORD_LOOKAHEAD]:
+        cwd = record.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            return cwd
+    return ""
+
+
+def session_cwd_map(
+    session_ids: Iterable[str],
+    projects_root: Path,
+    *,
+    cache_dir: Path | None = None,
+) -> dict[str, str]:
+    """``session_id -> recorded cwd`` for as many ids as resolve.
+
+    Best-effort by construction: a session with no transcript on disk, or one
+    whose transcript records no ``cwd``, is simply absent from the result. That
+    absence is a MEASUREMENT the caller has to report rather than paper over —
+    a session whose directory cannot be resolved is one that could not be
+    placed, and silently dropping it shrinks the population every downstream
+    figure is computed over (Critical Rule 31: an analyzer reading live
+    filesystem state returns a plausible number, not an error).
+    """
+    out: dict[str, str] = {}
+    for session_id in session_ids:
+        sid = str(session_id or "")
+        if not sid or sid in out:
+            continue
+        path = _locate_transcript(sid, projects_root)
+        if path is None:
+            continue
+        try:
+            records = read_records(path, cache_dir=cache_dir)
+        except Exception:
+            continue
+        cwd = first_recorded_cwd(records)
+        if cwd:
+            out[sid] = cwd
+    return out
 
 
 def read_records(
@@ -1129,6 +1187,8 @@ def loop_transcript_root(config: object | None = None) -> Path:
 
 
 __all__ = [
+    "first_recorded_cwd",
+    "session_cwd_map",
     "session_transcript_path",
     "session_transcript_mtime",
     "build_session_story",

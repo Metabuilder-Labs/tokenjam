@@ -34,6 +34,18 @@ def _spend_in_window(
     until: datetime,
     services: list[str] | None,
 ) -> float:
+    """Provider spend in the window.
+
+    DELIBERATELY NOT persona-scoped, unlike every other analyzer query — the
+    one exemption in this package, stated here rather than left silent. A
+    ``[budget.<provider>]`` cap is a cap on the whole provider account: every
+    call bills against it whoever made it. Scoping the burn to one persona
+    while comparing it to a whole-account ceiling would put a numerator and a
+    denominator from different populations into one "% of budget used" figure,
+    which is the exact defect the scope exists to prevent. ``services`` remains
+    the intended way to narrow a budget, because a service list narrows the
+    CEILING too.
+    """
     clauses = ["start_time >= $1", "start_time < $2", "provider = $3"]
     params: list[Any] = [since, until, provider]
     if services:

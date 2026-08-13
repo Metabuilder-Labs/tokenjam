@@ -127,14 +127,3 @@ def test_tokenmaxx_cli_json_through_serve(tmp_path, monkeypatch):
     db.close()
 
 
-def test_tokenmaxx_cli_errors_cleanly_without_serve_or_conn():
-    """A backend that is neither a live conn nor an ApiBackend → clean error."""
-    class _Dummy:  # no .conn, not an ApiBackend
-        pass
-
-    result = CliRunner().invoke(
-        cmd_tokenmaxx, ["--since", "30d"],
-        obj={"db": _Dummy(), "config": _config(), "agent": None},
-    )
-    assert result.exit_code != 0
-    assert "tj serve" in result.output

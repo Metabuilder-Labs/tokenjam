@@ -7,6 +7,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from tokenjam.core.agent_kind import classify_agent_kind
 from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
 from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
@@ -143,9 +144,16 @@ def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
         stripped[TjAttributes.TOOL_ARG_SIG] = sig
     if not capture.prompts:
         stripped.pop(GenAIAttributes.PROMPT_CONTENT, None)
-        # The recovered system prefix (a project's CLAUDE.md text, stamped by
-        # backfill) is prompt content and rides the same toggle.
+        # The recovered system prefix (derived from a project's CLAUDE.md by
+        # backfill) is prompt content and rides the same toggle. All four keys
+        # go: the legacy text one for spans that still carry it, and the three
+        # compact ones that replaced it — SAMPLE is literal prompt text, and
+        # leaving HASH/LENGTH behind would keep a fingerprint of a file the
+        # user just said not to capture.
         stripped.pop(TjAttributes.SYSTEM_PREFIX_CONTENT, None)
+        stripped.pop(TjAttributes.SYSTEM_PREFIX_HASH, None)
+        stripped.pop(TjAttributes.SYSTEM_PREFIX_SAMPLE, None)
+        stripped.pop(TjAttributes.SYSTEM_PREFIX_LENGTH, None)
         for key in _REQUEST_PARAM_ATTRS:
             stripped.pop(key, None)
     if not capture.completions:
@@ -509,6 +517,16 @@ class IngestPipeline:
 
         # New session
         plan_tier = self._resolve_plan_tier(span.billing_account)
+        # This path sees a MIX of runtimes — Claude Code / Codex OTLP telemetry
+        # and genuine SDK callers all converge here — so, unlike the two
+        # backfill adapters (which each parse exactly one tool's own files and
+        # can just say so), the source has to be classified rather than
+        # stated. `classify_agent_kind` is the TIGHTER of the two existing
+        # predicates (exact match on Codex's hardcoded service name, not a
+        # prefix), reused here as the write-time source of truth rather than
+        # duplicated — see core.agent_kind's module docstring for why it and
+        # `alerts.is_interactive_coding_agent` intentionally stay separate.
+        agent_kind = classify_agent_kind(span.agent_id)
         return SessionRecord(
             session_id=span.session_id,
             agent_id=span.agent_id or "unknown",
@@ -528,6 +546,7 @@ class IngestPipeline:
             service_instance_id=span.service_instance_id,
             run_id=span.run_id,
             parent_session_id=span.parent_session_id,
+            source=agent_kind.group or "sdk",
         )
 
     def _resolve_project(self, agent_id: str | None) -> str | None:

@@ -85,6 +85,48 @@ jobs:
         working-directory: npm-wrapper
         run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
 
+      # Both publish workflows fire off the same `release: published` event with
+      # no ordering dependency between them, and this job does far less work
+      # before its own publish step than the PyPI job does (which runs the full
+      # test suite first) — so without a gate here, the npm wrapper routinely
+      # goes live first. bin/tj.js pins `uvx --from tokenjam==<own version>`,
+      # and uv/pipx cache a resolved tool env against that exact spec string
+      # forever, so a user who runs `npx tokenjam` inside that window gets a
+      # PERMANENTLY stale cached environment — not a transient glitch, a
+      # sticky one. Block the wrapper publish until the exact version this
+      # release cuts is actually resolvable on PyPI, and fail the job (not
+      # just warn) if it never shows up in time, rather than publish ahead of
+      # the artifact it pins to.
+      #
+      # Uses the per-version JSON endpoint (pypi.org/pypi/<pkg>/<version>/json)
+      # rather than the package-level one: it 404s for a version that isn't
+      # live yet and 200s once it is, with no releases-list parsing needed.
+      # 200 is the ONLY success signal — no non-zero-but-ok tolerance, since
+      # the whole point of this probe is telling "resolved" from "not yet".
+      - name: Wait for matching PyPI release to be visible
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          URL="https://pypi.org/pypi/tokenjam/${VERSION}/json"
+          TIMEOUT_SECONDS=1800   # 30min: full pytest suite + build + upload + CDN/JSON-API propagation lag
+          INTERVAL_SECONDS=15
+          ELAPSED=0
+
+          echo "Waiting for tokenjam==${VERSION} to become visible at ${URL}"
+          while [ "$ELAPSED" -lt "$TIMEOUT_SECONDS" ]; do
+            STATUS="$(curl -s -o /dev/null -w '%{http_code}' "$URL")"
+            if [ "$STATUS" = "200" ]; then
+              echo "tokenjam==${VERSION} is live on PyPI after ${ELAPSED}s (http ${STATUS})"
+              exit 0
+            fi
+            echo "not yet visible after ${ELAPSED}s (http ${STATUS})"
+            sleep "$INTERVAL_SECONDS"
+            ELAPSED=$((ELAPSED + INTERVAL_SECONDS))
+          done
+
+          echo "::error::tokenjam==${VERSION} never appeared on PyPI within ${TIMEOUT_SECONDS}s. Refusing to publish the npm wrapper ahead of the PyPI artifact it pins to (see bin/tj.js version-pinning comment) — check the publish-pypi.yml run for this release."
+          exit 1
+
       - name: Publish
         working-directory: npm-wrapper
         run: npm publish --access public

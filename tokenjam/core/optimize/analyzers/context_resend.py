@@ -105,6 +105,7 @@ from tokenjam.core.optimize.analyzers.resend_tail import (
     resend_tail_tokens_per_turn,
     session_context_tokens,
 )
+from tokenjam.core import fixes as _fixes
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.span_pricing import rates_at, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
@@ -183,47 +184,54 @@ _resend_tail_tokens_per_turn = resend_tail_tokens_per_turn
 _introduced_tokens = introduced_tokens
 
 RESEND_HONESTY_CAVEAT = (
-    "Structural token-share, not a savings claim: a conservative lower bound "
-    "(benchmarks/RESULTS.md, HAL corpus: 93.8% of prompt tokens re-sent). "
-    "Measured independent of whether caching is enabled: this can read high "
-    "even when every re-sent byte was already a cheap cache read. Review "
-    "sessions before restructuring."
+    "This is a structural token-share, not a savings claim: a conservative "
+    "lower bound (benchmarks/RESULTS.md, HAL corpus: 93.8% of prompt tokens "
+    "re-sent).\n\n"
+    "It is measured independent of whether caching is enabled. This means it "
+    "can read high even when every re-sent byte was already a cheap cache "
+    "read. Review sessions before restructuring."
 )
 
 RESEND_ESTIMATE_BASIS = (
-    "repeat_tokens = sum(prompt_size) - max(prompt_size) per session "
-    "(prompt_size = input_tokens + cache_tokens per turn), aggregated "
-    "token-weighted across sessions. The headline TOKEN and USD figures count "
-    "the SAME events over the SAME sessions: both are the subagent-offload + "
-    "right-sizing lever below, so dividing one by the other yields a real "
-    "per-token price rather than a number no provider charges. A separate, "
-    "wider compaction-lever estimate (repeat_tokens x 68.3% avoidable-fraction, "
-    "cross-corpus calibrated rather than measured here) is reported on its own "
-    "`compaction_avoidable_tokens` field and is deliberately NOT summed into "
-    "the headline token figure, because no dollar figure is computed over that "
-    "population. USD claim (subagent-offload + right-sizing lever, measured "
-    "on YOUR data): for each main-thread turn of a context-heavy session, the "
-    "material it introduces (uncached input + output) is re-read by every later "
-    "main-thread turn until the next compaction, billed at the cache-read rate "
-    "— that tail is what offloading the work to a subagent removes, because a "
-    "subagent's tool output never enters the parent context. Only the share of "
-    "that volume you demonstrably CAN offload is claimed, and that share is "
-    "measured from your own sub_agent_id telemetry (how much of the "
+    "repeat_tokens = sum(prompt_size) - max(prompt_size) per session, where "
+    "prompt_size = input_tokens + cache_tokens per turn. This is aggregated "
+    "token-weighted across sessions.\n\n"
+    "The headline TOKEN and USD figures count the SAME events over the SAME "
+    "sessions. Both are the subagent-offload + right-sizing lever below. "
+    "Dividing one by the other yields a real per-token price, not a number no "
+    "provider charges.\n\n"
+    "A separate, wider compaction-lever estimate is repeat_tokens x 68.3% "
+    "avoidable-fraction, cross-corpus calibrated rather than measured here. "
+    "It is reported on its own `compaction_avoidable_tokens` field. It is "
+    "deliberately NOT summed into the headline token figure, because no "
+    "dollar figure is computed over that population.\n\n"
+    "USD claim (subagent-offload + right-sizing lever, measured on YOUR "
+    "data): take each main-thread turn of a context-heavy session. The "
+    "material it introduces is uncached input plus output. That material is "
+    "re-read by every later main-thread turn until the next compaction, "
+    "billed at the cache-read rate. That tail is what offloading the work to "
+    "a subagent removes: a subagent's tool output never enters the parent "
+    "context.\n\n"
+    "Only the share of that volume you demonstrably CAN offload is claimed. "
+    "That share is measured from your own sub_agent_id telemetry, not "
+    "inherited from a benchmark. It reflects how much of the "
     "context-introducing volume already runs in subagents, in the sessions "
-    "where you delegate at all) rather than inherited from a benchmark. "
+    "where you delegate at all.\n\n"
     "Right-sizing stacks on top: the same offloaded volume priced at the "
-    "cheaper same-family model's input rate instead of the premium one. "
+    "cheaper same-family model's input rate instead of the premium one.\n\n"
     "TOKENS claim: exactly the token counts those two dollar terms were "
-    "applied to — the offloadable share of the re-read tail (billed at the "
-    "cache-read rate) plus the offloadable share of the material a right-sized "
-    "model would have read instead (billed at the premium-vs-cheaper input-rate "
-    "gap). A turn contributes to both the token and the dollar sum or to "
-    "neither: where a rate is missing — an unpriced model, or no cheaper "
-    "same-family model to compare against — that turn is dropped from BOTH, "
-    "never counted as tokens with zero dollars against it. "
-    "Computed over main-thread spans only, so it never overlaps the subagent "
-    "analyzer's own claim. Boundary against the relearn analyzer, which prices "
-    "failed-call recovery over some of the same turns: "
+    "applied to. That is the offloadable share of the re-read tail, billed at "
+    "the cache-read rate. It is also the offloadable share of the material a "
+    "right-sized model would have read instead, billed at the "
+    "premium-vs-cheaper input-rate gap.\n\n"
+    "A turn contributes to both the token and the dollar sum, or to neither. "
+    "Where a rate is missing (an unpriced model, or no cheaper same-family "
+    "model to compare against), that turn is dropped from BOTH. It is never "
+    "counted as tokens with zero dollars against it. This is computed over "
+    "main-thread spans only, so it never overlaps the subagent analyzer's own "
+    "claim.\n\n"
+    "Boundary against the relearn analyzer, which prices failed-call recovery "
+    "over some of the same turns: "
     + RELEARN_RESEND_BOUNDARY + "."
 )
 
@@ -265,25 +273,20 @@ def _offloadable_share_disclosure(measured: OffloadableShare) -> str:
         if measured.median is not None else ""
     )
     return (
-        f" BEHAVIOURAL BASIS AND SAMPLE SIZE of the {measured.share:.1%} "
-        f"offloadable share: it is measured across the "
-        f"{measured.sessions:,} of {measured.sessions_total:,} session(s) "
-        f"({measured.sampled_fraction:.1%}) that dispatch a subagent at all, "
-        f"then applied unchanged to the sessions that never delegate — which "
-        f"are exactly the ones being advised. It therefore describes how much "
-        f"work you ALREADY offload when you offload, not how much of this "
-        f"window's in-thread work was structurally offloadable; no per-tool-call "
-        f"delegability measure is computed anywhere today.{spread}"
+        f"\n\nBEHAVIOURAL BASIS AND SAMPLE SIZE of the {measured.share:.1%} "
+        f"offloadable share. It is measured across {measured.sessions:,} of "
+        f"{measured.sessions_total:,} session(s) "
+        f"({measured.sampled_fraction:.1%}) that dispatch a subagent at all. "
+        f"That share is then applied unchanged to the sessions that never "
+        f"delegate, which are exactly the ones being advised. It therefore "
+        f"describes how much work you ALREADY offload when you offload. It is "
+        f"not a measure of how much of this window's in-thread work was "
+        f"structurally offloadable. No per-tool-call delegability measure is "
+        f"computed anywhere today.{spread}"
     )
 
-COMPACTION_FIX = (
-    "Run /compact (or start a fresh session) once accumulated context crosses "
-    "your working set. The repeated volume this finding measures is the same "
-    "content being re-sent turn over turn: trimming it directly cuts future "
-    "prompt size, regardless of whether caching is on. This is a manual, "
-    "per-session action, so it never fixes the pattern going forward — treat "
-    "it as immediate relief for an already-full session, not the durable fix."
-)
+# THE text lives in `core/fixes/registry.py`, so the lint sees it.
+COMPACTION_FIX = _fixes.fix_text("resend.compaction_relief")
 
 # The SDK-persona fallback when no priced `cache_control` example exists
 # (``fix_cache_control`` == ""). `/compact` is a Claude Code interactive
@@ -291,15 +294,13 @@ COMPACTION_FIX = (
 # unlike COMPACTION_FIX above, this stays scoped to what any SDK caller
 # controls directly: the content it assembles into the next request, not a
 # harness-specific command.
-RESEND_SDK_TRIM_FIX = (
-    "Trim or summarize the accumulated context before including it in the "
-    "next request instead of resending it unchanged turn over turn. This is "
-    "the same repeated volume this finding measures; cutting it at the call "
-    "site directly reduces future prompt size, independent of whether "
-    "caching is enabled."
-)
+# THE text lives in `core/fixes/registry.py`. It was ALSO a clause inside the
+# `resend.sdk_cache_breakpoint` record, and both are shown on the same SDK
+# card — so the trim instruction reached one user twice. One record each now:
+# that one says where to put the breakpoint, this one says what to trim.
+RESEND_SDK_TRIM_FIX = _fixes.fix_text("resend.sdk_trim_context")
 
-# The durable claude-code lever: a rung-1 CLAUDE.md rule (same write machinery
+# The durable claude-code lever: a CLAUDE.md rule (same write machinery
 # `script`/`reuse`/`verbosity` use via `cost_proposals._persona_gated_write_fields`)
 # so the context that would otherwise get re-sent every turn never accumulates
 # on the main thread in the first place. Unlike `/compact`, this persists
@@ -308,28 +309,32 @@ RESEND_SDK_TRIM_FIX = (
 # instead of `/compact` (founder critique, 2026-07-25: a real CC user abandons
 # an over-full session and starts fresh rather than compacting it, so telling
 # them to compact isn't a useful recommendation).
-SUBAGENT_OFFLOAD_FIX = (
-    "Offload context-heavy sub-tasks (broad file reads, multi-file search, "
-    "long tool-output loops, exploratory investigation) to a subagent instead "
-    "of running them inline in the main thread. A subagent's own tool logs "
-    "and intermediate output stay in its own context; only its short "
-    "conclusion returns to the caller, so the material that keeps getting "
-    "re-sent turn over turn never accumulates on the main thread to begin "
-    "with. Where available, pair this with a hook that warns once context "
-    "crosses a size threshold, as a second, automated nudge toward the same "
-    "behavior."
-)
+# THE text lives in `core/fixes/registry.py`. This constant, `downsize`'s
+# driver-role advice and `relearn`'s `context_overflow` family were three
+# separately-authored wordings of ONE instruction, so three near-identical
+# blocks could land in a single CLAUDE.md. Length and redundancy reduce
+# adherence, which makes writing the rule three times strictly worse than
+# writing it once — and the write budget's one-block-per-family rule cannot
+# catch it, because they are three families from three analyzers.
+SUBAGENT_OFFLOAD_FIX = _fixes.fix_text("resend.offload_to_subagent")
 
 #: The second half of the compound lever. Offloading decides WHERE the work
 #: runs; this decides what it runs ON. Both are settable in the same agent
 #: file's frontmatter, so the two land as one artifact rather than two cards.
-RIGHTSIZE_FIX_TEMPLATE = (
-    "Then right-size what you offload to. A subagent doing broad reads and "
-    "returning a short conclusion rarely needs the premium tier: pin both its "
-    "model and its reasoning effort in its own definition file so every future "
-    "dispatch inherits them instead of defaulting to whatever the parent runs "
-    "on."
-)
+#:
+#: This text used to say a subagent "doing broad reads and returning a short
+#: conclusion rarely needs the premium tier" — the same contradiction the
+#: subagent rubric carried (see ``cost_proposals.SUBAGENT_RUBRIC_INTRO``'s note).
+#: Breadth of reading is exactly what the offload half of this compound fix
+#: creates, so pairing "offload the broad reads" with "broad reads are cheap"
+#: told the agent the resulting worker did not need right-sizing at all, and
+#: applying the fix would not have erased the number that motivated it.
+# THE text lives in `core/fixes/registry.py`. This constant and the subagent
+# rubric in `cost_proposals` were two hand-maintained statements of one policy,
+# and they drifted: the identical "a short conclusion rarely needs the premium
+# tier" contradiction lived in both, in different words, so correcting the
+# reported one left this live. One definition, linted.
+RIGHTSIZE_FIX_TEMPLATE = _fixes.fix_text("resend.rightsize_worker")
 
 # Cap on evidence rows carried in the finding payload; aggregates are over ALL
 # sessions with measurable prompt volume, not just the capped examples.
@@ -457,6 +462,15 @@ class ResendFinding:
     #: of being claimed here (Critical Rule 27). Surfaced so the partition is
     #: visible on the payload rather than being an invisible subtraction.
     driver_role_sessions:      int = 0
+    #: ``session_id -> that session's own claimed tokens``. A BREAKDOWN of
+    #: `past_overspend_tokens`, not a second quantity: the values sum to it,
+    #: over exactly the in-scope sessions the avoidable figure was computed on.
+    #: It exists so `core/optimize/rule_placement` can put this card's
+    #: CLAUDE.md rule in the projects whose sessions incurred the re-sending,
+    #: instead of in the one file every project pays for. Weights are TOKENS and
+    #: drive both the token and the dollar split, so each destination's implied
+    #: per-token rate equals the finding's own (Critical Rule 28).
+    session_weights: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -612,38 +626,39 @@ def _coverage_note(finding: ResendFinding) -> str:
     if not sessions_total:
         return ""
     parts = [
-        f"COVERAGE. {sessions_total:,} session(s) in this window carried repeat "
-        f"volume; the avoidable figure was computed over "
+        f"COVERAGE. {sessions_total:,} session(s) in this window carried "
+        f"repeat volume. The avoidable figure was computed over "
         f"{finding.sessions_in_scope:,} of them."
     ]
     if finding.driver_role_sessions and finding.cost_driver_role_usd:
         parts.append(
             f"{finding.driver_role_sessions:,} session(s) carrying "
-            f"${finding.cost_driver_role_usd:,.2f} of that cost are analysed on "
-            f"the model-role card instead (a premium model drove them inline), "
-            f"so their avoidable portion is reported there, not counted here."
+            f"${finding.cost_driver_role_usd:,.2f} of that cost are analysed "
+            f"on the model-role card instead. A premium model drove them "
+            f"inline, so their avoidable portion is reported there, not "
+            f"counted here."
         )
     if finding.sessions_no_lever and finding.cost_no_lever_usd:
         parts.append(
             f"{finding.sessions_no_lever:,} session(s) carrying "
             f"${finding.cost_no_lever_usd:,.2f} never accumulate the "
             f"{MIN_SESSION_CONTEXT_TOKENS:,} tokens of main-thread context an "
-            f"offload lever needs, so they are dropped from the avoidability "
+            f"offload lever needs. They are dropped from the avoidability "
             f"calculation while still counting as cost."
         )
     if finding.cost_in_scope_usd and finding.offload_ceiling_usd is not None:
         parts.append(
             f"Inside the sessions that were analysed, only the "
             f"compaction-bounded main-thread re-read tail is offloadable at "
-            f"all — ${finding.offload_ceiling_usd:,.2f} of the "
-            f"${finding.cost_in_scope_usd:,.2f} cost there — and only the "
-            f"measured share of that tail is priced as avoidable."
+            f"all. That tail is ${finding.offload_ceiling_usd:,.2f} of the "
+            f"${finding.cost_in_scope_usd:,.2f} cost there. Only the measured "
+            f"share of that tail is priced as avoidable."
         )
     parts.append(
         "The difference between the two figures is therefore NOT a measurement "
         "of what was unavoidable. It is what this analyzer did not analyse."
     )
-    return " ".join(parts)
+    return "\n\n".join(parts)
 
 
 def _capture_flags(config) -> tuple[bool, bool, bool]:
@@ -667,6 +682,7 @@ def run(ctx: AnalyzerContext) -> None:
     # the partition identical to `downsize`'s rather than accidentally wider.
     turns = load_turn_compositions(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        persona_scope=ctx.persona_scope,
         ordered=True, with_tool_activity=True,
     )
     if not turns:
@@ -684,16 +700,16 @@ def run(ctx: AnalyzerContext) -> None:
 
     if len(by_session) < MIN_SESSIONS_FOR_SIGNAL:
         finding.notes.append(
-            f"Only {len(by_session)} session(s) in the window (need >= "
-            f"{MIN_SESSIONS_FOR_SIGNAL}): too few sessions to measure a "
-            "stable repeat-share."
+            f"Only {len(by_session)} session(s) are in the window. At least "
+            f"{MIN_SESSIONS_FOR_SIGNAL} are needed to measure a stable "
+            "repeat-share."
         )
         ctx.report.findings["resend"] = finding
         return
     if len(turns) < MIN_TURNS_FOR_SIGNAL:
         finding.notes.append(
-            f"Only {len(turns)} LLM turn(s) in the window (need >= "
-            f"{MIN_TURNS_FOR_SIGNAL}): too few turns to measure repeat-share."
+            f"Only {len(turns)} LLM turn(s) are in the window. At least "
+            f"{MIN_TURNS_FOR_SIGNAL} are needed to measure repeat-share."
         )
         ctx.report.findings["resend"] = finding
         return
@@ -727,6 +743,9 @@ def run(ctx: AnalyzerContext) -> None:
     sessions_by_class: dict[str, int] = {
         COVERAGE_IN_SCOPE: 0, COVERAGE_DRIVER_ROLE: 0, COVERAGE_NO_LEVER: 0,
     }
+    #: Per-session breakdown of the claimed tokens, for rule placement. Filled
+    #: alongside the two totals it decomposes, never re-derived afterwards.
+    session_weights: dict[str, int] = {}
 
     for sid, session_turns in by_session.items():
         prompt_sizes = [t.new_input_tokens + t.reread_tokens for t in session_turns]
@@ -847,6 +866,11 @@ def run(ctx: AnalyzerContext) -> None:
             offloadable_tail = tail_tokens * offloadable_share
             offload_usd_total += offloadable_tail / 1_000_000 * turn_rates.cache_read_per_mtok
             offload_tokens_total += round(offloadable_tail)
+            # Same addend, attributed to the session it came from — the
+            # placement weight (see `ResendFinding.session_weights`). Kept on
+            # the same line as the total so the two can never drift into
+            # covering different turns.
+            session_weights[sid] = session_weights.get(sid, 0) + round(offloadable_tail)
             # Same tail at a hypothetical full share: the ceiling the scope
             # factor is applied to, kept so the card can separate "outside the
             # tail definition" from "outside the measured delegable share"
@@ -874,6 +898,9 @@ def run(ctx: AnalyzerContext) -> None:
                 if rate_gap > 0:
                     rightsize_usd_total += offloaded_material / 1_000_000 * rate_gap
                     rightsize_tokens_total += round(offloaded_material)
+                    session_weights[sid] = (
+                        session_weights.get(sid, 0) + round(offloaded_material)
+                    )
 
     if total_sum <= 0:
         finding.notes.append(
@@ -929,6 +956,7 @@ def run(ctx: AnalyzerContext) -> None:
             offload_usd_total + rightsize_usd_total, 6
         )
         finding.past_overspend_tokens = claimed_tokens
+        finding.session_weights = dict(session_weights)
     else:
         # Symmetric degrade (Rule 28 corollary a): no dollars means no tokens
         # either. The measured `repeat_tokens` and the compaction lever's own
@@ -936,12 +964,15 @@ def run(ctx: AnalyzerContext) -> None:
         # answering separate questions, and neither is the aggregate the
         # cross-analyzer rollup reads.
         finding.notes.append(
-            "No dollar figure for the offload lever: this window has no "
-            "session that both delegates to a subagent (nothing to measure "
-            "your offloadable share from) and carries enough main-thread "
-            "context for offloading to pay. No token figure is claimed for it "
-            "either — the two always degrade together. The measured repeat "
-            "volume and the compaction-lever token estimate above still stand."
+            "No dollar figure is claimed for the offload lever. This window "
+            "has no session that meets both conditions the lever needs. It "
+            "would need a session that delegates to a subagent, which is what "
+            "lets us measure your offloadable share. It would also need that "
+            "same session to carry enough main-thread context for offloading "
+            "to pay.\n\n"
+            "No token figure is claimed for it either. The two always degrade "
+            "together. The measured repeat volume and the compaction-lever "
+            "token estimate above still stand."
         )
     finding.driver_role_sessions = driver_role_sessions
     if driver_role_sessions:
@@ -966,6 +997,7 @@ def run(ctx: AnalyzerContext) -> None:
     if tool_inputs_captured or prompts_captured or tool_outputs_captured:
         diag = compute_context_diagnostic(
             ctx.conn, ctx.since, ctx.until, agent_id=ctx.agent_id,
+            persona_scope=ctx.persona_scope,
             tool_inputs_captured=tool_inputs_captured,
             prompts_captured=prompts_captured,
             tool_outputs_captured=tool_outputs_captured,
@@ -974,9 +1006,10 @@ def run(ctx: AnalyzerContext) -> None:
     else:
         finding.notes.append(
             "Enable `[capture] tool_inputs = true` / `prompts = true` / "
-            "`tool_outputs = true` in tj.toml, then `tj backfill claude-code "
-            "--reingest`, to see WHICH re-read files, re-run searches, "
-            "re-pasted prompts, or re-pasted outputs are driving this number."
+            "`tool_outputs = true` in tj.toml. Then run `tj backfill "
+            "claude-code --reingest`. This shows WHICH re-read files, re-run "
+            "searches, re-pasted prompts, or re-pasted outputs are driving "
+            "this number."
         )
 
     ctx.report.findings["resend"] = finding

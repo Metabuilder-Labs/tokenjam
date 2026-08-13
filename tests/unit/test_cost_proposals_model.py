@@ -13,6 +13,8 @@ from tokenjam.utils.time_parse import utcnow
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
 from tokenjam.core.config import AgentConfig, StorageConfig, TjConfig
 from tokenjam.core.optimize import cost_proposals as cp
 from tokenjam.core.optimize.analyzers.batch_placement import (
@@ -291,10 +293,8 @@ def _subagent_finding(sub_agent_type="explore",
         sessions_with_subagents=1, total_subagents=1, subagent_cost_usd=1.2,
         subagent_tokens=92_500, window_cost_usd=2.0, percent_of_cost=0.6,
         flagged_cost_usd=1.2, rows=[row], flagged=[row],
-        # Scaled past the $5 write floor (`write_budget.MIN_NET_WRITE_USD`) so
-        # these tests can exercise the OFFERED write path at all; the $/token
-        # rate is held constant so the pair still divides back into a real
-        # price band (CLAUDE.md rule 28).
+        # The $/token rate is held constant so the pair still divides back
+        # into a real price band (CLAUDE.md rule 28).
         past_overspend_usd=9.0, past_overspend_tokens=925_000,
     )
 
@@ -349,14 +349,23 @@ def test_a_dispatch_id_never_resolves_to_an_agent_file(tmp_path, monkeypatch):
     assert card.apply_kind == ""
     assert card.signature == "cost:subagent"
     assert card.target_path == ""
-    assert card.rung == 1
+    assert card.delivery == DELIVERY_CLAUDE_MD_RULE
     assert card.proposed_fix
 
 
-def test_a_builtin_dispatch_type_falls_back_to_the_guidance_block(tmp_path, monkeypatch):
-    # `Explore` is a built-in dispatch type with no definition file on disk:
-    # the rubric note stays the fix. Its capital letter fails the slug shape,
-    # which is the correct outcome for exactly that reason.
+def test_a_builtin_dispatch_type_is_offered_a_definition_file_to_create(
+    tmp_path, monkeypatch,
+):
+    # INVERTED (Critical Rule 23). This test used to assert that `Explore`
+    # fell back to the prose rubric, and its comment called the capital-letter
+    # rejection "the correct outcome" — the suite was actively defending the
+    # defect, which is why it survived.
+    #
+    # Every Claude Code dispatch is a built-in, so requiring a definition file
+    # to already EXIST made the mechanical branch unreachable on the dominant
+    # corpus. A user or project subagent of the same name overrides the
+    # built-in and keeps its own `model`, so the file can be created: the
+    # product was not failing to find one, it was declining to create one.
     monkeypatch.setattr(cp, "_session_cwds", lambda ids, config: {"sess-1": str(tmp_path)})
     card = [
         p for p in cp.cost_proposals_from_report(
@@ -365,14 +374,21 @@ def test_a_builtin_dispatch_type_falls_back_to_the_guidance_block(tmp_path, monk
         )
         if p.analyzer == "subagent"
     ][0]
-    assert card.apply_kind == ""
-    assert card.signature == "cost:subagent"
-    assert card.rung == 1
-    assert card.proposed_fix
+    assert card.apply_kind == "agent_model"
+    assert card.agent_name == "Explore"
+    assert card.baseline["creates_file"] is True
+    assert card.one_paste_fix.startswith("# Create ")
+    # And the card explains the origin: `model` defaults to `inherit`.
+    assert "inherit" in card.advise_text
 
 
-def test_missing_agent_file_falls_back_to_the_guidance_block(tmp_path, monkeypatch):
-    # Name-shaped, but no file on disk for it.
+def test_a_missing_agent_file_is_offered_as_a_create_not_a_dead_end(
+    tmp_path, monkeypatch,
+):
+    # INVERTED (Critical Rule 23) — sibling of the built-in case above. "No
+    # file on disk" is not "no fix": the file is exactly what the fix creates,
+    # and reading its absence as a dead end is what pushed every claim on this
+    # analyzer down to prose.
     monkeypatch.setattr(cp, "_session_cwds", lambda ids, config: {"sess-1": str(tmp_path)})
     card = [
         p for p in cp.cost_proposals_from_report(
@@ -380,8 +396,8 @@ def test_missing_agent_file_falls_back_to_the_guidance_block(tmp_path, monkeypat
         )
         if p.analyzer == "subagent"
     ][0]
-    assert card.apply_kind == ""
-    assert card.signature == "cost:subagent"
+    assert card.apply_kind == "agent_model"
+    assert card.baseline["creates_file"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -478,7 +494,9 @@ def test_recompute_cost_proposals_resolves_pricing_mode_from_sessions(tmp_path):
                 started_at=start, ended_at=start + timedelta(minutes=1),
             ))
 
-        proposals = cp.recompute_cost_proposals(db, _cfg(tmp_path), window_days=30)
+        proposals = cp.recompute_cost_proposals(
+            db, _cfg(tmp_path), window_days=30,
+        ).proposals
         placement = [p for p in proposals if p.analyzer == "placement"]
         assert placement, "expected a placement card from the cadence-regular sessions"
         assert placement[0].past_overspend_usd is None
@@ -571,8 +589,17 @@ def test_a_dispatch_id_fails_the_agent_definition_name_check():
 def test_a_real_agent_type_passes_the_name_check():
     for name in ("code-reviewer", "general-purpose", "explore", "tdd-guide"):
         assert cp._names_agent_definition(name)
-    # No name, and built-in types that carry no definition file.
-    for name in ("", "Explore", "Plan"):
+    # INVERTED (Critical Rule 23). `Explore` and `Plan` used to be asserted as
+    # REJECTED, on the reasoning that a built-in carries no definition file.
+    # That reasoning was the defect: those are precisely the names the
+    # define-an-override fix targets, and a lowercase-only shape check meant
+    # the fix that needs them most could never reach its own branch. The
+    # dispatch-id guard is what does the real filtering here; the case rule
+    # was never doing that work.
+    for name in ("Explore", "Plan"):
+        assert cp._names_agent_definition(name)
+    # An empty name, and a per-dispatch id, are still not definition names.
+    for name in ("", "af8b26e872b7184a7", "aw-ratehistory-7e1dd2a1642d7c29"):
         assert not cp._names_agent_definition(name)
 
 

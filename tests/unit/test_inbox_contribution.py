@@ -367,3 +367,56 @@ def test_an_unpriced_cost_proposal_stays_unpriced_never_zero():
          "past_overspend_tokens": None}, window=WINDOW)
     assert stamped["inbox_contribution_usd"] is None
     assert stamped["inbox_contribution_tokens"] is None
+
+
+# --- the tile and the inbox cover the same POPULATION, not just the window -- #
+
+def test_the_tile_figure_excludes_applied_clusters_exactly_like_the_inbox():
+    """One analyzer, two surfaces, and the population is half the derivation.
+
+    The window was unified first, which fixed the loud half and hid the rest:
+    the tile still read the finding-level bucket, which covers EVERY retained
+    cluster, while the inbox summed the OPEN ones — so the two disagreed by
+    exactly what the user had already fixed, and applying a fix moved the
+    inbox while the Dashboard sat still, still claiming the recovered money.
+
+    Pinned as an equality against the inbox's own derivation rather than
+    against a literal, so the two cannot drift apart again by one side being
+    retuned.
+    """
+    from tokenjam.core.optimize.inbox_contribution import (
+        window_scoped_finding_figure,
+    )
+
+    open_a = _cluster("open-a", windows={WINDOW: _bucket(usd=30.0, reread_usd=5.0)})
+    open_b = _cluster("open-b", windows={WINDOW: _bucket(usd=20.0, reread_usd=2.0)})
+    done = _cluster("done", windows={WINDOW: _bucket(usd=100.0, reread_usd=10.0)})
+    finding = {
+        "clusters": [open_a, open_b, done],
+        # What the detector precomputes at finding level: every cluster.
+        "past_overspend_windows": {
+            WINDOW: _bucket(usd=150.0, reread_usd=17.0),
+        },
+    }
+    applied = ["done"]
+
+    inbox = sum(
+        (row.get("past_overspend_usd") or 0.0)
+        for row in relearn_contribution_rows(
+            finding, label=WINDOW, applied_signatures=applied,
+        )
+    )
+    tile = window_scoped_finding_figure(
+        finding, days=30, applied_signatures=applied,
+    )
+
+    assert inbox == pytest.approx(43.0)      # (30-5) + (20-2)
+    assert tile is not None
+    assert tile["usd"] == pytest.approx(inbox), (
+        "the Dashboard tile and the Review inbox published different "
+        "populations of the same analyzer over the same window"
+    )
+    # And the applied cluster's money is genuinely gone from it, not merely
+    # equal by coincidence of the fixture.
+    whole = window_scoped_finding_figure(finding, days=30)
+    assert whole is not None and whole["usd"] == pytest.approx(133.0)

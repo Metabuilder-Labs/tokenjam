@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -10,11 +10,13 @@ from tokenjam.api.deps import require_api_key
 from tokenjam.core.cycle import cycle_bounds, effective_cycle_start_day
 from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
+    PERSONAS,
     WindowSummary,
     compute_framing,
     plan_determination_mix,
 )
 from tokenjam.core.models import CostFilters
+from tokenjam.core.persona_scope import add_persona_clause
 from tokenjam.core.pricing_coverage import coverage_note, summarize_pricing_coverage
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -228,15 +230,40 @@ _COMPONENT_LABELS = [
 ]
 
 
-def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
+def _component_costs(conn, agent_id, since_dt, until_dt, persona=None) -> dict:
     """Split the window's spend into the four token components (#211).
 
-    Computes each component's cost per (provider, model) via the pricing table
-    so the split is exact rather than apportioned from the aggregate cost_usd.
-    Returns the four components with both cost and token volume (the UI shows
-    tokens for subscription/local framing where dollars are suppressed).
+    Computes each component's cost per (provider, model, variant) via the
+    pricing table so the split is exact rather than apportioned from the
+    aggregate cost_usd. Returns the four components with both cost and token
+    volume (the UI shows tokens for subscription/local framing where dollars
+    are suppressed).
+
+    THE SPLIT MUST SUM TO THE WINDOW TOTAL ``/cost`` PUBLISHES. That total is
+    ``SUM(spans.cost_usd)``, priced once at ingest by ``CostEngine.
+    process_span``, and the only way a re-pricing agrees with it is by using the
+    same convention for all three of its inputs:
+
+    * the INSTANT — the UTC-day bucket below, since a rate can only change at
+      UTC midnight (``SPAN_UTC_DAY_SQL``);
+    * the VARIANT — ``core.cost.SPAN_VARIANT_SQL``, the stored-column spelling
+      of ``rate_variant_for_span``. This used to be omitted entirely, so every
+      span was re-priced at ``STANDARD_VARIANT``: an Anthropic ``speed="fast"``
+      call billed at the premium rate in the stored total and at half that here;
+    * the FALLBACK — ``core.cost.billing_rates``, which never returns ``None``.
+      This used to be ``span_pricing.rates_at`` followed by ``continue``, so a
+      model absent from the pricing table contributed real fallback dollars to
+      ``/cost`` and exactly ``$0`` here, silently.
+
+    Reconciliation is exact up to per-span 8-dp rounding (``calculate_cost``
+    rounds each span; this sums a bucket's tokens first). The one population
+    that can still differ is a span with a model but NO provider: ``CostEngine``
+    skips those, leaving whatever cost ingest supplied, while the lookup here
+    falls back to ``UNKNOWN_PROVIDER``. ``pricing_coverage`` on the payload is
+    what discloses fallback-priced traffic either way.
     """
-    from tokenjam.core.optimize.span_pricing import SPAN_UTC_DAY_SQL, rates_at
+    from tokenjam.core.cost import SPAN_VARIANT_SQL, billing_rates
+    from tokenjam.core.optimize.span_pricing import SPAN_UTC_DAY_SQL, UNKNOWN_PROVIDER
 
     comp = {k: {"cost_usd": 0.0, "tokens": 0} for k, _ in _COMPONENT_LABELS}
     if conn is None:
@@ -252,6 +279,15 @@ def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
     if until_dt is not None:
         params.append(until_dt)
         clauses.append("start_time <= $" + str(len(params)))
+    # The persona POPULATION scope. These bars used to be deliberately
+    # unscoped, on the reasoning that measured spend is measured spend whatever
+    # persona is selected. That held only while nothing ELSE on the surface was
+    # scoped. The overlay drawn on top of them is now this persona's, and the
+    # ceiling's denominator comes from the same split — so leaving the bars
+    # whole-corpus published one persona's overspend as a share of everybody's
+    # spend, which rendered as "exceeds measured spend" on a corpus where it
+    # did not.
+    add_persona_clause(clauses, persona)
     where = " AND ".join(clauses)
     # Grouped by UTC day as well as (provider, model) so each bucket prices at
     # the rate that actually billed it — a UTC day never straddles a rate change
@@ -259,22 +295,28 @@ def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
     # are summed across buckets, which is the price-each-span-then-sum
     # convention in `tokenjam.core.optimize.span_pricing`.
     sql = (
-        "SELECT provider, model, COALESCE(SUM(input_tokens), 0), "
+        f"SELECT provider, model, {SPAN_VARIANT_SQL} AS variant, "
+        "COALESCE(SUM(input_tokens), 0), "
         "COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_tokens), 0), "
         "COALESCE(SUM(cache_write_tokens), 0), MIN(start_time) "
         "FROM spans WHERE " + where
-        + f" GROUP BY provider, model, {SPAN_UTC_DAY_SQL}"
+        + f" GROUP BY provider, model, variant, {SPAN_UTC_DAY_SQL}"
     )
-    for (provider, model, in_t, out_t, cr_t, cw_t,
+    for (provider, model, variant, in_t, out_t, cr_t, cw_t,
          day_start) in conn.execute(sql, params).fetchall():
         in_t, out_t, cr_t, cw_t = int(in_t or 0), int(out_t or 0), int(cr_t or 0), int(cw_t or 0)
         comp["input"]["tokens"] += in_t
         comp["output"]["tokens"] += out_t
         comp["cache_read"]["tokens"] += cr_t
         comp["cache_write"]["tokens"] += cw_t
-        rates = rates_at(provider, model, day_start) if (model and day_start) else None
-        if rates is None:
-            continue
+        # No `continue` on an unresolved rate, and no skip on a missing bucket
+        # instant: `start_time` is NOT NULL, so `day_start` is only ever absent
+        # for a store that has been corrupted below the schema, and
+        # `billing_rates` then prices at the current rate exactly as a live
+        # call does rather than dropping the bucket's money to zero.
+        rates = billing_rates(
+            provider or UNKNOWN_PROVIDER, model, at=day_start, variant=variant,
+        )
         comp["input"]["cost_usd"] += in_t * rates.input_per_mtok / 1_000_000.0
         comp["output"]["cost_usd"] += out_t * rates.output_per_mtok / 1_000_000.0
         comp["cache_read"]["cost_usd"] += cr_t * rates.cache_read_per_mtok / 1_000_000.0
@@ -282,7 +324,7 @@ def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
     return comp
 
 
-def _collect_recoverable(report) -> list[dict]:
+def _collect_recoverable(report, *, persona: str | None = None) -> list[dict]:
     """Registry-driven per-analyzer recoverable list (#211 overlay).
 
     Iterates the typed downgrade slot + every wave-2 finding carrying the #111
@@ -313,8 +355,25 @@ def _collect_recoverable(report) -> list[dict]:
             "caveat": getattr(finding, "caveat", "") or "",
         })
 
-    add("downsize", getattr(report, "downgrade", None))
-    for name, finding in (getattr(report, "findings", None) or {}).items():
+    # PERSONA-SCOPED, because "every finding carrying the field" is no longer the
+    # same set as "every finding this reader can act on": the daemon's pass
+    # computes the union across personas so one stored report can answer for
+    # either side of the persona picker (`runner.build_report`'s `personas`), so
+    # a claude-code window's stored report now legitimately carries `reuse` /
+    # `verbosity` / `script` findings. Summing those into this overlay would
+    # publish recoverable dollars against levers this persona does not have.
+    # Same map both halves of the gate read (ANALYZER-PERSONA-MATRIX.md §6).
+    from tokenjam.core.optimize import disabled_analyzers_for_persona, findings_for_persona
+
+    # The REQUESTED persona when the caller named one, else the corpus's own —
+    # so this overlay covers the same population as the analyzer list rendered
+    # beside it on the Optimize screen.
+    view_persona = persona or str(getattr(report, "persona", "") or "unknown")
+    if "downsize" not in disabled_analyzers_for_persona(view_persona):
+        add("downsize", getattr(report, "downgrade", None))
+    for name, finding in findings_for_persona(
+        getattr(report, "findings", None) or {}, view_persona,
+    ).items():
         if name == "downsize":
             continue
         if hasattr(finding, "past_overspend_usd"):
@@ -349,12 +408,163 @@ def _recoverable_overlap_note(recoverable: list[dict]) -> str:
     )
 
 
+# THE SPEND BAR'S DENOMINATOR. `total_recoverable_usd` is NOT a figure over the
+# window the caller asked for, and it never can be: it is read out of the stored
+# analyzer report, which is computed on the daemon's own schedule over its own
+# window (analyzers must never run per-request). Pairing it with the requested
+# window's `total_cost_usd` published two figures over two populations — a 7-day
+# total under a 30-day ceiling, which shaded 73% of a week's spend as overspend
+# using a month's estimate, and trends past 100% as the window narrows.
+#
+# The fix is to give the ceiling a denominator drawn from ITS OWN population
+# rather than rescaling either figure: same window, same agents. `agent_id` is
+# deliberately NOT applied — the stored report is corpus-wide, so filtering the
+# denominator to one agent would reintroduce the same mismatch on the other axis.
+#
+# The denominator IS persona-scoped, and the two sentences that used to sit here
+# saying otherwise were left behind by the change that scoped it. They claimed
+# the picker selects a lever set only, and that every finding is computed over
+# the whole corpus. Both stopped being true when the daemon started storing a
+# separately-scoped sub-report per persona: `stored_report_for_persona` serves
+# THAT persona's pass, and `_component_costs` below takes the same `persona` so
+# the ceiling and its denominator cover one population. A stale comment asserting
+# the old contract is worse than none, because the next reader trusts it over the
+# code. `recoverable_basis_note` states the live contract on the bar itself.
+def _recoverable_window_bounds(scan: dict) -> tuple[datetime | None, datetime | None]:
+    """The window the stored report actually observed, as datetimes.
+
+    Prefers the cycle record's own `scan_since`/`scan_until` (the resolved
+    bounds the pass sealed). Falls back to `computed_at` minus `window_days` for
+    an artifact written before that record existed. Returns ``(None, None)``
+    when neither is available — the bounds are never invented, because a
+    denominator over a guessed window is the defect this exists to prevent.
+    """
+    def _parse(value) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        if isinstance(value, str) and value:
+            try:
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return None
+
+    until = _parse(scan.get("scan_until")) or _parse(scan.get("computed_at"))
+    since = _parse(scan.get("scan_since"))
+    if since is None:
+        days = scan.get("window_days")
+        if until is not None and isinstance(days, (int, float)) and days > 0:
+            since = until - timedelta(days=float(days))
+    if since is None or until is None:
+        return None, None
+    return since, until
+
+
+#: How the picker's values read in the note. The bar is prose, so it uses the
+#: same words the picker shows rather than the wire key.
+_PERSONA_TRAFFIC_LABEL = {
+    "claude-code": "Claude Code",
+    "sdk": "SDK workflow",
+}
+
+
+def _recoverable_basis_note(
+    since_dt: datetime | None, until_dt: datetime | None, window_days,
+    persona: str | None = None, lever_persona: str | None = None,
+) -> str:
+    """What the bar's two figures cover, stated on the bar.
+
+    Prominence is the point: the mismatch this replaces was invisible precisely
+    because nothing on screen said which window the shaded region came from.
+
+    TWO OF THE THREE SENTENCES USED TO BE FALSE, and they were false in the same
+    way the defect they were written to fix was: a figure asserting more than its
+    population supports. The note said "Both figures cover every agent" and "the
+    persona picker changes which analyzers contribute to the ceiling, not which
+    traffic is measured". Once the daemon began storing a separately-scoped pass
+    per persona, the picker moved BOTH halves: on one real corpus the same bar's
+    denominator reads 13733.55 as Claude Code and 1.37 as SDK. A disclosure that
+    contradicts the payload it travels with is worse than no disclosure. The
+    middle sentence (this bar does not follow the range picker; the estimate
+    comes from the stored scan) was and is true, and is kept verbatim.
+
+    NO SENTENCE HERE MAY DESCRIBE BOTH FIGURES AT ONCE, because the two do not
+    share a population and no short phrase covering both can be true. Measured on
+    a real corpus, per-analyzer, over one 30-day window:
+
+    * the SPEND is exactly persona-scoped (`add_persona_clause`). The two
+      personas partition the corpus to the cent, so "covers <persona> traffic"
+      is precise for this half;
+    * the CEILING is a MIX. `resend`, `subagent` and `summarize` move with the
+      persona; `downsize` is exactly additive across the two; but `relearn` and
+      `deadweight` come back byte-identical scoped and unscoped, because their
+      basis is an unbounded corpus scan rather than this window (matrix §7b,
+      `relearn.py`'s own note). On that corpus they were roughly a tenth of the
+      claude-code total, sitting under a persona label while not being
+      persona-scoped at all.
+
+    So both of the obvious wordings are false. "Both figures cover every agent"
+    is false for the spend under a selected persona; "both figures cover this
+    persona's traffic" is false for the corpus-wide share of the ceiling. The
+    note therefore states each figure's coverage separately and says of the
+    ceiling only what holds for every contributor: each is measured on its own
+    basis, and not every basis is scoped to the persona. Naming WHICH
+    contributors are wider needs a per-analyzer disclosure this note cannot
+    carry, and `relearn` currently ships an empty `estimate_basis`, so its card
+    does not say either.
+
+    Do not "simplify" this back into one sentence about both figures. That is
+    the exact edit that produced the wording this replaced.
+    """
+    if since_dt is None or until_dt is None:
+        return (
+            "The last analyzer scan did not record the window it observed, so "
+            "this ceiling cannot be shown as a share of spend."
+        )
+    span = f"{since_dt.date().isoformat()} to {until_dt.date().isoformat()}"
+    days = f"{int(window_days)} days" if isinstance(window_days, (int, float)) else "window"
+    stable = (
+        f"over the analyzer scan's own {days}, {span}. This bar does not follow "
+        "the range selected above: the recoverable estimate comes from the stored "
+        "scan and is never recomputed per request."
+    )
+    label = _PERSONA_TRAFFIC_LABEL.get(persona or "")
+    if label:
+        return (
+            f"The spend covers {label} traffic {stable} The ceiling counts only "
+            "the analyzers that persona can act on, each measured on its own "
+            "basis; not every basis is scoped to this persona."
+        )
+    # NO PERSONA SELECTED, and this case is NOT a clean corpus total, so the note
+    # may not imply one. The spend covers every agent, but the ceiling is still
+    # filtered by a lever set: `_collect_recoverable` falls back to the corpus's
+    # own dominant persona, so a corpus that resolves to Claude Code drops the
+    # analyzers only an SDK user could act on while keeping every agent's spend
+    # underneath. Saying so is the whole reason this branch is separate.
+    lever_label = _PERSONA_TRAFFIC_LABEL.get(lever_persona or "")
+    if lever_label:
+        return (
+            f"The spend covers every agent {stable} The ceiling does not: with no "
+            f"persona selected it counts only the analyzers a {lever_label} user "
+            "can act on, each measured on its own basis. Select a persona above "
+            "to scope the spend to that persona too."
+        )
+    return (
+        f"The spend covers every agent {stable} Every analyzer contributes to "
+        "the ceiling, each measured on its own basis."
+    )
+
+
 @router.get("/cost/components")
 async def get_cost_components(
     request: Request,
     agent_id: str | None = None,
     since: str | None = None,
     until: str | None = None,
+    persona: str | None = None,
 ) -> dict:
     """Cost-by-component split + per-analyzer recoverable-waste overlay (#211).
 
@@ -363,9 +573,28 @@ async def get_cost_components(
     registry-driven, carrying the analyzer's own caveat verbatim. "Estimated
     recoverable" is never conflated with the measured cost and never called
     "saved" (Critical Rule 14). Every figure routes through the framing block so
-    subscription/local users see token-share, not raw dollars."""
+    subscription/local users see token-share, not raw dollars.
+
+    `persona` scopes the OVERLAY to the analyzers that persona has a lever for,
+    the same way `GET /optimize?persona=` does — the two are rendered on one
+    screen and read as one answer. Without it this endpoint named the corpus's
+    dominant persona's biggest opportunity ("Biggest single cause: Subagent")
+    beside an analyzer list that had correctly dropped Subagent for the selected
+    persona: two figures published together over two different populations
+    (root anti-pattern 22b). The component BARS are unscoped and stay that way —
+    they are measured spend, which the persona picker does not reinterpret.
+
+    `recoverable_basis_*` is the denominator the overlay's total may be drawn
+    against, and the ONLY one: same window, same agents as the stored report.
+    `total_cost_usd` answers the caller's window and is not a valid denominator
+    for it. See `_recoverable_window_bounds`."""
     db = request.app.state.db
     config = request.app.state.config
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
     try:
         since_dt = parse_since(since) if since else None
         until_dt = parse_since(until) if until else None
@@ -373,7 +602,7 @@ async def get_cost_components(
         raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     conn = getattr(db, "conn", None)
 
-    comp = _component_costs(conn, agent_id, since_dt, until_dt)
+    comp = _component_costs(conn, agent_id, since_dt, until_dt, persona)
     components = [
         {"key": key, "label": label,
          "cost_usd": round(comp[key]["cost_usd"], 8), "tokens": comp[key]["tokens"]}
@@ -392,8 +621,17 @@ async def get_cost_components(
     from tokenjam.core.optimize import report_store
 
     scan = report_store.stored_report_block(config)
-    stored = report_store.stored_report(config)
-    recoverable: list[dict] = _collect_recoverable(stored) if stored is not None else []
+    # THE PERSONA'S OWN SCOPED REPORT, not the corpus-wide one with its analyzer
+    # set sliced. Slicing the set drops findings this persona has no lever for;
+    # it does nothing about the fact that the surviving findings were computed
+    # over everybody's sessions. `stored_report_for_persona` owns that rule,
+    # including the `None` an artifact from before per-persona passes yields —
+    # which reports the overlay as NOT YET KNOWN (what `recoverable_status`
+    # already exists to say) rather than publishing the corpus's figures here.
+    stored = report_store.stored_report_for_persona(config, persona)
+    recoverable: list[dict] = (
+        _collect_recoverable(stored, persona=persona) if stored is not None else []
+    )
 
     # A cold store contributes NO overlay and says so via `recoverable_status`.
     # The totals below stay `None` rather than 0.0 in that case: a `$0.00`
@@ -407,6 +645,35 @@ async def get_cost_components(
         int(sum(r["past_overspend_tokens"] or 0 for r in recoverable)) if known else None
     )
     largest = recoverable[0] if recoverable else None
+
+    # The ceiling's OWN denominator (see _recoverable_window_bounds): measured
+    # spend over the stored report's window, across every agent, so the spend
+    # bar's two figures cover one population. Only computed when a report exists
+    # — with nothing measured there is no ceiling to give a share of, and a
+    # denominator published beside an unmeasured numerator is the zero-as-
+    # reassurance failure in a second costume.
+    rec_since_dt, rec_until_dt = _recoverable_window_bounds(scan)
+    basis_cost: float | None = None
+    basis_tokens: int | None = None
+    if known and rec_since_dt is not None:
+        if (
+            agent_id is None
+            and since_dt == rec_since_dt
+            and (until_dt or rec_until_dt) == rec_until_dt
+        ):
+            # The requested window IS the report's window: reuse the split
+            # already computed above rather than running the aggregate twice.
+            basis_cost, basis_tokens = total_cost, total_tokens
+        else:
+            # SAME persona as the numerator above. `agent_id` is deliberately
+            # dropped here (the ceiling spans every agent in the scan) but the
+            # persona is not: it is the population the ceiling was computed
+            # over, so it has to be the population the denominator covers.
+            basis = _component_costs(
+                conn, None, rec_since_dt, rec_until_dt, persona,
+            )
+            basis_cost = sum(v["cost_usd"] for v in basis.values())
+            basis_tokens = sum(v["tokens"] for v in basis.values())
 
     return {
         "components": components,
@@ -427,11 +694,49 @@ async def get_cost_components(
         "total_recoverable_tokens": total_rec_tokens,
         "recoverable_additive": False,
         "recoverable_overlap_note": _recoverable_overlap_note(recoverable),
+        # THE ONLY DENOMINATOR `total_recoverable_usd` MAY BE DRAWN AGAINST.
+        # Measured spend over the SAME window and the SAME agents the stored
+        # report covered, so a caller cannot accidentally pair the ceiling with
+        # the requested window's total (which is what the spend bar did). `None`
+        # means the share is unknowable, never zero.
+        "recoverable_basis_cost_usd": (
+            round(basis_cost, 8) if basis_cost is not None else None
+        ),
+        "recoverable_basis_tokens": basis_tokens,
+        "recoverable_basis_since": (
+            int(rec_since_dt.timestamp()) if rec_since_dt is not None else None
+        ),
+        "recoverable_basis_until": (
+            int(rec_until_dt.timestamp()) if rec_until_dt is not None else None
+        ),
+        # Travels WITH the pair, exactly like `recoverable_overlap_note`: the
+        # window and scope disclosure is part of the claim, not decoration a
+        # renderer may drop.
+        # `lever_persona` mirrors the fallback `_collect_recoverable` applies, so
+        # the note describes the set that actually built the ceiling rather than
+        # the one the caller asked for. It is an argument, not a payload field.
+        "recoverable_basis_note": (
+            _recoverable_basis_note(
+                rec_since_dt, rec_until_dt, scan["window_days"], persona,
+                str(getattr(stored, "persona", "") or "") if stored is not None else None,
+            )
+            if known else ""
+        ),
         # The one entry in `recoverable` that is honest as a standalone claim:
         # it isn't a sum of anything, so it's the floor a reader can act on.
         "largest_recoverable_usd": largest["past_overspend_usd"] if largest else None,
         "largest_recoverable_tokens": largest["past_overspend_tokens"] if largest else None,
         "largest_recoverable_analyzer": largest["analyzer"] if largest else None,
+        # Same block, same derivation, as `/cost` — now that the component split
+        # prices unpriced models through the same non-null fallback the stored
+        # total uses, the two endpoints publish the same dollars over the same
+        # window, and a reader of EITHER has to be able to tell an estimated
+        # figure from a quoted one. Shipping it on one and not the other made
+        # the components view the surface where a 5-30x-wrong model stayed
+        # invisible.
+        "pricing_coverage": _pricing_coverage_block(
+            conn, agent_id, since_dt, until_dt,
+        ),
         "framing": _framing_block(db, config, agent_id, total_cost, total_tokens),
     }
 
@@ -578,9 +883,21 @@ async def get_cost(
     feature: str | None = None,
     environment: str | None = None,
     prompt_version: str | None = None,
+    persona: str | None = None,
 ) -> dict:
+    """Grouped spend for the window.
+
+    ``persona`` scopes to one side of the "Viewing as" picker, through
+    ``CostFilters`` so every figure derived from these filters covers the same
+    population. Omitted (and `mixed`/`unknown`) means all spend.
+    """
     db = request.app.state.db
     config = request.app.state.config
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
     try:
         since_dt = parse_since(since) if since else None
         until_dt = parse_since(until) if until else None
@@ -595,6 +912,7 @@ async def get_cost(
         feature=feature,
         environment=environment,
         prompt_version=prompt_version,
+        persona=persona,
     )
     rows = db.get_cost_summary(filters)
     total = sum(r.cost_usd for r in rows)

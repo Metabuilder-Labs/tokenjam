@@ -13,6 +13,11 @@ from tokenjam.utils.time_parse import utcnow
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_SKILL,
+)
+
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import cost_apply, relearn_store
@@ -186,7 +191,7 @@ def test_relearn_recompute_preserves_cost_window_and_excluded(tmp_path):
     """A relearn detector recompute must not silently forget a non-default
     cost window or the excluded block a prior cost-proposals recompute wrote.
 
-    Both routes fall back to the same `DEFAULT_COST_WINDOW_DAYS` today, so a
+    Both routes fall back to the same `FALLBACK_COST_WINDOW_DAYS` today, so a
     dropped `cost_window_days` was invisible on live data -- but the moment a
     caller stores a non-default window, `write_cache` (the relearn job's own
     write into the shared cache file) must round-trip it rather than reset
@@ -241,7 +246,7 @@ def test_subagent_proposal_is_apply_capable_cc_origin():
     assert p.analyzer == "subagent"
     assert p.apply_capable is True
     assert p.advise_only is False        # CC-origin has a workspace surface
-    assert p.rung == 1 and p.scope == "project"
+    assert p.delivery == DELIVERY_CLAUDE_MD_RULE and p.scope == "project"
     assert p.proposed_fix                # a sizing rubric note to write
     assert p.target_key == {"models": ["claude-opus-4-8"], "subagent": True}
 
@@ -262,7 +267,7 @@ def _dead_server(**overrides):
     from tokenjam.core.optimize.analyzers.deadweight import ServerDeadweight
     fields = dict(
         name="apollo", scope="project", source="/repo/.mcp.json",
-        sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
+        sessions_present=10, invocations=0, deferred_sessions=0, unused=True,
         estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_window=225_000,
         tax_construction="25,000 tok/session (full schema injection), cited estimate.",
         fix="Remove or project-scope the `apollo` MCP server (/repo/.mcp.json); "
@@ -282,7 +287,7 @@ def _deadweight_finding(dead_servers=None, tax_table=None):
     ]
     return DeadweightFinding(
         sessions_scanned=10, configured_servers=1,
-        servers=dead_servers, dead_servers=dead_servers, tax_table=tax_table,
+        servers=dead_servers, unused_servers=dead_servers, tax_table=tax_table,
         past_overspend_tokens=sum(s.estimated_tax_tokens_window for s in dead_servers) or None,
         estimate_basis="sum of each dead server's schema-injection tax "
                        "observed over this window",
@@ -392,9 +397,9 @@ def test_deadweight_finding_survives_report_dict_round_trip():
 
     finding = rebuilt.findings["deadweight"]
     assert finding.configured_servers == 1
-    assert len(finding.dead_servers) == 1
-    assert finding.dead_servers[0].name == "apollo"
-    assert finding.dead_servers[0].example_sessions == ["s0", "s1", "s2"]
+    assert len(finding.unused_servers) == 1
+    assert finding.unused_servers[0].name == "apollo"
+    assert finding.unused_servers[0].example_sessions == ["s0", "s1", "s2"]
     assert finding.past_overspend_tokens == 225_000
     assert len(finding.tax_table) == 1
     assert finding.tax_table[0].source == "MCP schema: apollo"
@@ -442,10 +447,10 @@ def test_script_proposal_shape_and_apply_fields():
     assert p.past_overspend_usd == 0.5
     assert p.past_overspend_tokens == 12_500
     assert p.estimate_basis == "script basis"
-    # Apply-capable: a rung-2 skill note, same class of surface as `subagent`.
+    # Apply-capable: a skill note, same class of surface as `subagent`.
     assert p.advise_only is False
     assert p.apply_capable is True
-    assert p.rung == 2
+    assert p.delivery == DELIVERY_SKILL
     assert p.scope == "project"
     assert p.proposed_fix
     assert p.baseline["apply_sessions"] == 25
@@ -524,7 +529,7 @@ def test_reuse_proposal_shape_and_apply_fields():
     assert p.past_overspend_tokens == 900
     assert p.advise_only is False
     assert p.apply_capable is True
-    assert p.rung == 1
+    assert p.delivery == DELIVERY_CLAUDE_MD_RULE
     assert p.scope == "project"
     assert p.proposed_fix
     assert p.baseline["apply_sessions"] == 4
@@ -575,7 +580,9 @@ def test_verbosity_proposal_shape_and_apply_fields():
     assert p.past_overspend_tokens == 9_000
     assert p.advise_only is True
     assert p.apply_capable is False
-    assert p.rung == 0
+    # No mechanism named at all is what "no write is offered" now looks
+    # like: an empty string, not a zero that had to mean "off the ladder".
+    assert p.delivery == ""
     assert p.scope == ""
     assert p.proposed_fix == ""
     # The remedy snippet + the concrete suggested cap both land in the
@@ -613,8 +620,8 @@ def test_script_reuse_verbosity_wired_into_cost_analyzers_and_report_adapter():
 
 # --- Persona-gated fix modality (script / reuse / verbosity) ----------------
 #
-# script/reuse's apply path is a rung-1 CLAUDE.md note or rung-2
-# .claude/skills/<slug>/SKILL.md — an artifact nothing in an SDK service's
+# script/reuse's apply path is a CLAUDE.md rule or a
+# .claude/skills/<slug>/SKILL.md skill — an artifact nothing in an SDK service's
 # request path ever reads. An "sdk"/"unknown" persona must never see
 # apply_capable=True for them; the identical recommendation must still reach
 # them as a copy-pasteable `suggestion`. A "claude-code" window must be
@@ -651,7 +658,9 @@ def test_sdk_persona_gets_snippet_not_write(adapter_name, finder):
     p = props[0]
     assert p.apply_capable is False
     assert p.advise_only is True
-    assert p.rung == 0
+    # No mechanism named at all is what "no write is offered" now looks
+    # like: an empty string, not a zero that had to mean "off the ladder".
+    assert p.delivery == ""
     assert p.scope == ""
     assert p.proposed_fix == ""
     assert p.suggestion  # the recommendation still reaches the sdk user
@@ -701,7 +710,7 @@ def test_claude_code_persona_is_byte_identical_to_pre_gating_shape(adapter_name,
     p = props[0]
     assert p.advise_only is False
     assert p.apply_capable is True
-    assert p.rung in (1, 2)
+    assert p.delivery in (DELIVERY_CLAUDE_MD_RULE, DELIVERY_SKILL)
     assert p.scope == "project"
     assert p.proposed_fix
     assert p.suggestion == ""  # unchanged from before this gating existed
@@ -740,7 +749,9 @@ def test_verbosity_never_offers_the_write_for_any_persona(persona):
     p = props[0]
     assert p.apply_capable is False
     assert p.advise_only is True
-    assert p.rung == 0
+    # No mechanism named at all is what "no write is offered" now looks
+    # like: an empty string, not a zero that had to mean "off the ladder".
+    assert p.delivery == ""
     assert p.scope == ""
     assert p.proposed_fix == ""
     assert p.suggestion == p.advise_text  # the recommendation still reaches everyone
@@ -754,12 +765,8 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
 
     rep = _report()
     rep.findings["script"] = _workflow_finding()
-    # A saving big enough to clear the write budget's net-of-standing-cost
-    # gate, so this test measures ONLY the persona decision. The shared
-    # `_reuse_cluster` default (900 tokens over a 10-session window) is
-    # deliberately smaller than the CLAUDE.md rule it would write costs to
-    # keep, which is a net-negative write the budget is right to suppress —
-    # see `test_write_budget_suppresses_net_negative_cost_write`.
+    # A saving large enough to exercise a real write, so this test measures
+    # ONLY the persona decision.
     rep.findings["reuse"] = _reuse_finding(
         clusters=[_reuse_cluster(cache_reuse_recoverable_tokens=900_000,
                                  cache_reuse_recoverable_usd=30.0)],
@@ -1056,6 +1063,59 @@ def test_rollup_excluded_defaults_to_empty_dict_not_none():
     assert rollup["excluded"] == {}
 
 
+def test_the_rollup_can_only_be_reached_through_gather_rollup_population():
+    """A rollup population can no longer be assembled BY OMISSION.
+
+    THE DEFECT THIS PINS. Completeness used to be a caller CONVENTION:
+    whoever built ``past_overspend_rollup``'s input list had to remember to
+    separately fetch relearn's cache, turn it into rows via
+    ``relearn_contribution_rows``, and concatenate before calling this
+    function. Two callers remembered (the CLI's ``tj relearn cost-proposals``
+    and the API's ``GET /relearn/cost-proposals``); a third
+    (``cmd_quickstart``'s first-run screen) did not, and its own comment
+    asserted the two totals could never disagree while quietly handing the
+    rollup a cost-proposals-only list — relearn's money vanished from exactly
+    the screen a brand-new user sees first.
+
+    THE FIX, AND WHAT THIS PINS. ``inbox_contribution.gather_rollup_population``
+    is now the only function that gathers BOTH feeds (cost proposals AND
+    relearn's open clusters) before calling ``past_overspend_rollup``, and it
+    is written ONCE. This walks every module under ``tokenjam/`` and fails if
+    ``past_overspend_rollup`` is called from anywhere other than
+    ``inbox_contribution.py`` itself (where ``gather_rollup_population``
+    calls it) — so a future caller cannot silently regress to a
+    cost-proposals-only sum the way ``cmd_quickstart`` did: reaching the raw
+    function from a new call site is the structural signature of exactly that
+    defect, whether or not the author meant to reintroduce it.
+
+    A caller that genuinely wants a documented SUBSET (not an omission) must
+    add that call inside ``inbox_contribution.py`` itself, with its own
+    docstring naming the exclusion — see ``gather_rollup_population``'s own
+    docstring. Nothing about that path is blocked here; what is blocked is a
+    silent, undocumented bypass from outside the module that owns the
+    contract.
+
+    Tests are exempt (they legitimately pin the raw function's own behaviour,
+    e.g. this file) — this walks only the shipped package.
+
+    THE WALK ITSELF now lives in ``core/optimize/single_derivation.py``
+    (the "rollup population" entry), shared with every other
+    single-derivation seam in the product instead of being reimplemented
+    per value — see that module's docstring. This test keeps its own name
+    and account of the incident because both are still the most useful
+    place for a reader to find them; it no longer owns a second copy of the
+    AST walk.
+    """
+    from tokenjam.core.optimize.single_derivation import SEAMS, offenders_for
+
+    seam = next(s for s in SEAMS if s.name == "rollup population")
+    offenders = offenders_for(seam)
+    assert not offenders, (
+        "past_overspend_rollup called outside inbox_contribution."
+        "gather_rollup_population at:\n  " + "\n  ".join(offenders)
+    )
+
+
 # --- no per-analyzer projection: the figure is the window observation ------ #
 
 def test_no_analyzer_figure_is_paced_however_rich_the_window():
@@ -1091,14 +1151,49 @@ def test_no_analyzer_figure_is_paced_however_rich_the_window():
 
 def test_the_window_length_never_rescales_a_figure():
     # Same report read over a 10-day window and a 30-day one: the figures are
-    # the analyzer's own observations either way. `window_days` is a LABEL for
-    # the write budget's standing-cost horizon, never a divisor.
+    # the analyzer's own observations either way. `window_days` is accepted
+    # for call-site compatibility only; it never rescales a figure.
     at_10d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=10.0)}
     at_30d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=30.0)}
     assert at_10d.keys() == at_30d.keys()
     for sig, prop in at_10d.items():
         assert prop.past_overspend_usd == at_30d[sig].past_overspend_usd, sig
     assert at_30d["cost:trim:svc-a"].past_overspend_usd == pytest.approx(0.8)
+
+
+# --- apply is offered unconditionally: no write-budget gate survives ------- #
+
+def test_apply_capable_write_is_offered_however_huge_the_rule_would_be():
+    """Pins the new contract: an apply_capable cost proposal is offered
+    regardless of the size of the rule it would write, or how large the
+    instruction file it lands in already is. There is no MIN_NET_WRITE_USD
+    floor, no MAX_OFFERED_WRITES cap, and no AGENT_FILE_STANDING_CEILING_TOKENS
+    left to withhold the offer -- those were the write budget's job, and the
+    write budget is gone.
+    """
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    # A pathologically large cluster: far more recoverable tokens/dollars, and
+    # a far bigger implied rule, than any of the old write-budget constants
+    # would have tolerated for a single permanent block.
+    huge = _reuse_cluster(
+        cache_reuse_recoverable_usd=50_000.0,
+        cache_reuse_recoverable_tokens=200_000_000,
+        script_replacement_recoverable_usd=1.0,
+        script_replacement_recoverable_tokens=100,
+    )
+    rep = _report()
+    rep.findings["reuse"] = _reuse_finding(clusters=[huge])
+    # "mixed" (not "claude-code"): the pre-dispatch persona gate disables the
+    # `reuse` analyzer outright for a clean claude-code window (its levers live
+    # elsewhere), but a mixed window still runs it and offers the write.
+    rep.persona = "mixed"
+
+    prop = {p.analyzer: p for p in cost_proposals_from_report(rep)}["reuse"]
+    assert prop.apply_capable is True
+    assert prop.advise_only is False
+    assert prop.delivery
+    assert prop.proposed_fix
 
 
 # --- resend adapter (behavioral requirement #6) ------------------------------ #
@@ -1166,14 +1261,20 @@ def test_resend_suppresses_cache_control_snippet_for_claude_code():
     assert prop.advise_text.startswith(SUBAGENT_OFFLOAD_FIX)
     assert "Run /compact." in prop.advise_text   # kept, but only as secondary relief
     # The one-paste artifact is the SECOND half of the compound fix: the agent
-    # file's model + reasoning-effort pin. The offload rule is a WRITE, carried
-    # on `proposed_fix` and applied rather than pasted.
+    # file's model pin. The offload rule is a WRITE, carried on `proposed_fix`
+    # and applied rather than pasted.
     assert "model:" in prop.one_paste_fix
-    assert "reasoning_effort:" in prop.one_paste_fix
+    # INVERTED (Critical Rule 23). This used to assert `reasoning_effort:` was
+    # PRESENT — a key Claude Code does not read at all, so the user pasted it,
+    # believed effort was pinned, and nothing changed. The suite was enforcing
+    # the defect. The real key is `effort`, and it is emitted only where the
+    # observation supports a value; a guessed effort in a frontmatter block is
+    # indistinguishable from a measured one to the reader.
+    assert "reasoning_effort" not in prop.one_paste_fix
 
 
 def test_resend_claude_code_offers_apply_capable_compound_write():
-    # Durable claude-code lever: a rung-1 CLAUDE.md rule, apply-capable via the
+    # Durable claude-code lever: a CLAUDE.md rule, apply-capable via the
     # same `_persona_gated_write_fields` machinery script/reuse/verbosity use.
     # ONE card carries BOTH halves of the lever — offload the context-heavy
     # work, and right-size what you offload it to — so this consolidates the
@@ -1187,7 +1288,7 @@ def test_resend_claude_code_offers_apply_capable_compound_write():
     prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
     assert prop.advise_only is False
     assert prop.apply_capable is True
-    assert prop.rung == 1
+    assert prop.delivery == DELIVERY_CLAUDE_MD_RULE
     assert prop.scope == "project"
     assert SUBAGENT_OFFLOAD_FIX in prop.proposed_fix
     assert RIGHTSIZE_FIX_TEMPLATE in prop.proposed_fix
@@ -1271,7 +1372,11 @@ def test_resend_mixed_persona_offers_write_and_keeps_snippet():
     # the SDK share keeps its cache_control snippet on `suggestion`, while the
     # one-paste slot carries the claude-code share's right-sizing frontmatter
     # (the offload rule itself is a WRITE on `proposed_fix`, applied not pasted).
-    assert "reasoning_effort:" in prop.one_paste_fix
+    # INVERTED (Critical Rule 23) — see the sibling test: `reasoning_effort` is
+    # not a key Claude Code reads, so asserting its presence pinned a
+    # silently-ignored line into the product.
+    assert "reasoning_effort" not in prop.one_paste_fix
+    assert "model:" in prop.one_paste_fix
     assert "cache_control" not in prop.one_paste_fix
 
 
@@ -1308,11 +1413,8 @@ def test_resend_persona_flows_through_the_report_dispatch():
     from dataclasses import replace
 
     rep = _report()
-    # Scaled past the $5 write floor (`write_budget.MIN_NET_WRITE_USD`): the
-    # report dispatch runs the write budget, which declines a permanent block
-    # for a 50-cent return, and this test is about persona threading rather
-    # than about whether a rule is worth writing. Tokens move with the dollars
-    # so the implied rate stays inside a real price band (CLAUDE.md rule 28).
+    # Tokens move with the dollars so the implied rate stays inside a real
+    # price band (CLAUDE.md rule 28).
     rep.findings["resend"] = replace(
         _resend_finding(),
         past_overspend_usd=60.0, past_overspend_tokens=20_000_000,
@@ -1330,7 +1432,9 @@ def test_recompute_cost_proposals_records_failure_without_wiping_the_last_good_r
     from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
 
     good = cost_proposals_mod.recompute_cost_proposals(db, cfg)
-    assert good == []
+    assert good.status == "ready"
+    assert good.fresh is True
+    assert good.proposals == []
     written = relearn_store.read_cost_proposals(config=cfg)
     assert written is not None
     assert written["cost_proposals_error"] is None
@@ -1340,7 +1444,12 @@ def test_recompute_cost_proposals_records_failure_without_wiping_the_last_good_r
 
     monkeypatch.setattr("tokenjam.core.optimize.runner.build_report", _boom)
     result = cost_proposals_mod.recompute_cost_proposals(db, cfg)
-    assert result == []
+    # A failure says FAILED, and says so distinctly from a decline: one is
+    # abnormal, the other is routine.
+    assert result.status == "failed"
+    assert result.fresh is False
+    assert result.reason is not None and "scan blew up" in result.reason
+    assert result.proposals == []
 
     after = relearn_store.read_cost_proposals(config=cfg)
     assert after["cost_proposals_error"] == "scan blew up"
@@ -1368,15 +1477,134 @@ def test_recompute_cost_proposals_clears_a_prior_error_on_success(db, cfg, monke
 
 def test_recompute_cost_proposals_skips_when_already_locked(db, cfg):
     # Guards the scheduled background job and a manual "Rescan now" from
-    # racing each other's cache write — the loser gets `[]` back, never a
-    # blocked wait or a corrupted write.
+    # racing each other's cache write — the loser DECLINES, never a blocked
+    # wait or a corrupted write, and never a result that reads as a completed
+    # refresh that found nothing.
     from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
 
     assert cost_proposals_mod._COST_LOCK.acquire(blocking=False)
     try:
-        assert cost_proposals_mod.recompute_cost_proposals(db, cfg) == []
+        result = cost_proposals_mod.recompute_cost_proposals(db, cfg)
     finally:
         cost_proposals_mod._COST_LOCK.release()
+    assert result.status == "declined"
+    assert result.reason == cost_proposals_mod.DECLINED_RECOMPUTE_IN_FLIGHT
+    assert result.fresh is False
+    assert result.proposals == []
+
+
+def test_a_lone_cost_refresh_declines_while_a_scan_cycle_is_in_flight(db, cfg, monkeypatch):
+    """The lock alone did NOT close this.
+
+    A scan cycle is three legs (report store, relearn, cost proposals) and only
+    the LAST one touches `_COST_LOCK`. Between the cycle's report write and its
+    cost leg the lock is free, so a manual "Rescan now" (or a `tj optimize`)
+    landing in that gap used to take it uncontested and write the cost store
+    from its own report, its own anchor and its own freshly-minted cycle id —
+    and the cycle's own cost leg then found the lock held and silently returned
+    `[]`. Report store from cycle N, cost store from a standalone pass: two
+    anchors, two cycle ids, no error anywhere and nothing on either surface able
+    to tell.
+
+    The cycle-in-flight flag is the guard that actually spans the gap, so a lone
+    refresh declines against it exactly the way it already declines against the
+    lock.
+    """
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+    from tokenjam.core.optimize import scan_cycle
+
+    # A report with real findings behind it, so an EMPTY result can only mean
+    # "declined" — not "there was nothing to propose anyway". Without that this
+    # assertion would pass on a build that never had the guard at all.
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.runner.build_report", lambda *_a, **_k: _report(),
+    )
+    good = cost_proposals_mod.recompute_cost_proposals(db, cfg)
+    assert good.proposals, (
+        "fixture assumption broken: an unguarded lone refresh should produce "
+        "proposals here, or the decline below proves nothing"
+    )
+
+    scan_cycle._CYCLE_COMPUTING.set()
+    try:
+        result = cost_proposals_mod.recompute_cost_proposals(db, cfg)
+        # And it declined BEFORE taking the lock — a cycle leg arriving a
+        # moment later must still find it free.
+        assert cost_proposals_mod._COST_LOCK.acquire(blocking=False)
+        cost_proposals_mod._COST_LOCK.release()
+    finally:
+        scan_cycle._CYCLE_COMPUTING.clear()
+
+    assert result.status == "declined"
+    assert result.reason == cost_proposals_mod.DECLINED_SCAN_CYCLE_IN_FLIGHT
+    assert result.fresh is False
+    assert result.proposals == []
+    # And the LAST-GOOD set is what the caller is told is up — a decline that
+    # reported zero here would be the original defect: the store still holds a
+    # full set, so publishing 0 asserts something the data does not support.
+    assert result.served_count == len(good.proposals)
+    assert result.served_computed_at == (
+        relearn_store.read_cost_proposals(config=cfg)["cost_computed_at"]
+    )
+
+
+def test_a_cycle_leg_is_never_blocked_by_its_own_cycle_flag(db, cfg, monkeypatch):
+    """The guard above must not deadlock the very pass it protects.
+
+    `_CYCLE_COMPUTING` is set for the WHOLE cycle, cost leg included, so a naive
+    "decline while a cycle is running" would make the cycle decline itself and
+    the cost store would never be written again. `provenance` is what tells the
+    two apart: a leg of the pass carries the cycle's record; a competing
+    standalone pass carries none.
+    """
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+    from tokenjam.core.optimize import scan_cycle
+    from tokenjam.core.optimize.cycle_provenance import begin_cycle
+
+    record = begin_cycle(cfg, conn=getattr(db, "conn", None))
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.runner.build_report", lambda *_a, **_k: _report(),
+    )
+    scan_cycle._CYCLE_COMPUTING.set()
+    try:
+        result = cost_proposals_mod.recompute_cost_proposals(
+            db, cfg, provenance=record,
+        )
+    finally:
+        scan_cycle._CYCLE_COMPUTING.clear()
+    assert result.status == "ready", "the cycle's own cost leg was blocked by its own flag"
+    assert result.proposals, "the cycle's own cost leg was blocked by its own flag"
+
+
+def test_legacy_cost_window_keys_never_disagree_with_the_cycle_provenance_record(db, cfg):
+    """``cost_since``/``cost_until`` and the record's ``since``/``until`` are two
+    spellings of ONE fact, and the store lets a caller supply them independently:
+    the string kwargs win over the record when both are given. The single
+    production caller derives both from the same window, so they agree TODAY BY
+    CONSTRUCTION — nothing forces it. This pins the production path's artifact,
+    so an edit that starts passing bounds computed apart from the record fails
+    here instead of silently restoring the two-spellings bug the record exists to
+    end.
+
+    Asserted on the KEYS' presence first: an artifact that stored neither
+    spelling would satisfy an equality check vacuously, which is the failure mode
+    least likely to be noticed.
+    """
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+
+    assert cost_proposals_mod.recompute_cost_proposals(db, cfg).status == "ready"
+    payload = relearn_store.read_cost_proposals(config=cfg)
+
+    record = payload["cost_provenance"]
+    for key in ("cost_since", "cost_until", "cost_window_days", "cost_tj_version"):
+        assert key in payload, f"{key} missing — equality below would pass vacuously"
+    for key in ("since", "until", "window_days", "build"):
+        assert record.get(key) is not None, f"provenance {key} missing"
+
+    assert payload["cost_since"] == record["since"]
+    assert payload["cost_until"] == record["until"]
+    assert payload["cost_window_days"] == record["window_days"]
+    assert payload["cost_tj_version"] == record["build"]
 
 
 def test_write_and_clear_cost_proposals_error_round_trip(tmp_path):
@@ -1468,19 +1696,35 @@ def _downsize_finding():
     )
 
 
-def test_downsize_window_wide_card_gives_claude_code_the_cc_lever_not_a_raw_swap():
-    """A claude-code window can't switch its own interactive model mid-
-    session, so the window-wide fallback card must not hand it the raw
-    "route to a cheaper model" instruction an SDK caller gets."""
+def test_downsize_window_wide_card_is_retired_for_claude_code():
+    """DECISION (persona/actionability matrix, downsize row): for
+    ``claude-code``, `downsize` fires ONLY the driver-role card. This used to
+    assert the window-wide card fired with a CC-lever fallback (INVERTED per
+    Critical Rule 23) — that fallback card always ended in "switch your own
+    interactive model", a pointer to other commands rather than a fix, so a
+    claude-code window hit a number with no fix as the common case. The
+    fixture below carries no driver-role fields, so the retired card leaves
+    nothing behind: no cards at all, not a degraded one."""
     from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
 
     props = _downsize_to_proposal(_downsize_finding(), persona="claude-code")
-    assert len(props) == 1
-    p = props[0]
-    assert "switch your own interactive model" in p.advise_text
-    assert "route to a cheaper" not in p.advise_text.lower()
-    assert "tj route export" in p.advise_text
-    assert p.suggestion == ""  # the unusable model-swap snippet is dropped
+    assert props == []
+
+
+def test_downsize_claude_code_gets_only_the_driver_role_card():
+    """When the SAME finding also carries driver-role data (the common CC
+    shape — a premium model doing undelegated work), claude-code gets exactly
+    that one card and never the tiny-session/per-agent fallback, even though
+    `candidate_sessions` is nonzero."""
+    from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
+
+    finding = _downsize_finding()
+    finding.driver_sessions = 2
+    finding.driver_recoverable_usd = 5.0
+    finding.driver_substitutes = {"claude-opus-4-8": "claude-sonnet-5"}
+
+    props = _downsize_to_proposal(finding, persona="claude-code")
+    assert [p.signature for p in props] == ["cost:downsize:driver-role"]
 
 
 def test_downsize_window_wide_card_unchanged_for_sdk_and_unknown():
@@ -1525,13 +1769,26 @@ def test_downsize_agent_card_apply_blocked_gets_cc_lever_for_claude_code():
     props = _downsize_agent_proposals(_Finding(), config=None, persona="claude-code")
     assert len(props) == 1
     p = props[0]
-    assert "Applying it here is not on offer" in p.advise_text
     assert "switch your own interactive model" in p.advise_text
+    # INVERTED (Critical Rule 23). This used to assert the generic
+    # "Applying it here is not on offer:" wording, which arrived attached to a
+    # redeploy-shaped offer. On Claude Code `agent_id` is
+    # `claude-code-<cwd-basename>` — a PROJECT DIRECTORY with ephemeral
+    # sessions, no process and no model id written down — so there is nothing
+    # to redeploy or restart, and naming three things that do not exist reads
+    # as the product not understanding the user's setup.
+    assert "redeploy" not in p.advise_text.lower()
+    assert "restart the agent" not in p.advise_text.lower()
+    assert "project directory, not a deployed service" in p.advise_text
+    # The OBSERVATION is untouched by that gate (Critical Rule 32).
+    assert p.past_overspend_usd is not None and p.past_overspend_usd > 0
 
-    # sdk/unknown never get the CC lever appended.
+    # sdk/unknown never get the CC lever appended, and DO keep the redeploy
+    # instruction, which is correct for a real deployed service.
     for persona in ("sdk", "unknown"):
         p2 = _downsize_agent_proposals(_Finding(), config=None, persona=persona)[0]
         assert "switch your own interactive model" not in p2.advise_text
+        assert "redeploy" in p2.one_paste_fix.lower()
 
 
 # --- Persona gating: placement (batch) ---------------------------------------
@@ -1638,3 +1895,65 @@ def test_an_entry_with_no_dollar_dimension_never_gets_one_fabricated():
     out = backfill_legacy_past_overspend_fields({"signature": "cost:subagent:bar"})
     assert out["past_overspend_usd"] is None
     assert out["past_overspend_tokens"] is None
+
+
+def _untyped_per_agent_downgrade():
+    """A `downgrade` finding whose `per_agent` rows are plain dicts — exactly
+    what `report_from_dict` produced before the row type was declared. Every
+    `row.delta_usd` inside the adapter then raises."""
+    from tokenjam.core.optimize.analyzers.model_downgrade import DowngradeFinding
+
+    return DowngradeFinding(
+        candidate_sessions=5, total_sessions=50,
+        actual_cost_usd=10.0, alternative_cost_usd=4.0,
+        monthly_savings_usd=6.0, percent_of_sessions=10.0,
+        examples=[], suggestions={"claude-opus-5": "claude-sonnet-5"},
+        past_overspend_usd=6.0,
+        per_agent=[{"agent_id": "a", "delta_usd": 6.0, "provider": "anthropic"}],
+    )
+
+
+# --- a skipped analyzer is a hole in the headline, never a silent one ------- #
+
+def test_an_adapter_that_raises_is_reported_rather_than_silently_dropped():
+    """The inbox surviving one bad analyzer is right; surviving it INVISIBLY is
+    what let a whole analyzer's figure disappear from the headline while the
+    Dashboard tile went on publishing it.
+
+    The concrete incident: a stored report rehydrated `downgrade.per_agent` as
+    plain dicts, `row.delta_usd` raised, and the broad `except` around each
+    adapter dropped every downsize row. The total came out smaller and looked
+    complete — no error, no empty state, nothing to notice.
+    """
+    from tokenjam.core.optimize.cost_proposals import (
+        _adapter_failure_entries,
+        cost_proposals_from_report,
+    )
+
+    report = _report()
+    report.downgrade = _untyped_per_agent_downgrade()
+
+    seen: dict[str, str] = {}
+    proposals = cost_proposals_from_report(
+        report, on_adapter_error=lambda n, e: seen.__setitem__(n, f"{type(e).__name__}: {e}"),
+    )
+
+    assert "downsize" in seen, (
+        "an adapter raised and nothing recorded which analyzer it was"
+    )
+    assert not [p for p in proposals if p.analyzer == "downsize"]
+    # ...and the failure becomes a disclosure with NO figure: what it would
+    # have contributed is exactly what could not be computed.
+    entry = _adapter_failure_entries(seen)["downsize"]
+    assert entry["past_overspend_usd"] is None
+    assert "unknown, not zero" in entry["note"]
+
+
+def test_the_bare_skip_still_works_for_a_caller_with_nowhere_to_report():
+    """`on_adapter_error` is optional: a caller that cannot disclose anything
+    still gets a live inbox rather than an exception."""
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    report = _report()
+    report.downgrade = _untyped_per_agent_downgrade()
+    assert not [p for p in cost_proposals_from_report(report) if p.analyzer == "downsize"]

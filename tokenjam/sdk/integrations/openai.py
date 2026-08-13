@@ -151,47 +151,84 @@ class _StreamWrapper:
         self._span = span
         self._usage = None
         self._content_chunks = 0
+        # Idempotency guard — see `_finalize`'s docstring.
+        self._finalized = False
+
+    def _consume(self, chunk: Any) -> None:
+        if hasattr(chunk, "usage") and chunk.usage:
+            self._usage = chunk.usage
+        if _chunk_carries_content(chunk):
+            self._content_chunks += 1
+
+    def _finalize(self, ok: bool, exc: BaseException | None = None) -> None:
+        """Record usage + the streaming data-quality signature, end the span.
+
+        Reached from `__iter__`'s `finally` (drained/abandoned/errored via
+        `for`) and from `__next__` on `StopIteration`/any exception (drained
+        by hand via bare `next()`, which never touches `__iter__` at all —
+        that used to leave the span never ended, hence never exported, no
+        matter how the stream actually finished). Guarded so whichever path
+        gets there first wins; a caller mixing both on one wrapper instance
+        still only finalizes once.
+        """
+        if self._finalized:
+            return
+        self._finalized = True
+        if self._usage:
+            self._span.set_attribute(
+                GenAIAttributes.INPUT_TOKENS,
+                self._usage.prompt_tokens,
+            )
+            self._span.set_attribute(
+                GenAIAttributes.OUTPUT_TOKENS,
+                self._usage.completion_tokens,
+            )
+        # Stamped unconditionally, including on the happy path: the
+        # analyzer needs the complete streams as the peer baseline it
+        # estimates the missing ones against, so "usage reported" is as
+        # load-bearing a fact as "usage missing".
+        self._span.set_attribute(TjAttributes.STREAMING, True)
+        self._span.set_attribute(
+            TjAttributes.STREAM_USAGE_REPORTED, self._usage is not None,
+        )
+        self._span.set_attribute(
+            TjAttributes.STREAM_CONTENT_CHUNKS, self._content_chunks,
+        )
+        if ok:
+            self._span.set_status(trace.Status(trace.StatusCode.OK))
+        else:
+            self._span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc) if exc else ""))
+        self._span.end()
 
     def __iter__(self):
         _ok = False
+        _exc: BaseException | None = None
         try:
             for chunk in self._stream:
-                if hasattr(chunk, "usage") and chunk.usage:
-                    self._usage = chunk.usage
-                if _chunk_carries_content(chunk):
-                    self._content_chunks += 1
+                self._consume(chunk)
                 yield chunk
             _ok = True
         except Exception as exc:
-            self._span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+            _exc = exc
             raise
         finally:
-            if self._usage:
-                self._span.set_attribute(
-                    GenAIAttributes.INPUT_TOKENS,
-                    self._usage.prompt_tokens,
-                )
-                self._span.set_attribute(
-                    GenAIAttributes.OUTPUT_TOKENS,
-                    self._usage.completion_tokens,
-                )
-            # Stamped unconditionally, including on the happy path: the
-            # analyzer needs the complete streams as the peer baseline it
-            # estimates the missing ones against, so "usage reported" is as
-            # load-bearing a fact as "usage missing".
-            self._span.set_attribute(TjAttributes.STREAMING, True)
-            self._span.set_attribute(
-                TjAttributes.STREAM_USAGE_REPORTED, self._usage is not None,
-            )
-            self._span.set_attribute(
-                TjAttributes.STREAM_CONTENT_CHUNKS, self._content_chunks,
-            )
-            if _ok:
-                self._span.set_status(trace.Status(trace.StatusCode.OK))
-            self._span.end()
+            self._finalize(ok=_ok, exc=_exc)
 
     def __next__(self):
-        return self._stream.__next__()
+        # Bare `next(wrapper)` used to bypass `__iter__` (and its `finally`)
+        # entirely — `__iter__`'s body only runs under `for`/`list()`/etc, so
+        # driving this by hand with `next()` in a loop left the span open
+        # forever regardless of whether the stream finished cleanly.
+        try:
+            chunk = self._stream.__next__()
+        except StopIteration:
+            self._finalize(ok=True)
+            raise
+        except Exception as exc:
+            self._finalize(ok=False, exc=exc)
+            raise
+        self._consume(chunk)
+        return chunk
 
 
 def patch_openai(base_url: str | None = None) -> None:

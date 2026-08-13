@@ -32,6 +32,7 @@ from typing import Any
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.method_capture import load_session_method
 from tokenjam.core.resume_brief import build_resume_brief
 from tokenjam.core.transcript import (
@@ -158,7 +159,7 @@ def _latest_snapshot_session(db: Any) -> str | None:
     return row[0] if row and row[0] else None
 
 
-@click.command("resume-brief")
+@click.command("resume-brief", cls=TjCommand)
 @click.option("--session", "session_id", default=None,
               help="Session id to brief (snapshot-preferred, live fallback).")
 @click.option("--last", is_flag=True, default=False,
@@ -176,7 +177,7 @@ def cmd_resume_brief(
     transcript_path: str | None,
     from_hook: bool,
 ) -> None:
-    """Emit a compact resume brief for a session (out-of-band, fail-soft)."""
+    """Recap where a session left off."""
     if not (session_id or last or transcript_path or from_hook):
         raise click.UsageError(
             "Provide --session <id>, --last, --transcript <path>, or --from-hook."

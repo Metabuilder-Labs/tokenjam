@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.summarize_fakes import compliant_summary, nonce_of
 from tokenjam.core.config import StorageConfig, SummarizeConfig, TjConfig
 from tokenjam.core.summarize.delivery import DeliveryError, deliver, summarize_via
 from tokenjam.core.summarize.session import SummarizeRefused, read_staged
@@ -49,11 +50,15 @@ def _write(tmp_path, name, text) -> str:
 
 def _fake_claude(new_prose="Be careful; never skip a step.", *, returncode=0, stderr="",
                  stdout=None, mutate_path=None, mutate_text=""):
-    """A `subprocess.run` stand-in. Echoes the markers it was fed (so restore() succeeds)."""
+    """A `subprocess.run` stand-in behaving as a model that obeyed the contract.
+
+    Echoes the markers it was fed, inside the envelope it was fed, at a plausible length — so
+    restore() succeeds and the tests below exercise the outcome they name rather than the gate.
+    """
     def _run(cmd, *, input, capture_output, text, timeout=None):
         if mutate_path is not None:
             Path(mutate_path).write_text(mutate_text, encoding="utf-8")
-        out = stdout if stdout is not None else new_prose + " " + " ".join(_MARKER_RE.findall(input))
+        out = stdout if stdout is not None else compliant_summary(input, new_prose)
         return SimpleNamespace(returncode=returncode, stdout=out, stderr=stderr)
     return _run
 
@@ -69,21 +74,64 @@ def test_summarize_via_claude_roundtrips_and_stages(cfg, tmp_path):
     assert read_staged(cfg, path)["produced_by"] == "claude-p"
 
 
-def test_summarize_via_feeds_claude_p_the_prep_output(cfg, tmp_path):
-    """`claude -p` is fed exactly prep's `system_rules\\n\\nwrapped_prompt` (ratio plumbed through)."""
-    from tokenjam.core.summarize import session
-    path = _write(tmp_path, "CLAUDE.md", PROSE)
-    prep = session.prepare(path=path, ratio=0.1)      # prepare is pure → identical rules+wrap to re-derive
+def _capture_claude(cfg, tmp_path, text=None, *, ratio=0.5) -> dict:
+    """Run one `claude-p` rewrite against a fake subprocess; return what it was invoked with."""
+    path = _write(tmp_path, "CLAUDE.md", PROSE if text is None else text)
     captured: dict = {}
 
     def _run(cmd, *, input, capture_output, text, timeout=None):
         captured["cmd"], captured["input"] = cmd, input
-        return SimpleNamespace(returncode=0, stdout="Short. " + " ".join(_MARKER_RE.findall(input)), stderr="")
+        return SimpleNamespace(returncode=0, stdout=compliant_summary(input), stderr="")
 
     with patch(RUN, _run):
-        summarize_via(cfg, path, "claude-p", ratio=0.1)
-    assert captured["cmd"] == ["claude", "-p"]
-    assert captured["input"] == f"{prep.system_rules}\n\n{prep.wrapped_prompt}"
+        summarize_via(cfg, path, "claude-p", ratio=ratio)
+    return captured
+
+
+def test_claude_p_gets_the_rules_on_the_system_channel_never_on_stdin(cfg, tmp_path):
+    """The rewrite contract goes on `--system-prompt`; stdin carries the source and nothing else.
+
+    Concatenating the two is what let a file whose CONTENT is instructions compete with the
+    instruction to rewrite it — and every file this analyzer targets is such a file.
+    """
+    from tokenjam.core.summarize import wrap
+    cap = _capture_claude(cfg, tmp_path)
+    cmd, stdin = cap["cmd"], cap["input"]
+
+    assert cmd[:2] == ["claude", "-p"]
+    assert "--system-prompt" in cmd
+    rules = cmd[cmd.index("--system-prompt") + 1]
+    assert "You compress AI system prompts" in rules       # the contract really is the system prompt
+    assert "--append-system-prompt" not in cmd             # not bolted onto the coding-agent persona
+
+    # stdin is the enveloped source ONLY — no fragment of the contract rides along with it.
+    assert stdin.startswith(f'<{wrap.SOURCE_TAG} nonce="')
+    assert stdin.rstrip().endswith('">')
+    assert "You compress AI system prompts" not in stdin
+    assert rules not in stdin
+
+
+def test_claude_p_runs_with_no_ambient_context_and_no_tools(cfg, tmp_path):
+    """A rewrite of one instruction file must not inherit the user's OTHER instruction files.
+
+    Without `--safe-mode` the call loads CLAUDE.md, hooks, skills, plugins and MCP servers as live
+    directives, and it holds Edit/Write — a shorter path to a destroyed file than a hijack is.
+    `--bare` would do this too but also stops the CLI reading OAuth, which is the only credential
+    the user of this path has.
+    """
+    cmd = _capture_claude(cfg, tmp_path)["cmd"]
+    assert "--safe-mode" in cmd
+    assert "--bare" not in cmd
+    assert cmd[cmd.index("--tools") + 1] == ""            # empty tool list, verified against the CLI
+    assert "--no-session-persistence" in cmd              # tj's own calls stay out of the corpus
+    assert "--name" in cmd                                # suppresses the extra title-generation call
+
+
+def test_each_claude_p_call_gets_a_fresh_envelope_nonce(cfg, tmp_path):
+    """A nonce reused across calls could be learned and forged by a file's own content."""
+    first = nonce_of(_capture_claude(cfg, tmp_path)["input"])
+    second = nonce_of(_capture_claude(cfg, tmp_path)["input"])
+    assert first and second and first != second
 
 
 def test_summarize_via_below_gate_skips_model_and_returns_note(cfg, tmp_path):
@@ -164,8 +212,7 @@ def _fake_post(*, in_tok=1200, out_tok=400, status=200, text_override=None, body
     """An `httpx.post` stand-in. Echoes markers from the wrapped prompt; reports usage for the cost."""
     def _post(url, *, timeout, headers, json):
         wrapped = json["messages"][0]["content"]
-        text = (text_override if text_override is not None
-                else "Be careful; never skip a step. " + " ".join(_MARKER_RE.findall(wrapped)))
+        text = text_override if text_override is not None else compliant_summary(wrapped)
         return SimpleNamespace(
             status_code=status, text=body_text,
             json=lambda: {"content": [{"type": "text", "text": text}], "stop_reason": "end_turn",
@@ -229,8 +276,7 @@ def test_via_api_missing_usage_uses_no_amortization_fallback(tmp_path, monkeypat
         wrapped = json["messages"][0]["content"]
         return SimpleNamespace(
             status_code=200, text="",
-            json=lambda: {"content": [{"type": "text",
-                                       "text": "Careful. " + " ".join(_MARKER_RE.findall(wrapped))}],
+            json=lambda: {"content": [{"type": "text", "text": compliant_summary(wrapped)}],
                           "stop_reason": "end_turn"})
 
     with patch(POST, _post):

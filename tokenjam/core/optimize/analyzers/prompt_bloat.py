@@ -77,11 +77,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tokenjam.core.agent_config import store_for
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.summarize.candidates import find_repo_root
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Tokens with a predicted significance score below this threshold are
 # considered "bloat" — they contribute little to the model's output.
@@ -160,28 +162,46 @@ class _ProvenanceIndex:
     project_root:        Path | None          = None
 
 
-def _catalog_global_files() -> list[Path]:
-    """Catalog global/system paths that exist on this machine ("~" expanded,
-    globs expanded) — always honestly checkable, no cwd needed."""
-    out: list[Path] = []
-    for raw in load_catalog().global_paths:
-        p = Path(os.path.expanduser(raw))
-        if p.is_file():
-            out.append(p)
-    return out
+# THE CATALOG IS EXPANDED IN ONE PLACE, AND IT IS NOT HERE.
+#
+# This module used to hold its own pair of catalog expanders alongside the
+# near-identical pair in `core/summarize/candidates` — two enumerations of one
+# curated list, differing in small ways (this one dropped the recursive-glob
+# handling the other needed) with nothing to keep them in step. Both now go
+# through `core/agent_config`, which walks once, INGESTS what it found, and
+# hands back the population read out of the store.
+#
+# The catalog itself is still passed in from this module's own `load_catalog`
+# reference so a test that isolates the catalog keeps isolating it.
 
 
-def _catalog_project_files(project_root: Path) -> list[Path]:
-    """Catalog-known bare filenames + globs present at ``project_root``."""
-    cat = load_catalog()
-    out: list[Path] = []
-    for name in sorted(cat.project_files):
-        p = project_root / name
-        if p.is_file():
-            out.append(p)
-    for pattern in cat.project_globs:
-        out.extend(sorted(p for p in project_root.glob(pattern) if p.is_file()))
-    return out
+def _catalog_files(
+    store: "Any", project_root: Path | None,
+) -> tuple[list[Path], list[Path]]:
+    """``(global, project)`` catalog files that exist, ingested then read back.
+
+    One ingest pass for both scopes, so the store holds the whole surface this
+    run actually looked at rather than two disconnected slices of it.
+    """
+    from tokenjam.core import agent_config as ac
+
+    roots = [project_root] if project_root is not None else []
+    at = ac.ingest_agent_config(
+        store, roots=roots, kinds=(ac.KIND_INSTRUCTION,),
+        include_global=True, catalog=load_catalog(),
+    )
+    globals_ = [
+        Path(r.path) for r in store.select(
+            kind=ac.KIND_INSTRUCTION, scope=ac.SCOPE_GLOBAL, seen_at=at,
+        )
+    ]
+    project = [
+        Path(r.path) for r in store.select(
+            kind=ac.KIND_INSTRUCTION, scope=ac.SCOPE_PROJECT,
+            root=str(project_root), seen_at=at,
+        )
+    ] if project_root is not None else []
+    return globals_, project
 
 
 def _normalized_candidates(paths: list[Path]) -> list[tuple[str, str]]:
@@ -197,17 +217,24 @@ def _normalized_candidates(paths: list[Path]) -> list[tuple[str, str]]:
     return out
 
 
-def build_provenance_index(project_root: Path | None) -> _ProvenanceIndex:
+def build_provenance_index(
+    project_root: Path | None, *, store: "Any | None" = None,
+) -> _ProvenanceIndex:
     """Build the candidate set for one run. ``project_root`` is the repo
     ``tj optimize`` is being run from (or None when it can't be resolved,
     e.g. not inside a git repo) — see the module docstring for why
-    project-scoped candidates are limited to that ONE repo."""
+    project-scoped candidates are limited to that ONE repo.
+
+    ``store`` is where the catalog files this run looked at are ingested;
+    ``None`` means a throwaway in-memory one, which is today's behaviour with
+    nothing persisted."""
+    from tokenjam.core.agent_config import InMemoryAgentConfigStore
+
+    store = store if store is not None else InMemoryAgentConfigStore()
+    globals_, project = _catalog_files(store, project_root)
     return _ProvenanceIndex(
-        global_candidates=_normalized_candidates(_catalog_global_files()),
-        project_candidates=(
-            _normalized_candidates(_catalog_project_files(project_root))
-            if project_root is not None else []
-        ),
+        global_candidates=_normalized_candidates(globals_),
+        project_candidates=_normalized_candidates(project),
         project_root=project_root,
     )
 
@@ -315,7 +342,9 @@ def estimate_trim_recoverable(
     return round((low_sig_tokens / 1_000_000) * avg_input_rate_per_mtok, 6)
 
 
-def _window_avg_input_rate(conn, since, until, agent_id: str | None) -> float:
+def _window_avg_input_rate(
+    conn, since, until, agent_id: str | None, persona_scope: str | None = None,
+) -> float:
     """Input-token-weighted average input rate ($/MTok) across the window's
     model mix, used to price trimmable tokens.
 
@@ -333,6 +362,7 @@ def _window_avg_input_rate(conn, since, until, agent_id: str | None) -> float:
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT provider, model, COALESCE(SUM(input_tokens), 0), "
@@ -503,8 +533,8 @@ def run(ctx: AnalyzerContext) -> None:
             enabled=False,
             significance_threshold=significance_threshold,
             hint=(
-                "Enable `[capture] prompts = true` in tj.toml and let the "
-                "daemon collect a window of data before re-running this "
+                "Enable `[capture] prompts = true` in tj.toml. Let the "
+                "daemon collect a window of data, then re-run this "
                 "analyzer. Trim needs captured prompt text to score."
             ),
         )
@@ -532,6 +562,8 @@ def run(ctx: AnalyzerContext) -> None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope — see `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     rows = ctx.conn.execute(
         f"SELECT agent_id, attributes FROM spans WHERE {where} "
@@ -555,7 +587,10 @@ def run(ctx: AnalyzerContext) -> None:
     # Provenance candidates, built once for the run (see module docstring):
     # global catalog files always; project-scoped ones only for the repo
     # this run is being invoked from.
-    provenance_index = build_provenance_index(find_repo_root(Path.cwd()))
+    provenance_index = build_provenance_index(
+        find_repo_root(Path.cwd()),
+        store=store_for(getattr(ctx, "conn", None), getattr(ctx, "write_lock", None)),
+    )
 
     per_prompt: list[BloatPrompt] = []
     prompts_scored = 0
@@ -615,7 +650,7 @@ def run(ctx: AnalyzerContext) -> None:
 
         if est_tokens > 0 and avg_rate is None:
             avg_rate = _window_avg_input_rate(
-                ctx.conn, ctx.since, ctx.until, ctx.agent_id
+                ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.persona_scope,
             )
         cost_reduction = (
             estimate_trim_recoverable(est_tokens, avg_rate)
@@ -650,7 +685,7 @@ def run(ctx: AnalyzerContext) -> None:
     if low_sig_tokens > 0:
         if avg_rate is None:
             avg_rate = _window_avg_input_rate(
-                ctx.conn, ctx.since, ctx.until, ctx.agent_id
+                ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.persona_scope,
             )
         rec_usd = estimate_trim_recoverable(low_sig_tokens, avg_rate)
         rec_tokens = low_sig_tokens
@@ -668,6 +703,6 @@ def run(ctx: AnalyzerContext) -> None:
         significance_threshold=significance_threshold,
         estimate_basis=(
             "low-significance tokens (≈4 chars/token) predicted by LLMLingua-2 "
-            "× window input rate — review before editing prompts"
+            "× window input rate. Review before editing prompts."
         ),
     )

@@ -43,6 +43,9 @@ class TestFormatTokens:
     def test_millions_with_fraction(self):
         assert format_tokens(2_500_000) == "2.5M"
 
+    def test_just_below_million(self):
+        assert format_tokens(999_000) == "999.0k"
+
     def test_just_below_billion_stays_millions(self):
         assert format_tokens(999_999_999) == "1000.0M"
 

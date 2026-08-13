@@ -21,6 +21,7 @@ from pathlib import Path
 import click
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
 from tokenjam.core.optimize import OptimizeReport, build_report, report_from_dict
 from tokenjam.utils.formatting import console
@@ -34,12 +35,12 @@ def _exports_dir() -> Path:
     return Path.home() / ".config" / "tokenjam" / "exports"
 
 
-@click.group("route")
+@click.group("route", cls=TjGroup)
 def cmd_route() -> None:
-    """Compile advisory router configs from TokenJam's downsize findings."""
+    """Advisory model-routing config from your usage."""
 
 
-@cmd_route.command("export")
+@cmd_route.command("export", status_message="Compiling routing config…")
 @click.option("--target", type=click.Choice(_TARGETS), default=None,
               help="Router config to emit (ccr = claude-code-router, "
                    "litellm = LiteLLM router).")

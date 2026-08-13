@@ -48,7 +48,7 @@ _ID_HEX_LEN = 12
 #: having been REGISTERED in the user's own config, and a caller-supplied path
 #: would aim the write at any repo on disk.
 APPLY_CLUSTER_FIELDS = (
-    "signature", "family_key", "title", "proposed_fix", "rung",
+    "signature", "family_key", "title", "proposed_fix", "delivery",
     "sessions", "occurrences", "repos", "examples",
     "apply_kind", "agent_name", "current_model", "proposed_model", "source_path",
     # Past-overspend figure (the one canonical dollar field): carried through
@@ -70,7 +70,7 @@ MODEL_ROUTING_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 
 def missing_apply_fields(cluster: dict[str, Any]) -> tuple[str, ...]:
     """The required fields this cluster's ``apply_kind`` needs and does not
-    have. Empty for a rung-ladder fix (no ``apply_kind``) and for a complete
+    have. Empty for a delivery-mechanism fix (no ``apply_kind``) and for a complete
     model-routing proposal."""
     apply_kind = str(cluster.get("apply_kind") or "")
     if not apply_kind:
@@ -98,49 +98,32 @@ def advise_only_reason(proposal: dict[str, Any]) -> str | None:
 
     One source of truth for the wording, so the CLI, the API payload and the
     inbox row cannot drift into three different explanations of one flag.
-
-    Two distinct reasons land on the same flag. The workspace-less (OTel) lane
-    has no file to write into at all; the write budget
-    (``core/optimize/write_budget.py``) declines a write that is a placeholder,
-    that costs more to keep than it recovers, or that the window's rule budget
-    cannot afford. The budget's own sentence wins when it set one, because
-    "there is no workspace" would be plainly false for a cluster that has one.
+    ``advise_only`` is the only reason left: the workspace-less (OTel) lane has
+    no file to write into, an advisory family says no action is needed, or the
+    window's persona has no workspace surface. There is no budget/ceiling gate
+    on top of that any more.
     """
-    blocked = str(proposal.get("write_blocked_reason") or "").strip()
-    if blocked and not proposal.get("write_offered", True):
-        return blocked
     return ADVISE_ONLY_REASON if proposal.get("advise_only") else None
 
 
 def advise_snippet_offered(proposal: dict[str, Any]) -> bool:
     """Is this cluster's ``proposed_fix`` a real recommendation the user can act
-    on themselves, rather than the "no fix template matched" placeholder?
+    on themselves, rather than something tokenjam is about to write for them?
 
-    The Review inbox routes every row onto a three-valued mechanism axis: tj can
-    apply it, tj hands over the exact change, or there is genuinely nothing to
-    hand over. ``write_offered`` answers the first. This answers the second, and
-    it has to be answered HERE rather than in the browser: the distinction is
-    ``build_proposals``' own ``has_real_fix``, and the only trace of it on the
-    payload is that a placeholder write is blocked with ``REASON_PLACEHOLDER``.
-    Re-deriving that in JS would mean the UI keying on a sentence this package
-    owns the wording of, which is the drift the ``short_reason`` map exists to
-    prevent.
-
-    False when the write WAS offered, and that is the load-bearing half. Unlike a
+    The Review inbox routes every row onto a three-valued mechanism axis: tj
+    can apply it, or tj hands over the exact change. False when the write WAS
+    offered (``not advise_only``), and that is the load-bearing half. Unlike a
     cost proposal, where ``suggestion`` and the apply path are separate fields
-    describing separate things (``deadweight``'s mcp_remove legitimately carries
-    both), a relearn cluster's ``proposed_fix`` is the SAME content the write
-    would write. Handing it over is only a distinct offer when tokenjam will not
-    write it, so a cluster tokenjam is about to write must not also advertise
-    "copy this" and duplicate its own fix on the row. Hence "advise" in the name.
+    describing separate things (``deadweight``'s mcp_remove legitimately
+    carries both), a relearn cluster's ``proposed_fix`` is the SAME content the
+    write would write. Handing it over is only a distinct offer when tokenjam
+    will not write it, so a cluster tokenjam is about to write must not also
+    advertise "copy this" and duplicate its own fix on the row. Hence
+    "advise" in the name.
     """
-    from tokenjam.core.optimize.write_budget import REASON_PLACEHOLDER
-
     if not str(proposal.get("proposed_fix") or "").strip():
         return False
-    if proposal.get("write_offered"):
-        return False
-    return str(proposal.get("write_blocked_reason") or "").strip() != REASON_PLACEHOLDER
+    return bool(proposal.get("advise_only"))
 
 
 def proposal_id_for(signature: str) -> str:
@@ -162,8 +145,6 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
     again on read) means a cache written before either existed still resolves
     without a recompute.
     """
-    from tokenjam.core.optimize.write_budget import short_reason
-
     clusters = finding.get("clusters")
     if not isinstance(clusters, list):
         return dict(finding)
@@ -172,20 +153,9 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
             **c,
             "proposal_id": proposal_id_for(str(c.get("signature") or "")),
             "advise_only_reason": advise_only_reason(c),
-            # Derived on read for the same reason the two above are: a cache
-            # written before this field existed still has to resolve without a
-            # recompute. The Review inbox row renders ONLY the short label (the
-            # long sentence is a paragraph, and a real corpus gates ~50 of 55
-            # clusters), so without this stamp an older cache would silently
-            # drop the gate note from every row — the exact invisibility the
-            # short label was added to fix.
-            "write_blocked_short": (
-                c.get("write_blocked_short")
-                or short_reason(c.get("write_blocked_reason") or "")
-            ),
-            # Derived on read for the same reason as the three above, and
-            # deliberately NOT stored on the dataclass: it is a pure function of
-            # fields already on the cluster, so a stored copy could only ever
+            # Derived on read for the same reason as above, and deliberately
+            # NOT stored on the dataclass: it is a pure function of fields
+            # already on the cluster, so a stored copy could only ever
             # disagree with them. A cache written before this existed resolves
             # correctly on the first read, with no recompute.
             "advise_snippet_offered": advise_snippet_offered(c),
@@ -198,6 +168,7 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
 
 def list_cost_proposals(
     config: TjConfig | None = None, *, path: Path | None = None,
+    persona: str | None = None,
 ) -> list[dict[str, Any]]:
     """Every stored COST proposal from the last completed optimize pass, each
     with its ``proposal_id``.
@@ -206,21 +177,67 @@ def list_cost_proposals(
     addressable by ID on the same terms as a relearn cluster: the model-routing
     apply kinds are cost cards, so an apply that names one has to be able to
     resolve it from the store.
+
+    ``persona`` returns that persona's own scoped list instead of the
+    whole-corpus one. Use :func:`cost_proposals_scoped_to_persona` when the
+    caller has to be able to tell "this persona's list, which is empty" from
+    "this ledger cannot answer for that persona" — this function collapses the
+    second case to ``[]``, which is only safe for callers that resolve a
+    proposal BY ID (an apply path), never for one that publishes a total.
+    """
+    rows, _resolved = cost_proposals_scoped_to_persona(
+        config, path=path, persona=persona,
+    )
+    return rows
+
+
+def cost_proposals_scoped_to_persona(
+    config: TjConfig | None = None, *, path: Path | None = None,
+    persona: str | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """``(proposals, resolved)`` for ``persona``.
+
+    ``resolved`` is the whole point. A ledger written before per-persona
+    proposals existed — or by a lone refresh that had no per-persona reports to
+    adapt — holds ONE whole-corpus list and cannot answer for a persona. Its
+    figures are not that persona's money, and serving them under that persona's
+    label is precisely the defect this parameter exists to fix. So the caller is
+    told, and a surface that publishes a figure must render NOT-YET-KNOWN rather
+    than a number (root anti-pattern 22: "not yet known" and "known and empty"
+    are different states and zero is the worst placeholder for the first).
+
+    ``resolved`` is ``True`` whenever no narrowing was asked for: the
+    whole-corpus list genuinely IS the answer to "everything".
     """
     from tokenjam.core.optimize import relearn_store
     from tokenjam.core.optimize.cost_proposals import (
         backfill_legacy_past_overspend_fields,
     )
+    from tokenjam.core.persona_scope import persona_scopes_population
 
     block = relearn_store.read_cost_proposals(path, config=config)
     if not isinstance(block, dict):
-        return []
+        return [], True
+
+    resolved = True
+    raw = block.get("cost_proposals") or []
+    if persona_scopes_population(persona):
+        by_persona = block.get("cost_proposals_by_persona") or {}
+        if block.get("cost_persona_scoped") and persona in by_persona:
+            raw = by_persona.get(persona) or []
+        else:
+            # NOT the whole-corpus list as a fallback. Falling back is how a
+            # mixed-corpus total came to be published under a persona label in
+            # the first place; an empty list plus `resolved=False` is the only
+            # honest answer, and the caller renders it as unknown.
+            raw, resolved = [], False
+
     return [
         backfill_legacy_past_overspend_fields(
             {**pr, "proposal_id": proposal_id_for(str(pr.get("signature") or ""))}
         )
-        for pr in (block.get("cost_proposals") or []) if isinstance(pr, dict)
-    ]
+        for pr in raw if isinstance(pr, dict)
+    ], resolved
 
 
 def list_proposals(

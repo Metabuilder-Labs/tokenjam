@@ -37,20 +37,39 @@ from rich.theme import Theme
 # which lands close enough that the flow doesn't change character.
 ACCENT = "#8b7fd4"
 
+# Brand orange for the ASCII wordmark only (#643). The banner is a branded
+# moment, not typeable content, so it earns its own colour rather than reusing
+# the periwinkle accent — the accent stays reserved for commands/paths/URLs the
+# user acts on. Rich degrades the truecolor value to the nearest 256-colour slot
+# on terminals without truecolor.
+BRAND_ORANGE = "#e0922f"
+
 TJ_THEME = Theme(
     {
         # the one accent: things you can type or click
         "accent": ACCENT,
         "url": f"underline {ACCENT}",
-        # the wordmark. Same accent as everything else, so a screen never
-        # carries two competing brand colours.
-        "brand": f"bold {ACCENT}",
+        # the wordmark. Brand orange (#643) — the one place a screen carries a
+        # dedicated brand colour, since the banner isn't typeable content.
+        "brand": f"bold {BRAND_ORANGE}",
         # structure
         "label": "bold",
         "heading": "bold",
         "muted": "dim",
         # genuine state only
         "ok": "bold",  # success is bold + ✓, never green
+        # The three completion `✓` status lines at the end of onboarding
+        # (`--claude-code`). A deliberate FOUNDER OVERRIDE of the usual
+        # "success is a glyph + bold, never green" rule (Anil, 2026-07): the
+        # payoff screen leads with three green checks so the "you're wired up"
+        # moment reads at a glance. Kept a distinct role from `ok` so the
+        # override is scoped to that one screen and `ok` stays weight-only
+        # everywhere else.
+        "check": "bold green",
+        # A CALL-TO-ACTION the user should do next (green = go). Distinct from
+        # `ok` success: this is "do this now", not "this worked" — so it earns a
+        # colour where success does not (Anil, 2026-07-30).
+        "go": "green",
         "warn": "yellow",
         "warn.strong": "bold yellow",
         "error": "red",

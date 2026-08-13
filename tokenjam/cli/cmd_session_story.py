@@ -34,6 +34,7 @@ import click
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.method_capture import load_session_method
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
@@ -67,7 +68,7 @@ _KIND_STYLE = {
 }
 
 
-@click.command("session-story")
+@click.command("session-story", cls=TjCommand)
 @click.option("--session", "session_id", default=None,
               help="Reconstruct a specific session id (default: the most recent "
                    "substantial session).")
@@ -78,7 +79,7 @@ _KIND_STYLE = {
 @click.pass_context
 def cmd_session_story(ctx: click.Context, session_id: str | None,
                       last: bool, output_json_flag: bool) -> None:
-    """Show turn-by-turn HOW a Claude Code session attempted its task.
+    """Replay a Claude Code session turn-by-turn.
 
     Reconstructs the session's method — its ordered moves and, for each
     delegation, the subagent's mandate + what it did — from the on-disk

@@ -24,12 +24,15 @@ import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from tokenjam.core.cost import calculate_cost
+from tokenjam.core.distill import is_tokenjam_invoke_cwd
 from tokenjam.core.pricing import classify_pricing_source
+from tokenjam.core import system_prefix
 from tokenjam.core.config import CaptureConfig
 from tokenjam.core.method_capture import capture_session_method
+from tokenjam.core.optimize.repeat_task import hash_task_statement
 from tokenjam.core.models import (
     SESSION_STALE_THRESHOLD,
     NormalizedSpan,
@@ -91,6 +94,10 @@ class BackfillResult:
     # user re-backfills a DB that still holds pre-v0.5.2 uuid-keyed rows.
     spans_stale_purged: int = 0
     files_failed: int = 0
+    # Transcript records declined for carrying no parseable timestamp — see
+    # ParsedSession.records_undated. Surfaced by `tj backfill`'s summary so a
+    # decline is never silent.
+    records_undated: int = 0
     earliest: datetime | None = None
     latest: datetime | None = None
     total_cost_usd: float = 0.0
@@ -149,6 +156,24 @@ class ParsedSession:
     # gone quiet, without re-deriving a second definition of "stale" (backfill
     # used to hardcode every session's status "completed" regardless).
     transcript_mtime: datetime | None = None
+    # Records declined for carrying no parseable timestamp. Counted rather than
+    # dropped in silence: a record tj refuses to ingest is a change to what the
+    # corpus contains, and has to be as visible as one it accepts.
+    records_undated: int = 0
+    # The FIRST genuine human prompt seen in this file — captured
+    # UNCONDITIONALLY (unlike `pending_prompt`'s per-span attachment above,
+    # which is gated on `[capture] prompts`). This is never stored raw: the
+    # only use is `session_record_from_parsed` hashing it into
+    # `SessionRecord.task_statement_hash` via `repeat_task.hash_task_statement`
+    # — a one-way, normalized fingerprint, not readable content, so it needs
+    # no capture-toggle gate. None when the file has no main-thread user turn
+    # (a subagent-only file, or a session with no recognizable prompt).
+    first_user_prompt: str | None = None
+    # The model that ran the most (input+output) tokens on the MAIN THREAD of
+    # this file (subagent-dispatch spans excluded — a rightsized-down subagent
+    # model shouldn't drown out what the session itself mostly ran on). None
+    # when the file carries no priced assistant turn.
+    dominant_model: str | None = None
 
 
 # --- ID derivation helpers ---------------------------------------------------
@@ -301,6 +326,10 @@ def _read_project_claude_md(cwd: str | None) -> str:
     system prompt goes out with every request — which is exactly the
     stable, repeated prefix cache-recommend looks for. Returns "" when cwd is
     unknown or the file is missing/unreadable; never raises.
+
+    The text is read in full but **never stored** — see
+    `_system_prefix_attrs`, which reduces it to the three values the analyzer
+    actually consumes before it reaches a span.
     """
     if not cwd:
         return ""
@@ -308,6 +337,29 @@ def _read_project_claude_md(cwd: str | None) -> str:
         return (Path(cwd) / "CLAUDE.md").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def _system_prefix_attrs(text: str) -> dict[str, Any]:
+    """The prefix as it goes onto a span: identity, a display sample, a length.
+
+    Storing the text itself is what took a real database to 4.06 GB — the value
+    is identical across every span of a project, so its cost is (size x span
+    count), and 92,514 spans were each holding a ~43 KB copy of one of 61
+    distinct files. `cache_recommend` never used the text as text: it hashed a
+    fixed-size head of it, kept 120 characters for display, and compared its
+    length against a floor. All three survive here at ~230 bytes per span.
+
+    Derivation lives in `core.system_prefix` so the producer and the consumer
+    cannot drift on what a prefix's identity is.
+    """
+    summary = system_prefix.summarize(text)
+    if not summary:
+        return {}
+    return {
+        TjAttributes.SYSTEM_PREFIX_HASH: summary["hash"],
+        TjAttributes.SYSTEM_PREFIX_SAMPLE: summary["sample"],
+        TjAttributes.SYSTEM_PREFIX_LENGTH: summary["length"],
+    }
 
 
 def _provider_for_model(model: str) -> str:
@@ -359,6 +411,12 @@ def parse_claude_code_session(
     cwd: str | None = None
     earliest: datetime | None = None
     latest: datetime | None = None
+    records_undated: int = 0
+    # Captured unconditionally (never gated on `[capture] prompts` — see
+    # `ParsedSession.first_user_prompt`'s docstring for why that's safe).
+    first_user_prompt: str | None = None
+    # Main-thread-only per-model token totals, for `ParsedSession.dominant_model`.
+    _model_tokens: dict[str, int] = {}
 
     # Dedup by span_id WITHIN the session (#294). Claude Code replays/re-snapshots
     # assistant turns into the same JSONL on resume/branch — each appended record
@@ -412,24 +470,53 @@ def parse_claude_code_session(
             session_id = record.get("sessionId")
         if cwd is None:
             cwd = record.get("cwd")
+            # tokenjam's own distill/presence model calls (core.distill,
+            # core.rulewrite.presence) shell out to this SAME `claude` CLI
+            # from a private temp-dir cwd, and leave an ordinary transcript
+            # on disk like any user session — never a session the user
+            # actually worked. Excluded at the earliest possible point (the
+            # first record that reveals cwd) rather than parsed and priced.
+            if cwd is not None and is_tokenjam_invoke_cwd(cwd):
+                return None
 
         rtype = record.get("type")
-        if rtype == "user" and capture.prompts and not record.get("isMeta"):
-            # Remember the latest genuine human prompt so the next assistant
-            # span can carry it. Tool-result-only user turns yield "" and are
-            # ignored (no prompt to attribute).
-            prompt_text = _user_prompt_text(record)
-            if prompt_text.strip():
-                pending_prompt = prompt_text
+        if rtype == "user" and not record.get("isMeta"):
+            # First genuine MAIN-THREAD human prompt, captured UNCONDITIONALLY
+            # (never gated on `capture.prompts` — see `ParsedSession
+            # .first_user_prompt`'s docstring for why that's safe: only ever
+            # hashed, never stored raw). A subagent file's "user" turns are
+            # the Task tool's dispatched instructions, not what the human
+            # actually typed, so those are excluded here.
+            if (
+                first_user_prompt is None
+                and not record.get("isSidechain")
+                and _user_prompt_text(record).strip()
+            ):
+                first_user_prompt = _user_prompt_text(record)
+            if capture.prompts:
+                # Remember the latest genuine human prompt so the next
+                # assistant span can carry it. Tool-result-only user turns
+                # yield "" and are ignored (no prompt to attribute).
+                prompt_text = _user_prompt_text(record)
+                if prompt_text.strip():
+                    pending_prompt = prompt_text
         if rtype != "assistant":
             continue
 
         ts = _parse_ts(record.get("timestamp"))
-        if ts is not None:
-            if earliest is None or ts < earliest:
-                earliest = ts
-            if latest is None or ts > latest:
-                latest = ts
+        if ts is None:
+            # No observed time, so the record is not ingested rather than
+            # ingested with a made-up one. `now` would date months-old
+            # transcript work to whenever the backfill happened to run — which
+            # reads as a real observation, and is why this is worse than the
+            # 1970 sentinel it replaced rather than better. Same idiom as
+            # ingest_adapters/langfuse.py and helicone.py.
+            records_undated += 1
+            continue
+        if earliest is None or ts < earliest:
+            earliest = ts
+        if latest is None or ts > latest:
+            latest = ts
 
         msg = record.get("message") or {}
         if not isinstance(msg, dict):
@@ -476,6 +563,12 @@ def parse_claude_code_session(
         sub_agent_id = record.get("agentId") if is_sidechain else None
         span_sub_agent_type = sub_agent_type if is_sidechain else None
 
+        # Main-thread-only per-model token tally, for `ParsedSession
+        # .dominant_model` — a rightsized-down subagent model shouldn't drown
+        # out what the session itself mostly ran on.
+        if not is_sidechain:
+            _model_tokens[model] = _model_tokens.get(model, 0) + input_tokens + output_tokens
+
         provider = _provider_for_model(model)
         cost = calculate_cost(
             provider=provider,
@@ -501,7 +594,7 @@ def parse_claude_code_session(
         # read+write. See models.py NormalizedSpan + Critical Rule on cache.
 
         agent_id = _agent_id_from_cwd(cwd)
-        start_time = ts or datetime.now(tz=timezone.utc)
+        start_time = ts
 
         # Per-message content (opt-in, gated by [capture]). Default-off leaves
         # llm_attrs carrying provenance only — the ingest source and the call
@@ -525,7 +618,7 @@ def parse_claude_code_session(
             if claude_md_text is None and cwd is not None:
                 claude_md_text = _read_project_claude_md(cwd)
             if claude_md_text:
-                llm_attrs[TjAttributes.SYSTEM_PREFIX_CONTENT] = claude_md_text
+                llm_attrs.update(_system_prefix_attrs(claude_md_text))
         if capture.completions:
             completion_text = _block_text(msg.get("content"))
             if completion_text.strip():
@@ -622,7 +715,11 @@ def parse_claude_code_session(
         total_cost += s.cost_usd or 0.0
 
     agent_id = _agent_id_from_cwd(cwd)
-    started_at = earliest or datetime.now(tz=timezone.utc)
+    if earliest is None:
+        # Every record in this file was undated, so there is no session to
+        # describe — returning one would invent both its start and its extent.
+        return None
+    started_at = earliest
     ended_at = latest or started_at
 
     return ParsedSession(
@@ -638,6 +735,11 @@ def parse_claude_code_session(
         total_cost_usd=round(total_cost, 8),
         tool_call_count=tool_count,
         transcript_mtime=transcript_mtime,
+        records_undated=records_undated,
+        first_user_prompt=first_user_prompt,
+        dominant_model=(
+            max(_model_tokens, key=lambda m: _model_tokens[m]) if _model_tokens else None
+        ),
     )
 
 
@@ -777,6 +879,15 @@ def session_record_from_parsed(
         tool_call_count=parsed.tool_call_count,
         error_count=0,
         plan_tier=plan_tier,
+        # This function ONLY ever parses a Claude Code transcript — a literal
+        # fact, not a heuristic (contrast the live path, which has to
+        # classify an ambiguous agent_id; see core.agent_kind). Matches
+        # `agent_kind.CODING_AGENT_GROUPS`'s "claude-code" spelling exactly —
+        # not "claude_code" — so a value this function stamps and one the
+        # live path derives via `classify_agent_kind` are the SAME string.
+        source="claude-code",
+        task_statement_hash=hash_task_statement(parsed.first_user_prompt),
+        dominant_model=parsed.dominant_model,
     )
 
 
@@ -857,23 +968,61 @@ def _apply_session(
     _record_insert_outcome(result, parsed, inserted, retagged)
 
 
+#: Attribute keys `parse_claude_code_session` always sets, regardless of
+#: `[capture]` — the provenance tag and the call-identity key (see the
+#: `llm_attrs` construction in that function). A span whose `attributes`
+#: contains nothing BEYOND these carries no content worth overlaying, so
+#: checking the size of this set is a cheap pre-filter before ever building
+#: the (comparatively expensive) `json_merge_patch` candidate payload.
+_BASELINE_ATTRIBUTE_KEYS = frozenset({"source", TjAttributes.CALL_ID})
+
+
 def _dedup_new_spans(
     conn, parsed: ParsedSession, scan: DuplicateScan | None = None,
-) -> list[NormalizedSpan]:
-    """Return `parsed`'s spans not already present in the DB — a cheap, indexed,
-    chunked existence check. Kept PER SESSION (not batched) so `spans_ingested`
-    can be counted the moment a session is processed, giving the progress
-    callback monotonically-increasing counts while the actual columnar INSERT is
-    deferred to a batched flush.
+    capture: CaptureConfig | None = None,
+) -> tuple[list[NormalizedSpan], list[NormalizedSpan]]:
+    """Partition `parsed`'s spans into (new, overlay_candidates) — a cheap,
+    indexed, chunked existence check. Kept PER SESSION (not batched) so
+    `spans_ingested` can be counted the moment a session is processed, giving
+    the progress callback monotonically-increasing counts while the actual
+    columnar INSERT is deferred to a batched flush.
+
+    `new` are spans not already present in the DB. `overlay_candidates` are
+    spans that ARE already present but whose re-parse resolved something new
+    the stored row is missing — either half of the set-based overlay
+    `bulk_overlay_span_attrs` performs:
+      - `sub_agent_id`/`sub_agent_type` this file's transcript can supply —
+        e.g. a row inserted before migration 19 (`sub_agent_type`) existed,
+        or before this file's sidecar (`agent-<id>.meta.json`) was written.
+      - Captured content (`gen_ai.prompt.content` etc.) when `[capture]` is
+        ON now but was off when the row was first ingested — gated on
+        `capture` actually having a toggle enabled AND the re-parsed span
+        carrying more than the baseline provenance keys, so a plain re-run
+        with capture off (the common case) never re-queues every existing
+        span just to ship a no-op payload.
+    The caller batches these into a set-based overlay UPDATE rather than
+    touching them here, for the same reason new spans are batched: per-span
+    UPDATEs are the ~350×-slower path this bulk branch exists to avoid.
 
     Also drops calls the LIVE path already recorded (`scan` carries the
     running per-call tally across this run's files) — see
     `_drop_calls_another_source_recorded`."""
     existing = _existing_span_ids(conn, [s.span_id for s in parsed.spans])
     new_spans = [s for s in parsed.spans if s.span_id not in existing]
-    return _drop_calls_another_source_recorded(
+    new_spans = _drop_calls_another_source_recorded(
         conn, parsed.session_id, new_spans, scan,
     )
+    capture_on = capture is not None and (
+        capture.prompts or capture.completions or capture.tool_inputs
+    )
+    overlay_candidates = [
+        s for s in parsed.spans
+        if s.span_id in existing and (
+            s.sub_agent_id or s.sub_agent_type
+            or (capture_on and set(s.attributes) - _BASELINE_ATTRIBUTE_KEYS)
+        )
+    ]
+    return new_spans, overlay_candidates
 
 
 @dataclass
@@ -1058,6 +1207,13 @@ def ingest_claude_code(
     use_bulk = conn is not None and not reingest
     pending: list[NormalizedSpan] = []
     pending_ids: set[str] = set()
+    # Existing spans this run resolved something new for — sub_agent_id/
+    # sub_agent_type, or captured content (see `_dedup_new_spans`'s
+    # `overlay_candidates`) — queued for a batched additive UPDATE alongside
+    # the new-span flush below. `pending_overlay_ids` is belt-and-braces
+    # against queuing the same span_id twice, matching `pending_ids` above.
+    pending_overlay: list[tuple[str, str | None, str | None, dict | None]] = []
+    pending_overlay_ids: set[str] = set()
     # Session-total deltas wait for the spans they describe. Nothing here has
     # transaction control — every statement auto-commits — so the only lever on
     # a mid-run interruption is ORDER, and the two orders fail very differently:
@@ -1082,6 +1238,27 @@ def ingest_claude_code(
             _flush_pending_spans(db, pending)
             pending.clear()
             pending_ids.clear()
+        if pending_overlay:
+            overlay = getattr(db, "bulk_overlay_span_attrs", None)
+            if overlay is not None:
+                try:
+                    changed = overlay(pending_overlay)
+                except Exception:
+                    # Best-effort: the overlay is a repair of an already-stored
+                    # row, never a reason to fail a backfill that otherwise
+                    # succeeded. The next run offers the same candidates again.
+                    logger.warning("subagent overlay flush failed", exc_info=True)
+                else:
+                    result.spans_retagged += changed
+                    # These spans were provisionally counted as "skipped
+                    # existing" per-session (see `_record_insert_outcome`)
+                    # before we knew how many the overlay would actually
+                    # change; move the ones that did change into `retagged` so
+                    # the two counts stay mutually exclusive and sum to the
+                    # session's total spans, same invariant `--reingest` keeps.
+                    result.spans_skipped_existing -= changed
+            pending_overlay.clear()
+            pending_overlay_ids.clear()
         for delta in pending_deltas:
             try:
                 db.upsert_session(delta, accumulate_totals=True)
@@ -1111,6 +1288,7 @@ def ingest_claude_code(
         # the full in-window total, not a new-only figure that reads as "barely
         # worked" on an idempotent re-run (#238).
         result.total_cost_usd += parsed.total_cost_usd
+        result.records_undated += parsed.records_undated
         if result.earliest is None or parsed.started_at < result.earliest:
             result.earliest = parsed.started_at
         if result.latest is None or parsed.ended_at > result.latest:
@@ -1118,12 +1296,21 @@ def ingest_claude_code(
 
         if use_bulk:
             try:
-                new_spans = _dedup_new_spans(conn, parsed, duplicate_scan)
+                new_spans, overlay_candidates = _dedup_new_spans(
+                    conn, parsed, duplicate_scan, capture=capture,
+                )
             except Exception as exc:
                 result.files_failed += 1
                 if len(result.sample_errors) < 5:
                     result.sample_errors.append(f"{parsed.session_id}: {exc}")
                 continue
+            for span in overlay_candidates:
+                if span.span_id in pending_overlay_ids:
+                    continue
+                pending_overlay_ids.add(span.span_id)
+                pending_overlay.append(
+                    (span.span_id, span.sub_agent_id, span.sub_agent_type, span.attributes)
+                )
             # Queue the new spans for the batched INSERT, but count them NOW so the
             # progress callback sees an increasing `spans_ingested` instead of a
             # flat zero that only jumps at the final flush. The `pending_ids` guard
@@ -1146,7 +1333,7 @@ def ingest_claude_code(
                 session_totals_delta(parsed, plan_tier, queued_spans)
             )
             _record_insert_outcome(result, parsed, len(queued_spans), 0)
-            if len(pending) >= _BULK_FLUSH_SPAN_TARGET:
+            if len(pending) >= _BULK_FLUSH_SPAN_TARGET or len(pending_overlay) >= _BULK_FLUSH_SPAN_TARGET:
                 _flush_pending()
         else:
             _apply_session(db, parsed, plan_tier, reingest, result, duplicate_scan)
@@ -1372,8 +1559,16 @@ def _insert_session_idempotent(
                 exists_attributes=_load_attrs(conn, span.span_id),
                 parsed_attributes=span.attributes,
             )
+            # COALESCE, not overwrite: a re-derived value is always identical
+            # for an unchanged transcript, but if the sidecar has since gone
+            # missing (pruned) a re-parse yields None — COALESCE keeps
+            # whatever the row already resolved rather than clobbering it back
+            # to NULL. Matches the bulk overlay's additive semantics (see
+            # `_SUBAGENT_OVERLAY_MATCH_PREDICATE` in `core/db.py`).
             conn.execute(
-                "UPDATE spans SET sub_agent_id = $1, sub_agent_type = $2, "
+                "UPDATE spans SET "
+                "sub_agent_id = COALESCE(sub_agent_id, $1), "
+                "sub_agent_type = COALESCE(sub_agent_type, $2), "
                 "attributes = $3 WHERE span_id = $4",
                 [span.sub_agent_id, span.sub_agent_type,
                  json.dumps(merged_attrs), span.span_id],

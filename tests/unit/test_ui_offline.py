@@ -135,3 +135,50 @@ def test_vendored_css_has_no_external_refs():
         body = css.read_text(encoding="utf-8")
         external = re.findall(r"url\(\s*['\"]?(https?:)", body)
         assert not external, f"{css.name} references an external url(): {external}"
+
+
+# --- File-level integrity of the SPA ---------------------------------------- #
+# These two replace `test_lens_ui_regression.py`, which was deleted: 344 tests
+# asserting on literal substrings of `index.html`. That style pinned wording and
+# markup structure rather than behaviour, so every visual iteration broke
+# assertions that were not testing anything at risk, and an assertion's slice
+# anchor could break from an unrelated edit (adding one identifier to a
+# dependency array broke one). What it was protecting that actually mattered is
+# below, plus the JS-executing tests kept in `test_lens_dashboard_states.py` and
+# `test_lens_select_all_behaviour.py`.
+
+def test_index_html_has_no_nul_bytes():
+    # Guards the NUL-byte corruption fixed alongside the work map (it broke
+    # `node --check` and made `file` mis-detect the SPA as binary).
+    assert b"\x00" not in _UI_HTML.read_bytes()
+
+
+def test_index_html_module_script_parses():
+    """The SPA's module script must be syntactically valid JavaScript.
+
+    The dashboard is one 12k-line HTML file with an inline module; a syntax
+    error in it renders a blank page with no server-side error, which is the
+    single most expensive way for a UI edit to fail. A real parse is worth more
+    than any number of substring assertions: a dangling ternary left behind by
+    a block deletion is invalid JS but matches every string test you could
+    write. Skips rather than fails where `node` is unavailable, so this never
+    becomes a hard dependency of the suite.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("node") is None:
+        pytest.skip("node not available")
+    html = _UI_HTML.read_text()
+    blocks = re.findall(r'<script type="module">(.*?)</script>', html, re.S)
+    assert blocks, "no module script found in index.html"
+    js = max(blocks, key=len)  # the app; the other is the import map
+    with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as fh:
+        fh.write(js)
+        path = fh.name
+    try:
+        proc = subprocess.run(["node", "--check", path], capture_output=True, text=True)
+    finally:
+        Path(path).unlink(missing_ok=True)
+    assert proc.returncode == 0, f"index.html module script does not parse:\n{proc.stderr}"

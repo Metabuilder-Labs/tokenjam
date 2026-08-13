@@ -3,12 +3,13 @@ import json
 import click
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.models import AlertFilters, AlertType, Severity
 from tokenjam.utils.formatting import console, make_table, severity_colour
 from tokenjam.utils.time_parse import parse_since
 
 
-@click.command("alerts")
+@click.command("alerts", cls=TjCommand)
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("--since", default="24h", help="Time window (e.g. 1h, 24h, 7d)")
 @click.option(

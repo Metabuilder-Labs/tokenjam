@@ -27,6 +27,7 @@ import os
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.usage import last_turn_context_tokens, session_usage
 from tokenjam.utils.humanize import format_tokens
 
@@ -275,9 +276,12 @@ def render_line(data: dict) -> str:
     )
 
 
-@click.command("statusline")
+#: Structural opt-out: Claude Code invokes this after EVERY turn and reads
+#: its stdout directly into the terminal status line — it must stay
+#: near-instant and byte-exact, never carry a spinner.
+@click.command("statusline", cls=TjCommand, no_status=True)
 def cmd_statusline() -> None:
-    """Print a zero-token Claude Code status line (reads payload JSON on stdin).
+    """Print the zero-token Claude Code statusline.
 
     Wire it into ``~/.claude/settings.json`` as::
 

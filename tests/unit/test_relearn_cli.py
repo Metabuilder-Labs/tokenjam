@@ -14,6 +14,8 @@ import subprocess
 
 import click
 import pytest
+
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE, DELIVERY_EXECUTING_HOOK, DELIVERY_INJECTING_HOOK
 from click.testing import CliRunner
 
 from tokenjam.cli.relearn_write_verbs import register_write_verbs
@@ -37,7 +39,7 @@ def _cluster(**overrides) -> RelearnCluster:
     base = dict(
         signature="cwd_confusion", family_key="cwd_confusion",
         title="cwd / relative-path confusion", sessions=12, occurrences=324,
-        repos=["demo"], rung=1, scope="project",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Verify an absolute cwd before a relative Read.",
         examples=[RelearnExample(session_id="s1", repo="demo", ts=None, snippet="no such file")],
         past_overspend_tokens=486_000,
@@ -168,13 +170,14 @@ def test_apply_rejects_an_id_the_detector_never_produced(cfg, tmp_path):
     assert "no stored proposal" in result.output
 
 
-def test_apply_refuses_a_matcherless_family_at_an_enforcement_rung(cfg, tmp_path):
-    [pid] = _store(cfg, _cluster(signature="mystery", family_key="mystery_family", rung=3))
+def test_apply_refuses_a_matcherless_family_for_a_hook(cfg, tmp_path):
+    [pid] = _store(cfg, _cluster(signature="mystery", family_key="mystery_family",
+                            delivery=DELIVERY_INJECTING_HOOK))
     result = _run(cfg, ["apply", pid, "--go",
                         "--target", str(tmp_path / ".claude" / "hooks" / "mystery.py")])
     assert result.exit_code != 0
     assert "no matcher exists" in result.output
-    assert "rung 1" in result.output
+    assert "CLAUDE.md rule" in result.output
 
 
 # --- F1: the end-to-end round trip against a real proposal + real repo ---------
@@ -218,7 +221,8 @@ def test_apply_without_any_target_says_so(cfg):
 
 def _apply_enforcement_fix(cfg, tmp_path) -> str:
     [pid] = _store(cfg, _cluster(signature="sleep_chain", family_key="sleep_chain",
-                                 title="blocked sleep-chain", rung=3))
+                                 title="blocked sleep-chain",
+                                 delivery=DELIVERY_EXECUTING_HOOK))
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
     result = _run(cfg, ["apply", pid, "--go", "--target", str(target)], output_json=True)
     assert result.exit_code == 0, result.output

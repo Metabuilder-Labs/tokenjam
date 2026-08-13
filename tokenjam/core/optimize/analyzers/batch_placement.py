@@ -33,6 +33,7 @@ from typing import Any
 
 from tokenjam.core.optimize.accounting import four_type_token_sum_sql
 from tokenjam.core.pricing import variant_price_ratio
+from tokenjam.core.persona_scope import add_persona_clause
 
 #: The pricing-table variant that carries the Batch API's rates.
 BATCH_VARIANT = "batch"
@@ -83,15 +84,16 @@ CLUSTER_GAP_RATIO = 3.0
 #: Construction footnote for the card's dollar figure.
 BATCH_ESTIMATE_BASIS = (
     "Window spend of the workloads whose session starts fit a regular cadence "
-    "and that ran with no human turn after their first model call, halved at "
-    "the Batch API's flat 50% rate. An estimate of the price difference on the "
-    "same tokens; it assumes the same work runs unchanged on the batch lane."
+    "and that ran with no human turn after their first model call. That spend "
+    "is halved at the Batch API's flat 50% rate. An estimate of the price "
+    "difference on the same tokens. It assumes the same work runs unchanged "
+    "on the batch lane."
 )
 
 #: The friction the card must state next to the number.
 BATCH_FRICTION_NOTE = (
-    "Batch adoption is an architectural change, not a configuration flip: work "
-    "is submitted and polled for later, so only workloads nobody is waiting on "
+    "Batch adoption is an architectural change, not a configuration flip. Work "
+    "is submitted and polled for later. So only workloads nobody is waiting on "
     "can move. Most batches finish within an hour, but none are interactive."
 )
 
@@ -193,6 +195,7 @@ def _cluster_sessions_by_gap(
 
 def _session_rows(
     conn: Any, since: datetime, until: datetime, agent_id: str | None,
+    persona_scope: str | None = None,
 ) -> list[tuple]:
     """Per-session start, agent, spend and all four billed token types."""
     clauses = ["start_time >= $1", "start_time < $2", "session_id IS NOT NULL"]
@@ -200,6 +203,10 @@ def _session_rows(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     return conn.execute(
         f"SELECT session_id, "
@@ -215,6 +222,7 @@ def _session_rows(
 
 def _human_turn_starts(
     conn: Any, since: datetime, until: datetime, agent_id: str | None,
+    persona_scope: str | None = None,
 ) -> dict[str, list[datetime]]:
     """Human-turn timestamps per session.
 
@@ -228,6 +236,10 @@ def _human_turn_starts(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT session_id, start_time FROM spans "
@@ -265,6 +277,7 @@ def analyze_batch_placement(
     agent_id: str | None,
     window_cost_usd: float,
     *,
+    persona_scope: str | None = None,
     min_sessions_for_cadence: int = MIN_SESSIONS_FOR_CADENCE,
     min_group_cost_usd: float = MIN_GROUP_COST_USD,
 ) -> BatchPlacementFinding:
@@ -280,10 +293,10 @@ def analyze_batch_placement(
     behaviour unchanged — only the "nothing qualifies" outcome now carries a
     finding instead of ``None``.
     """
-    rows = _session_rows(conn, since, until, agent_id)
+    rows = _session_rows(conn, since, until, agent_id, persona_scope)
     if not rows:
         return _empty_finding(window_cost_usd, min_sessions_for_cadence, min_group_cost_usd)
-    human_turns = _human_turn_starts(conn, since, until, agent_id)
+    human_turns = _human_turn_starts(conn, since, until, agent_id, persona_scope)
 
     by_agent: dict[str, list[dict[str, Any]]] = {}
     interactive: set[str] = set()

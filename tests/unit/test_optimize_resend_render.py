@@ -17,6 +17,7 @@ import pytest
 from tokenjam.core.config import CaptureConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import build_report
+from tokenjam.core.optimize.analyzers.context_resend import MIN_SESSIONS_FOR_SIGNAL
 from tests.factories import make_llm_span, make_session, make_tool_span
 
 UTC = timezone.utc
@@ -135,7 +136,11 @@ def test_render_resend_shows_headline_examples_and_caveat(db, capsys):
 
     assert "heavy" in out                        # heaviest example named
     assert "conservative lower bound" in out      # caveat renders verbatim
-    assert finding.caveat in out
+    # The caveat now spans multiple paragraphs ("\n\n"), but `out` has already
+    # been through `_flat()`'s whitespace collapse -- normalize the caveat the
+    # same way rather than pinning a match that only worked while the caveat
+    # was a single line.
+    assert _flat(finding.caveat) in out
     assert "No candidates flagged" not in out
     # Compaction fix always present regardless of persona/pricing mode.
     assert "compact" in out.lower()
@@ -152,9 +157,13 @@ def test_render_resend_below_threshold_shows_no_examples_or_fix(db, capsys):
     assert finding.repeat_share is None
 
     _render_resend(finding, pricing_mode="api", marker="①")
-    out = capsys.readouterr().out
+    out = _flat(capsys.readouterr().out)
 
-    assert "too few sessions" in out
+    # Guard: the note names the actual session count and the threshold it
+    # falls short of, not just a generic "too few" complaint.
+    assert (
+        "2" in out and str(MIN_SESSIONS_FOR_SIGNAL) in out and "session" in out.lower()
+    )
     assert "Fix:" not in out
     # No examples/heaviest-sessions section prints below the threshold.
     assert "Heaviest sessions" not in out
@@ -239,7 +248,17 @@ def test_render_resend_cache_control_snippet_is_unmangled(db, capsys):
 # Persona branching: compaction (agent-harness) vs cache_control (SDK)
 # --------------------------------------------------------------------------- #
 
-def test_render_resend_claude_code_persona_leads_with_compaction(db, capsys):
+def test_render_resend_claude_code_persona_leads_with_the_durable_fix(db, capsys):
+    # INVERTED (Critical Rule 23). This test was named
+    # `..._leads_with_compaction` and asserted exactly that — while the Review
+    # inbox card for the SAME finding led with the durable offload rule and
+    # demoted compaction to secondary relief. Two surfaces, one finding, two
+    # different fixes, and the CLI showing the weaker one.
+    #
+    # `COMPACTION_FIX`'s own text disclaims it: "never fixes the pattern going
+    # forward — treat it as immediate relief for an already-full session, not
+    # the durable fix". The suite was pinning the CLI to lead with something
+    # the constant itself says is not the fix.
     from tokenjam.cli.cmd_optimize import _render_resend
 
     _seed_heavy_resend(db)
@@ -249,7 +268,11 @@ def test_render_resend_claude_code_persona_leads_with_compaction(db, capsys):
     out = _flat(capsys.readouterr().out)
 
     assert "Fix:" in out
-    assert finding.fix_compaction in out
+    # The durable lever leads.
+    assert "Offload context-heavy sub-tasks" in out
+    # Compaction survives, in the SAME secondary position the card gives it.
+    assert "Immediate relief in an already-full session" in out
+    assert out.index("Offload context-heavy") < out.index("Immediate relief")
     # Secondary aside for the cache_control lever, not the lead.
     assert "If you also run SDK agents" in out
 

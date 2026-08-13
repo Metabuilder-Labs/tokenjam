@@ -1,4 +1,4 @@
-# Close the loop — product decision + shape (#53)
+# Close the loop — product decision + shape
 
 Status: **shipped (minimal shape)** · 2026-07-03
 

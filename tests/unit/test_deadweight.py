@@ -3,10 +3,24 @@
 
 Mirrors test_relearn.py's fixture style — hand-written Claude Code on-disk
 JSONL records under a tmp_path projects root, no I/O beyond that. The global
-``~/.claude.json`` path is resolved lazily inside ``_global_config_path``, so
-patching ``HOME`` (via monkeypatch, same as tests/conftest.py's autouse
-``_tj_isolated_home`` fixture) is enough to keep every test off the real
-developer machine — no test here ever touches the real home.
+``~/.claude.json`` path is resolved lazily inside
+``core/agent_config._settings_paths``, so patching ``HOME`` (via monkeypatch,
+same as tests/conftest.py's autouse ``_tj_isolated_home`` fixture) is enough to
+keep every test off the real developer machine — no test here ever touches the
+real home.
+
+**The schema size is a MEASUREMENT now, and this module pins it.** The analyzer
+used to charge a flat module constant to every server; it now measures each
+server by starting it and reading its ``tools/list``. A unit test must not
+start a process, and a fixture ``.mcp.json`` names a command that does not
+exist — so the autouse ``_fixed_schema_measurement`` fixture below replaces the
+measurer with one returning fixed sizes. The two numbers it returns are
+deliberately the values the deleted constants held, which is what keeps every
+arithmetic assertion in this file meaningful: the tests still check the tax
+MODEL (per-call re-send, the cache-read multiplier, the deferred split), and
+that model did not change. What changed is where the magnitude comes from, and
+:func:`test_an_unmeasured_server_is_excluded_not_defaulted` is the test that
+pins the new behaviour.
 """
 from __future__ import annotations
 
@@ -14,10 +28,12 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
+from tokenjam.core import agent_config as ac
+from tokenjam.core.optimize import mcp_probe
 from tokenjam.core.optimize.analyzers.deadweight import (
-    DEFERRED_SCHEMA_TAX_TOKENS,
-    FULL_SCHEMA_TAX_TOKENS,
-    MIN_SESSIONS_DEADWEIGHT,
+    UNUSED_RECENCY_WINDOW_DAYS,
     compute_deadweight_finding,
     enumerate_configured_servers,
     run as run_deadweight,
@@ -26,6 +42,55 @@ from tokenjam.core.optimize.analyzers.deadweight import (
 _NOW = datetime.now(timezone.utc)
 _SINCE = _NOW - timedelta(days=7)
 _UNTIL = _NOW + timedelta(days=1)
+
+#: Purely a "how many example sessions to create" convenience for the
+#: fixtures below. The analyzer no longer gates liveness on a session COUNT
+#: (that was `_N_SESSIONS`, retired in favour of the recency
+#: window — see `UNUSED_RECENCY_WINDOW_DAYS`), so this number carries no
+#: threshold meaning; it just gives the multi-source/pricing/deferred-tools
+#: tests several example sessions to aggregate over.
+_N_SESSIONS = 5
+
+#: Comfortably past `UNUSED_RECENCY_WINDOW_DAYS`. Every session this module's
+#: fixtures write lands at effectively "now" (mtime = write time), which on
+#: its own would make the corpus look SHALLOW to `_scan_recency_window`'s
+#: corpus-depth check — every unused-server assertion would read as
+#: "insufficient history" instead. `_ensure_corpus_depth` below writes one
+#: throwaway old session at this age, once per `root`, entirely automatically
+#: (threaded through `_write_transcript`, the one low-level writer every
+#: fixture helper in this module funnels through) so individual tests never
+#: have to know about it.
+_DEPTH_ANCHOR_DAYS_AGO = UNUSED_RECENCY_WINDOW_DAYS * 3
+
+#: The sizes the pinned measurer reports. Same values the deleted
+#: ``FULL_SCHEMA_TAX_TOKENS`` / ``DEFERRED_SCHEMA_TAX_TOKENS`` constants held,
+#: so every arithmetic expectation below is unchanged — see the module
+#: docstring for why that is the point rather than a coincidence.
+FULL_SCHEMA_TAX_TOKENS = 25_000
+DEFERRED_SCHEMA_TAX_TOKENS = 400
+
+
+def _measurement(name: str, _spec: dict) -> mcp_probe.SchemaMeasurement:
+    return mcp_probe.SchemaMeasurement(
+        server=name,
+        tokens=FULL_SCHEMA_TAX_TOKENS,
+        deferred_tokens=DEFERRED_SCHEMA_TAX_TOKENS,
+        tool_count=7,
+        status=ac.MEASURE_OK,
+        measured_at=_NOW,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_schema_measurement(monkeypatch):
+    """Every server in this module measures to a fixed, known size.
+
+    Autouse and unconditional: without it a test would START whatever command a
+    fixture ``.mcp.json`` happens to name. That is not merely slow — it is a
+    unit test spawning arbitrary processes off test data, which is exactly the
+    thing the probe's own budget and read-only discipline exist to bound.
+    """
+    monkeypatch.setattr(mcp_probe, "_default_measurer", _measurement)
 
 
 # --- Fixture builders (mirrors test_relearn.py) ----------------------------
@@ -57,7 +122,31 @@ def _assistant(
     return record
 
 
+def _ensure_corpus_depth(root: Path) -> None:
+    """See `_DEPTH_ANCHOR_DAYS_AGO`. Idempotent per `root` (checks for the
+    anchor directory first), so calling it from every `_write_transcript`
+    costs nothing on the second and later session of a test. The anchor's
+    mtime sits well outside this module's `_SINCE`/`_UNTIL` report window, so
+    it never shows up in `sessions_scanned` or any server's `sessions_present`
+    — only `_scan_recency_window`'s own independent, unbounded-below walk
+    ever looks at it, and only for its mtime (it is never parsed: its content
+    is irrelevant, and old enough that the recency scan skips reading it)."""
+    anchor_dir = root / "-corpus-depth-anchor"
+    if anchor_dir.exists():
+        return
+    anchor_dir.mkdir(parents=True)
+    path = anchor_dir / "anchor.jsonl"
+    path.write_text(
+        json.dumps(_user_prompt("anchor", cwd=str(anchor_dir))), encoding="utf-8",
+    )
+    import os
+
+    mtime = (_NOW - timedelta(days=_DEPTH_ANCHOR_DAYS_AGO)).timestamp()
+    os.utime(path, (mtime, mtime))
+
+
 def _write_transcript(root: Path, project: str, session_id: str, records: list[dict]) -> Path:
+    _ensure_corpus_depth(root)
     project_dir = root / project
     project_dir.mkdir(parents=True, exist_ok=True)
     path = project_dir / f"{session_id}.jsonl"
@@ -261,13 +350,13 @@ def test_multi_source_finding_discloses_the_other_locations_and_scopes_the_fix(t
     _write_mcp_json(light_a, {"posthog": {}})
     _write_mcp_json(light_b, {"posthog": {}})
 
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-heavy", f"s{i}", str(heavy))
     _plain_session(root, "-light-a", "s-a", str(light_a))
     _plain_session(root, "-light-b", "s-b", str(light_b))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    dead = finding.dead_servers[0]
+    dead = finding.unused_servers[0]
 
     heavy_config = str(heavy / ".mcp.json")
     light_a_config = str(light_a / ".mcp.json")
@@ -275,13 +364,18 @@ def test_multi_source_finding_discloses_the_other_locations_and_scopes_the_fix(t
 
     assert dead.source == heavy_config
     assert set(dead.other_sources) == {light_a_config, light_b_config}
-    assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT + 2
-    assert dead.primary_source_sessions == MIN_SESSIONS_DEADWEIGHT
-    # The fix text must name the gap rather than imply full coverage.
+    assert dead.sessions_present == _N_SESSIONS + 2
+    assert dead.primary_source_sessions == _N_SESSIONS
+    # The fix text must name the gap rather than imply full coverage. The
+    # GROUNDING (which other files, how many sessions the one edit reaches) is
+    # built at the render site; the RULE that says a partial edit leaves the
+    # rest of the tax running is catalogued, so it is checked for by its
+    # catalogued wording rather than by a phrase this module authored.
     assert light_a_config in dead.fix
     assert light_b_config in dead.fix
     assert str(dead.primary_source_sessions) in dead.fix
-    assert "ALSO independently declared" in dead.fix
+    assert "Also declared in 2 other locations" in dead.fix
+    assert "needs each one edited" in dead.fix
 
 
 def test_project_scoped_server_fix_never_offers_project_scope_as_an_alternative(tmp_path):
@@ -291,11 +385,11 @@ def test_project_scoped_server_fix_never_offers_project_scope_as_an_alternative(
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    dead = finding.dead_servers[0]
+    dead = finding.unused_servers[0]
 
     assert dead.fix.startswith("Remove the `apollo`")
     assert "project-scope" not in dead.fix.lower()
@@ -312,11 +406,11 @@ def test_user_scoped_server_fix_still_offers_project_scope_as_an_alternative(tmp
     )
     monkeypatch.setenv("HOME", str(fake_home))
     root = tmp_path / "root"
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(root / "-repo-a"))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    dead = next(s for s in finding.dead_servers if s.name == "exa")
+    dead = next(s for s in finding.unused_servers if s.name == "exa")
 
     assert dead.fix.startswith("Remove or project-scope the `exa`")
 
@@ -325,30 +419,30 @@ def test_user_scoped_server_fix_still_offers_project_scope_as_an_alternative(tmp
 
 def test_no_configured_servers_is_a_no_op(tmp_path):
     project_dir = tmp_path / "root" / "repo-a"
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(tmp_path / "root", "-repo-a", f"s{i}", str(project_dir))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=tmp_path / "root")
 
     assert finding.configured_servers == 0
-    assert finding.dead_servers == []
+    assert finding.unused_servers == []
     assert finding.past_overspend_tokens is None
 
 
-def test_detects_dead_server_at_threshold(tmp_path):
+def test_detects_unused_server(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
 
     assert finding.configured_servers == 1
-    assert len(finding.dead_servers) == 1
-    dead = finding.dead_servers[0]
+    assert len(finding.unused_servers) == 1
+    dead = finding.unused_servers[0]
     assert dead.name == "apollo"
-    assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT
+    assert dead.sessions_present == _N_SESSIONS
     assert dead.invocations == 0
     assert dead.estimated_tax_tokens_per_session == FULL_SCHEMA_TAX_TOKENS
     assert finding.past_overspend_tokens == dead.estimated_tax_tokens_window
@@ -364,11 +458,11 @@ def test_dead_server_prices_tax_in_usd_via_pricing_table(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    dead = finding.dead_servers[0]
+    dead = finding.unused_servers[0]
 
     rates = get_rates("anthropic", "claude-opus-4-8")
     assert dead.priced_model == "claude-opus-4-8"
@@ -386,14 +480,14 @@ def test_no_priced_model_leaves_usd_none(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _write_transcript(root, "-repo-a", f"s{i}", [
             _user_prompt("say hi", cwd=str(project_dir)),
             # No assistant turn at all -> no model signal for this session.
         ])
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    dead = finding.dead_servers[0]
+    dead = finding.unused_servers[0]
 
     assert dead.priced_model == ""
     assert dead.estimated_tax_usd_per_session is None
@@ -402,92 +496,117 @@ def test_no_priced_model_leaves_usd_none(tmp_path):
     assert "No dollar estimate" in dead.tax_construction
 
 
-def test_below_threshold_is_not_flagged_dead(tmp_path):
+def test_no_session_count_minimum_a_single_present_session_is_enough(tmp_path):
+    """Positive pin that the retired session-count gate (the old
+    ``MIN_SESSIONS_DEADWEIGHT`` module constant) is genuinely gone, not just
+    unreferenced: a server present in exactly ONE session, never invoked,
+    with the corpus otherwise deep enough for a confident verdict, is flagged
+    unused. The old behaviour required >= 5 sessions before flagging
+    anything, precisely to guard against a small sample; the recency window
+    (`UNUSED_RECENCY_WINDOW_DAYS`) is what carries that job now — see
+    `test_a_shallow_corpus_is_insufficient_history_not_a_finding` for the
+    replacement guard.
+    """
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
-        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+    _plain_session(root, "-repo-a", "s0", str(project_dir))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
 
     assert finding.configured_servers == 1
-    assert finding.dead_servers == []
-    assert finding.past_overspend_tokens is None
-    assert finding.notes  # the "no server cleared the bar" note fires
+    assert [s.name for s in finding.unused_servers] == ["apollo"]
+    assert finding.unused_servers[0].sessions_present == 1
 
 
-def test_default_min_sessions_preserved_when_unspecified(tmp_path):
-    """compute_deadweight_finding's default `min_sessions` matches the module
-    constant unchanged — the config-thread contract for an unset [optimize]."""
+def _backdate(path: Path, days_ago: float) -> None:
+    import os
+
+    mtime = (_NOW - timedelta(days=days_ago)).timestamp()
+    os.utime(path, (mtime, mtime))
+
+
+def test_a_server_invoked_5_days_ago_is_not_unused(tmp_path):
+    """Part E pin: an item used inside the recency window is not unused."""
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
-        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+    path = _write_transcript(root, "-repo-a", "s-recent", [
+        _user_prompt("use the tool", cwd=str(project_dir)),
+        _assistant(
+            "Calling it.",
+            tools=[{"id": "t1", "name": "mcp__apollo__search", "input": {}}],
+            cwd=str(project_dir),
+        ),
+    ])
+    _backdate(path, 5)
 
-    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    assert finding.dead_servers == []
-
-
-def test_lower_min_sessions_flags_previously_hidden_server(tmp_path):
-    """The exact data from test_below_threshold_is_not_flagged_dead flags
-    nothing at the default bar; passing a lower min_sessions (what
-    [optimize] min_sessions_deadweight threads through to) flags the server."""
-    root = tmp_path / "root"
-    project_dir = root / "-repo-a"
-    _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
-        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
-
-    default_finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    assert default_finding.dead_servers == []
-
-    lowered_finding = compute_deadweight_finding(
-        _SINCE, _UNTIL, projects_root=root, min_sessions=MIN_SESSIONS_DEADWEIGHT - 1,
-    )
-    assert len(lowered_finding.dead_servers) == 1
-    assert lowered_finding.dead_servers[0].name == "apollo"
-    assert lowered_finding.dead_servers[0].sessions_present == MIN_SESSIONS_DEADWEIGHT - 1
-
-
-def test_run_reads_min_sessions_deadweight_from_ctx_config(tmp_path, monkeypatch):
-    """The registered `run(ctx)` entry point (not just compute_deadweight_finding
-    directly) reads `ctx.config.optimize.min_sessions_deadweight` — the actual
-    wiring `tj optimize` exercises."""
-    from tokenjam.core.config import OptimizeConfig, TjConfig
-    from tokenjam.core.optimize.types import AnalyzerContext, OptimizeReport, WindowSummary
-
-    root = tmp_path / "root"
-    project_dir = root / "-repo-a"
-    _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
-        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
-    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(root))
-
-    summary = WindowSummary(
-        since=_SINCE, until=_UNTIL, days=7.0, sessions=0, spans=0,
-        total_tokens=0, total_cost_usd=0.0, thin_data=False,
+    finding = compute_deadweight_finding(
+        _NOW - timedelta(days=45), _NOW + timedelta(days=1), projects_root=root,
     )
 
-    def _ctx(config) -> AnalyzerContext:
-        return AnalyzerContext(
-            conn=None, config=config, since=_SINCE, until=_UNTIL, agent_id=None,
-            window_days=7.0, summary=summary, report=OptimizeReport(window=summary),
-        )
+    assert finding.unused_servers == []
 
-    default_ctx = _ctx(TjConfig(version="1"))
-    run_deadweight(default_ctx)
-    assert default_ctx.report.findings["deadweight"].dead_servers == []
 
-    lowered_ctx = _ctx(TjConfig(
-        version="1",
-        optimize=OptimizeConfig(min_sessions_deadweight=MIN_SESSIONS_DEADWEIGHT - 1),
-    ))
-    run_deadweight(lowered_ctx)
-    lowered = lowered_ctx.report.findings["deadweight"]
-    assert len(lowered.dead_servers) == 1
-    assert lowered.dead_servers[0].name == "apollo"
+def test_a_server_last_invoked_40_days_ago_is_unused(tmp_path):
+    """Part E pin: an item last used OUTSIDE the recency window (but with
+    enough corpus depth to trust the negative) is unused — the 40-day-old
+    invocation does not save it."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    unused_recent = _write_transcript(root, "-repo-a", "s-recent-unused", [
+        _user_prompt("say hi", cwd=str(project_dir)),
+        _assistant("Hello!", cwd=str(project_dir)),
+    ])
+    _backdate(unused_recent, 3)
+    old_used = _write_transcript(root, "-repo-a", "s-old-used", [
+        _user_prompt("use the tool", cwd=str(project_dir)),
+        _assistant(
+            "Calling it.",
+            tools=[{"id": "t1", "name": "mcp__apollo__search", "input": {}}],
+            cwd=str(project_dir),
+        ),
+    ])
+    _backdate(old_used, 40)
+
+    finding = compute_deadweight_finding(
+        _NOW - timedelta(days=45), _NOW + timedelta(days=1), projects_root=root,
+    )
+
+    assert [s.name for s in finding.unused_servers] == ["apollo"]
+
+
+def test_a_shallow_corpus_is_insufficient_history_not_a_finding(tmp_path):
+    """Part E pin: a corpus shorter than the recency window cannot support an
+    unused claim — insufficient history, not a finding. Unlike every other
+    test in this module, this one deliberately does NOT rely on
+    `_ensure_corpus_depth`'s automatic anchor: it asserts the raw, un-anchored
+    behaviour, so it writes its own isolated root rather than reusing the
+    module-wide `_write_transcript` corpus-depth side effect.
+    """
+    root = tmp_path / "shallow-root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for days_ago, name in ((1, "s0"), (3, "s1")):
+        path = _write_transcript(root, "-repo-a", name, [
+            _user_prompt("say hi", cwd=str(project_dir)),
+            _assistant("Hello!", cwd=str(project_dir)),
+        ])
+        _backdate(path, days_ago)
+    # `_write_transcript` seeded a `-corpus-depth-anchor` under `root` too —
+    # remove it so this test genuinely exercises a shallow corpus.
+    import shutil
+
+    shutil.rmtree(root / "-corpus-depth-anchor")
+
+    finding = compute_deadweight_finding(
+        _NOW - timedelta(days=45), _NOW + timedelta(days=1), projects_root=root,
+    )
+
+    assert finding.unused_servers == []
+    row = next(s for s in finding.servers if s.name == "apollo")
+    assert row.insufficient_history is True
 
 
 def test_compute_deadweight_finding_cache_dir_opt_in_matches_uncached(tmp_path):
@@ -496,7 +615,7 @@ def test_compute_deadweight_finding_cache_dir_opt_in_matches_uncached(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
 
     uncached = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
@@ -504,7 +623,7 @@ def test_compute_deadweight_finding_cache_dir_opt_in_matches_uncached(tmp_path):
         _SINCE, _UNTIL, projects_root=root, cache_dir=tmp_path / "cache",
     )
 
-    assert [s.name for s in cached.dead_servers] == [s.name for s in uncached.dead_servers]
+    assert [s.name for s in cached.unused_servers] == [s.name for s in uncached.unused_servers]
     assert cached.sessions_scanned == uncached.sessions_scanned
 
 
@@ -514,12 +633,12 @@ def test_compute_deadweight_finding_warm_cache_skips_reparsing(tmp_path, monkeyp
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
     cache_dir = tmp_path / "cache"
 
     first = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root, cache_dir=cache_dir)
-    assert first.dead_servers  # sanity: a real signal, not an empty no-op
+    assert first.unused_servers  # sanity: a real signal, not an empty no-op
 
     def _boom(path):
         raise AssertionError(f"transcript.read_records reparsed {path} on a warm cache run")
@@ -527,7 +646,7 @@ def test_compute_deadweight_finding_warm_cache_skips_reparsing(tmp_path, monkeyp
     monkeypatch.setattr("tokenjam.core.transcript._parse_records", _boom)
 
     second = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root, cache_dir=cache_dir)
-    assert [s.name for s in second.dead_servers] == [s.name for s in first.dead_servers]
+    assert [s.name for s in second.unused_servers] == [s.name for s in first.unused_servers]
 
 
 def test_compute_deadweight_finding_cache_invalidates_on_transcript_edit(tmp_path):
@@ -536,12 +655,12 @@ def test_compute_deadweight_finding_cache_invalidates_on_transcript_edit(tmp_pat
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
     cache_dir = tmp_path / "cache"
 
     first = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root, cache_dir=cache_dir)
-    assert first.dead_servers  # apollo starts out dead (never invoked)
+    assert first.unused_servers  # apollo starts out dead (never invoked)
 
     # Rewrite one of the sessions so apollo IS invoked — size and mtime both
     # change, which must invalidate that session's cache entry.
@@ -550,7 +669,7 @@ def test_compute_deadweight_finding_cache_invalidates_on_transcript_edit(tmp_pat
     )
 
     second = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root, cache_dir=cache_dir)
-    assert second.dead_servers == []  # no longer dead — the edit was picked up
+    assert second.unused_servers == []  # no longer dead — the edit was picked up
 
 
 def test_run_wires_the_persistent_transcript_cache(tmp_path, monkeypatch):
@@ -564,7 +683,7 @@ def test_run_wires_the_persistent_transcript_cache(tmp_path, monkeypatch):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
     monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(root))
 
@@ -583,7 +702,7 @@ def test_run_wires_the_persistent_transcript_cache(tmp_path, monkeypatch):
     first_ctx = _ctx()
     run_deadweight(first_ctx)
     first = first_ctx.report.findings["deadweight"]
-    assert first.dead_servers
+    assert first.unused_servers
 
     def _boom(path):
         raise AssertionError(f"transcript.read_records reparsed {path} on a warm cache run")
@@ -593,14 +712,14 @@ def test_run_wires_the_persistent_transcript_cache(tmp_path, monkeypatch):
     second_ctx = _ctx()
     run_deadweight(second_ctx)
     second = second_ctx.report.findings["deadweight"]
-    assert [s.name for s in second.dead_servers] == [s.name for s in first.dead_servers]
+    assert [s.name for s in second.unused_servers] == [s.name for s in first.unused_servers]
 
 
 def test_invoked_server_is_never_flagged_dead(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+    for i in range(_N_SESSIONS - 1):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
     _invoking_session(
         root, "-repo-a", "s-call", str(project_dir), "mcp__apollo__apollo_contacts_search",
@@ -610,8 +729,8 @@ def test_invoked_server_is_never_flagged_dead(tmp_path):
 
     row = next(s for s in finding.servers if s.name == "apollo")
     assert row.invocations == 1
-    assert row.dead is False
-    assert finding.dead_servers == []
+    assert row.unused is False
+    assert finding.unused_servers == []
 
 
 # --- Sidechain/subagent transcripts must not become extra top-level sessions -
@@ -621,18 +740,17 @@ def test_sidechain_subagent_transcript_is_not_counted_as_a_top_level_session(tmp
     parent session's own directory (core/transcript.py) but must not be
     discovered as an independent top-level "session" -- otherwise a session
     that happens to spawn a subagent spuriously inflates sessions_present (and
-    thus can push a server across the dead-weight threshold, or inflate the
-    schema tax) purely because of where the subagent's JSONL file lives on
-    disk, not because of any real additional session."""
+    thus inflates the schema tax) purely because of where the subagent's
+    JSONL file lives on disk, not because of any real additional session."""
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+    for i in range(_N_SESSIONS - 1):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
 
     # A sidechain transcript nested under s0's own subagents/ dir. If it were
-    # (mis)discovered as its own top-level session, sessions_present would
-    # reach MIN_SESSIONS_DEADWEIGHT and flip apollo to dead.
+    # (mis)discovered as its own top-level session, sessions_scanned and
+    # apollo's own sessions_present would both be one too many.
     sidechain_path = root / "-repo-a" / "s0" / "subagents" / "agent-child1.jsonl"
     sidechain_path.parent.mkdir(parents=True, exist_ok=True)
     sidechain_path.write_text(
@@ -645,10 +763,9 @@ def test_sidechain_subagent_transcript_is_not_counted_as_a_top_level_session(tmp
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
 
-    assert finding.sessions_scanned == MIN_SESSIONS_DEADWEIGHT - 1
-    assert finding.dead_servers == []
+    assert finding.sessions_scanned == _N_SESSIONS - 1
     row = next(s for s in finding.servers if s.name == "apollo")
-    assert row.sessions_present == MIN_SESSIONS_DEADWEIGHT - 1
+    assert row.sessions_present == _N_SESSIONS - 1
 
 
 # --- Deferred-tools suppression ---------------------------------------------
@@ -657,15 +774,15 @@ def test_deferred_listing_suppresses_full_tax_claim(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _deferred_session(
             root, "-repo-a", f"s{i}", str(project_dir), "mcp__apollo__apollo_contacts_search",
         )
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
 
-    dead = finding.dead_servers[0]
-    assert dead.deferred_sessions == MIN_SESSIONS_DEADWEIGHT
+    dead = finding.unused_servers[0]
+    assert dead.deferred_sessions == _N_SESSIONS
     # Every session was deferred -> the blended tax must equal the deferred
     # constant, never the full-schema constant.
     assert dead.estimated_tax_tokens_per_session == DEFERRED_SCHEMA_TAX_TOKENS
@@ -686,7 +803,7 @@ def test_partial_deferral_blends_the_two_constants(tmp_path):
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
 
-    dead = finding.dead_servers[0]
+    dead = finding.unused_servers[0]
     assert dead.sessions_present == 10
     assert dead.deferred_sessions == 5
     expected = round((5 * FULL_SCHEMA_TAX_TOKENS + 5 * DEFERRED_SCHEMA_TAX_TOKENS) / 10)
@@ -743,7 +860,7 @@ def test_mixed_deferral_prices_each_call_by_its_own_load_state(tmp_path):
     expected_full = FULL_SCHEMA_TAX_TOKENS * 2
 
     assert row.invocations == 1
-    assert row.dead is False
+    assert row.unused is False
     assert row.estimated_tax_tokens_window == expected_deferred + expected_full
     # Strictly more than the old bug (whole session priced at the deferred
     # base just because it was deferred at some point).
@@ -763,13 +880,13 @@ def test_schema_tax_scales_with_actual_calls_per_session(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+    for i in range(_N_SESSIONS - 1):
         _plain_session(root, "-repo-a", f"s-light-{i}", str(project_dir))
     _multi_call_session(root, "-repo-a", "s-heavy", str(project_dir), calls=10)
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    dead = finding.dead_servers[0]
-    assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT
+    dead = finding.unused_servers[0]
+    assert dead.sessions_present == _N_SESSIONS
 
     rates = get_rates("anthropic", "claude-opus-4-8")
     ratio = rates.cache_read_per_mtok / rates.input_per_mtok
@@ -779,7 +896,7 @@ def test_schema_tax_scales_with_actual_calls_per_session(tmp_path):
     light_tax_price_equiv = FULL_SCHEMA_TAX_TOKENS  # single call -> multiplier == 1
     heavy_tax_price_equiv = round(FULL_SCHEMA_TAX_TOKENS * (1.0 + (10 - 1) * ratio))
     expected_usd_window = round(
-        (light_tax_price_equiv * (MIN_SESSIONS_DEADWEIGHT - 1) + heavy_tax_price_equiv)
+        (light_tax_price_equiv * (_N_SESSIONS - 1) + heavy_tax_price_equiv)
         / 1_000_000 * rates.input_per_mtok,
         6,
     )
@@ -789,7 +906,7 @@ def test_schema_tax_scales_with_actual_calls_per_session(tmp_path):
     # The heavy session's real cost is folded in, not diluted by an averaged
     # call count applied uniformly to every session.
     assert dead.estimated_tax_usd_window > round(
-        light_tax_price_equiv * MIN_SESSIONS_DEADWEIGHT / 1_000_000 * rates.input_per_mtok, 6,
+        light_tax_price_equiv * _N_SESSIONS / 1_000_000 * rates.input_per_mtok, 6,
     )
     assert "cache-read rate" in dead.tax_construction
     assert "5-minute cache TTL" in dead.tax_construction
@@ -798,7 +915,7 @@ def test_schema_tax_scales_with_actual_calls_per_session(tmp_path):
     # token count -- the schema is resent in full on every call regardless
     # of caching, so this is linear in the call count, never scaled down by
     # the cache-read ratio the $ figure above uses.
-    expected_tokens_window = FULL_SCHEMA_TAX_TOKENS * (MIN_SESSIONS_DEADWEIGHT - 1 + 10)
+    expected_tokens_window = FULL_SCHEMA_TAX_TOKENS * (_N_SESSIONS - 1 + 10)
     assert dead.estimated_tax_tokens_window == expected_tokens_window
 
 
@@ -848,7 +965,7 @@ def test_split_response_records_price_as_one_call_not_two(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+    for i in range(_N_SESSIONS - 1):
         _plain_session(root, "-repo-a", f"s-light-{i}", str(project_dir))
 
     # One heavy session: ONE real API call, its response split across two
@@ -861,13 +978,13 @@ def test_split_response_records_price_as_one_call_not_two(tmp_path):
     ])
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    dead = finding.dead_servers[0]
-    assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT
+    dead = finding.unused_servers[0]
+    assert dead.sessions_present == _N_SESSIONS
 
     get_rates("anthropic", "claude-opus-4-8")  # sanity: model is priced
     light_tax = FULL_SCHEMA_TAX_TOKENS  # single call -> multiplier == 1
     split_session_tax = FULL_SCHEMA_TAX_TOKENS  # ONE real call, not two
-    expected_window = light_tax * (MIN_SESSIONS_DEADWEIGHT - 1) + split_session_tax
+    expected_window = light_tax * (_N_SESSIONS - 1) + split_session_tax
 
     assert dead.estimated_tax_tokens_window == expected_window
 
@@ -915,12 +1032,12 @@ def test_dead_server_tax_not_double_counted_between_table_and_total(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
 
-    dead = finding.dead_servers[0]
+    dead = finding.unused_servers[0]
     mcp_row = next(r for r in finding.tax_table if r.source == "MCP schema: apollo")
     # The tax table's own MCP row and the recoverable total both derive from
     # the SAME per-server figure, but the total must equal exactly the dead
@@ -935,7 +1052,7 @@ def test_no_em_dash_or_quota_in_user_facing_strings(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _deferred_session(
             root, "-repo-a", f"s{i}", str(project_dir), "mcp__apollo__apollo_contacts_search",
         )
@@ -1124,18 +1241,18 @@ def test_render_deadweight_names_the_dead_server(tmp_path, capsys):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    assert finding.dead_servers  # sanity: the analyzer actually flagged one
+    assert finding.unused_servers  # sanity: the analyzer actually flagged one
 
     for mode in ("api", "subscription", "local", "unknown"):
         _render_deadweight(finding, pricing_mode=mode, marker="①")
     out = capsys.readouterr().out
 
     assert "apollo" in out
-    assert f"{MIN_SESSIONS_DEADWEIGHT} sessions" in out
+    assert f"{_N_SESSIONS} sessions" in out
     assert "0 invocations" in out
     assert "No candidates flagged" not in out
     # The construction footnote travels with the number.
@@ -1150,13 +1267,13 @@ def test_render_deadweight_omits_dollars_when_no_model_was_priced(tmp_path, caps
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _write_transcript(root, "-repo-a", f"s{i}", [
             _user_prompt("say hi", cwd=str(project_dir)),
         ])
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    assert finding.dead_servers[0].estimated_tax_usd_window is None
+    assert finding.unused_servers[0].estimated_tax_usd_window is None
 
     _render_deadweight(finding, pricing_mode="api", marker="①")
     out = capsys.readouterr().out
@@ -1166,7 +1283,7 @@ def test_render_deadweight_omits_dollars_when_no_model_was_priced(tmp_path, caps
     assert "no priced model observed" in out
 
 
-def test_render_report_surfaces_dead_servers_instead_of_no_candidates(tmp_path, capsys):
+def test_render_report_surfaces_unused_servers_instead_of_no_candidates(tmp_path, capsys):
     """End-to-end: a report whose only finding is a populated deadweight set
     must not fall through to the generic "No candidates flagged" empty state."""
     from tokenjam.cli.cmd_optimize import _render_report
@@ -1176,16 +1293,16 @@ def test_render_report_surfaces_dead_servers_instead_of_no_candidates(tmp_path, 
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
     _write_mcp_json(project_dir, {"apollo": {}})
-    for i in range(MIN_SESSIONS_DEADWEIGHT):
+    for i in range(_N_SESSIONS):
         _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    assert finding.dead_servers
+    assert finding.unused_servers
 
     now = utcnow()
     report = OptimizeReport(
         window=WindowSummary(
-            since=now, until=now, days=7, sessions=MIN_SESSIONS_DEADWEIGHT,
+            since=now, until=now, days=7, sessions=_N_SESSIONS,
             spans=0, total_tokens=100_000, total_cost_usd=0.0, thin_data=False,
         ),
         downgrade=None,
@@ -1196,3 +1313,262 @@ def test_render_report_surfaces_dead_servers_instead_of_no_candidates(tmp_path, 
 
     assert "No candidates flagged" not in out
     assert "apollo" in out
+
+
+# --- The schema tax is measured, and an unmeasured server is excluded -------
+#
+# The defect these pin: the analyzer used to charge a flat 25,000-token
+# constant to EVERY configured server, on every call, whatever that server
+# exposed — while the only in-repo source for "~25K" described the tax for ALL
+# of a session's attached servers COMBINED. `past_overspend_usd` was therefore
+# linear in an unmeasured number AND multiplied by however many servers the
+# user had configured. The replacement must not merely move the number: it must
+# be impossible for an unmeasured server to be billed anything at all.
+
+def _unmeasurable(name: str, _spec: dict) -> mcp_probe.SchemaMeasurement:
+    return mcp_probe.SchemaMeasurement(
+        server=name, tokens=None, status=ac.MEASURE_UNREACHABLE,
+        detail="the fixture server cannot be started.", measured_at=_NOW,
+    )
+
+
+def test_an_unmeasured_server_is_excluded_not_defaulted(tmp_path, monkeypatch):
+    """A server whose schema size could not be measured contributes NOTHING.
+
+    Not a default, not a floor constant, not a zero dressed up as a
+    measurement: the row exists (the server really is dead weight and the user
+    should see it), it carries no priced figure, and the finding's own totals
+    stay unset rather than understating with a number that looks measured.
+    """
+    monkeypatch.setattr(mcp_probe, "_default_measurer", _unmeasurable)
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {"command": "does-not-exist"}})
+    for i in range(_N_SESSIONS):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert [s.name for s in finding.unused_servers] == ["apollo"]
+    dead = finding.unused_servers[0]
+    assert dead.schema_tokens_measured is None
+    assert dead.measurement_status == ac.MEASURE_UNREACHABLE
+    assert dead.estimated_tax_tokens_window == 0
+    assert dead.estimated_tax_usd_window is None
+    # THE assertion: nothing priced, and no total invented from the gap.
+    assert finding.past_overspend_tokens is None
+    assert finding.past_overspend_usd is None
+    # And the report says why, rather than reading as "nothing to flag".
+    assert finding.servers_measured == 0
+    assert finding.servers_unmeasured == 1
+    assert "could not be measured" in finding.measurement_note
+    # The sentence now opens a new sentence ("None of them could be
+    # measured..."), so it's capitalized where it used to continue a clause;
+    # compare case-insensitively rather than pinning the old casing.
+    assert any("none of them could be measured" in n.lower() for n in finding.notes)
+    # An unmeasured server must not appear in the tax table either — a row
+    # claiming 0 tokens would read as "this server is free".
+    assert not [r for r in finding.tax_table if r.source.startswith("MCP schema:")]
+
+
+def test_the_tax_construction_says_the_size_was_measured(tmp_path):
+    """The prose must state the provenance, not only the number.
+
+    The whole defect was a figure that READ as measured because it was rendered
+    exactly the way a measured one would be. A card that shows a token count
+    with no provenance sentence recreates that, whatever is behind it.
+    """
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {"command": "x"}})
+    for i in range(_N_SESSIONS):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    dead = finding.unused_servers[0]
+
+    assert "tools/list" in dead.tax_construction
+    assert "7 tool schema(s)" in dead.tax_construction
+    assert dead.schema_tokens_measured == FULL_SCHEMA_TAX_TOKENS
+    assert dead.measured_tool_count == 7
+    assert "MEASURED" in finding.estimate_basis
+
+
+def test_a_server_is_measured_once_and_then_read_from_the_store(tmp_path):
+    """Measuring means STARTING the server, so it must not happen every pass.
+
+    The store carries the measurement against the server's own launch spec, so
+    a second analysis over an unchanged corpus starts nothing. This asserts the
+    measurer is called once across two runs sharing a store — the property that
+    makes measuring affordable at all.
+    """
+    calls: list[str] = []
+
+    def _counting(name: str, spec: dict) -> mcp_probe.SchemaMeasurement:
+        calls.append(name)
+        return _measurement(name, spec)
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {"command": "x"}})
+    for i in range(_N_SESSIONS):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    store = ac.InMemoryAgentConfigStore()
+    for _ in range(2):
+        finding = compute_deadweight_finding(
+            _SINCE, _UNTIL, projects_root=root, store=store,
+            schema_measurer=_counting,
+        )
+    assert calls == ["apollo"]
+    assert finding.unused_servers[0].schema_tokens_measured == FULL_SCHEMA_TAX_TOKENS
+
+
+def test_measurement_off_prices_nothing_rather_than_restoring_the_assumption(tmp_path):
+    """Switching measurement off is not a way back to the old constant.
+
+    A run that CHOSE not to measure has the same evidence as one that failed to,
+    so it must reach the same conclusion: excluded, and said so.
+    """
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {"command": "x"}})
+    for i in range(_N_SESSIONS):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(
+        _SINCE, _UNTIL, projects_root=root, measure_schemas=False,
+    )
+    assert finding.unused_servers
+    assert finding.past_overspend_usd is None
+    assert finding.unused_servers[0].measurement_status == ac.MEASURE_SKIPPED
+
+
+def test_the_enumeration_reads_back_what_it_ingested(tmp_path):
+    """The walk populates the config store; the answer comes from the store.
+
+    Pinned because the store round-trip is easy to "optimise" back into a
+    direct return, and the measurement cache depends on the records existing.
+    """
+    project_dir = tmp_path / "repo"
+    _write_mcp_json(project_dir, {"apollo": {"command": "x"}, "linear": {}})
+    store = ac.InMemoryAgentConfigStore()
+
+    servers = enumerate_configured_servers({str(project_dir)}, store=store)
+
+    ingested = store.select(kind=ac.KIND_MCP_SERVER)
+    assert sorted(r.name for r in ingested) == ["apollo", "linear"]
+    assert all(r.path.endswith(".mcp.json") for r in ingested)
+    assert all(r.content_hash for r in ingested)
+    # The spec travels with the record, so the probe never re-reads the file.
+    assert servers["apollo"].spec == {"command": "x"}
+    assert servers["apollo"].config_id
+
+
+# --- One analyzer must not destroy the whole report -------------------------
+
+def test_a_raising_analyzer_is_isolated_and_disclosed(tmp_path, monkeypatch):
+    """A bare dispatch loop let one analyzer take `build_report` down with it.
+
+    Survivable while every analyzer was pure in-memory computation; not
+    survivable once one of them could hit a database write conflict. But
+    isolation ALONE would be the worse bug — an analyzer that vanishes silently
+    reads as "found nothing", a positive claim the run has no evidence for. So
+    the failure has to be recorded, not merely swallowed.
+    """
+    import duckdb
+
+    from tokenjam.core.config import TjConfig
+    from tokenjam.core.db import run_migrations
+    from tokenjam.core.optimize import runner
+    from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
+
+    conn = duckdb.connect(str(tmp_path / "t.duckdb"))
+    run_migrations(conn)
+
+    class _Db:
+        pass
+
+    db = _Db()
+    db.conn = conn
+
+    def _explode(_ctx):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setitem(ANALYZER_REGISTRY, "deadweight", _explode)
+    report = runner.build_report(
+        db, TjConfig(version="1"), since=_SINCE, until=_UNTIL,
+        findings=["deadweight"],
+    )
+    conn.close()
+
+    # It did not take the report down...
+    assert report is not None
+    # ...and it is DISCLOSED, not silently absent.
+    assert "deadweight" in report.analyzer_errors
+    assert "kaboom" in report.analyzer_errors["deadweight"]
+    assert any("did not complete" in n for n in report.notes)
+
+
+def test_the_cli_cannot_render_the_total_without_its_measurement_disclosure(capsys):
+    """An undisclosed FLOOR rendered as a total.
+
+    The terminal showed a priced dollar figure for the servers that could be
+    measured and said nothing about the ones excluded from it. The number was
+    honest; the presentation was not.
+    """
+    from tokenjam.cli.cmd_optimize import _render_deadweight
+    from tokenjam.core.optimize.analyzers.deadweight import (
+        DeadweightFinding,
+        ServerDeadweight,
+    )
+
+    measured = ServerDeadweight(
+        name="apollo", scope="user", source="/x/.claude.json", sessions_present=6,
+        invocations=0, deferred_sessions=0, unused=True,
+        estimated_tax_tokens_per_session=4000, estimated_tax_tokens_window=24000,
+        tax_construction="measured", fix="Remove it.",
+        estimated_tax_usd_window=1.23, priced_model="claude-sonnet-4-5",
+        schema_tokens_measured=4000,
+    )
+    finding = DeadweightFinding(
+        sessions_scanned=6, configured_servers=2, servers=[measured],
+        unused_servers=[measured], past_overspend_usd=1.23,
+        past_overspend_tokens=24000, servers_measured=1, servers_unmeasured=1,
+    )
+    finding.measurement_note = (
+        "MEASUREMENT COVERAGE. 1 of 2 configured MCP server(s) had their schema "
+        "size measured; the other 1 could not be measured and contributes "
+        "NOTHING, so every total here is a floor."
+    )
+    _render_deadweight(finding, pricing_mode="api", marker="1")
+    out = capsys.readouterr().out
+    assert "apollo" in out
+    assert "MEASUREMENT COVERAGE" in out
+    assert "floor" in out
+
+
+def test_a_server_measured_to_cost_nothing_gets_no_card(tmp_path):
+    """`tokens or None` coerces a measured ZERO to None while the dollar figure
+    stays a real 0.0 — a card reading `None tokens / $0.00`, which is the mixed
+    basis Critical Rule 28 forbids. Reachable, not hypothetical: a server
+    exposing zero tools measures to zero tokens.
+    """
+    from tokenjam.core.optimize.analyzers.deadweight import (
+        DeadweightFinding,
+        ServerDeadweight,
+    )
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+
+    empty = ServerDeadweight(
+        name="empty", scope="user", source="/x/.claude.json", sessions_present=6,
+        invocations=0, deferred_sessions=0, unused=True,
+        estimated_tax_tokens_per_session=0, estimated_tax_tokens_window=0,
+        tax_construction="measured: 0 tools", fix="Remove it.",
+        estimated_tax_usd_window=0.0, priced_model="claude-sonnet-4-5",
+        schema_tokens_measured=0, measurement_status="measured",
+    )
+    finding = DeadweightFinding(
+        sessions_scanned=6, configured_servers=1, servers=[empty], unused_servers=[empty],
+    )
+    assert _deadweight_to_proposals(finding) == []

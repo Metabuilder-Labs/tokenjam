@@ -76,14 +76,11 @@ class WindowSummary:
     thin_data:   bool
     #: Distinct calendar days within the window with >=1 session — the
     #: user's own "active day" pace, the `D_active` term of the 30-day
-    #: projection basis in `core/optimize/projection.py`. Read by exactly ONE
-    #: consumer: `write_budget`, which needs "how many sessions will re-send
-    #: this artifact in a month" to price a permanent CLAUDE.md rule. It does
-    #: NOT pace any per-analyzer dollar figure — no such figure exists any
-    #: more (see the field contract in the repo `CLAUDE.md`). Defaults to 0
-    #: for a hand-built `WindowSummary` (tests, older callers, a cached report
-    #: predating the field) — a 0 fails that basis's guardrail, so the standing
-    #: cost is simply not charged rather than invented from a missing count.
+    #: projection basis in `core/optimize/projection.py`. It does NOT pace any
+    #: per-analyzer dollar figure — no such figure exists any more (see the
+    #: field contract in the repo `CLAUDE.md`). Defaults to 0 for a hand-built
+    #: `WindowSummary` (tests, older callers, a cached report predating the
+    #: field).
     active_days: int = 0
 
 
@@ -149,22 +146,46 @@ class DowngradeFinding:
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
     # Sampling confidence (#308). `n_sessions` is the candidate-session sample
-    # the projection rests on; `ci_low`/`ci_high` are the 95% bootstrap interval
-    # on `monthly_savings_usd`, so a 5-session estimate shows a visibly wider
-    # band than a 500-session one. This is SAMPLING confidence on the projection,
-    # NOT a claim the model swap preserves quality — the MODEL_DOWNGRADE_CAVEAT
-    # still governs that. ci_low/ci_high are None when n < 2 (no spread to
-    # estimate from a single point).
+    # the projection rests on — BOTH cases combined (`candidate_sessions +
+    # driver_sessions`), since `past_overspend_usd` is their sum too; `ci_low`/
+    # `ci_high` are the 95% bootstrap interval on `monthly_savings_usd`, so a
+    # 5-session estimate shows a visibly wider band than a 500-session one.
+    # This is SAMPLING confidence on the projection, NOT a claim the model
+    # swap preserves quality — the MODEL_DOWNGRADE_CAVEAT still governs that.
+    # ci_low/ci_high are None when n < 2 (no spread to estimate from a single
+    # point).
     n_sessions:                   int          = 0
     ci_low:                       float | None = None
     ci_high:                      float | None = None
+    # `n_sessions / total_sessions`, as a percent — the population this finding's
+    # ONE `past_overspend_usd` actually covers (both cases). `percent_of_sessions`
+    # above covers the tiny-session case ALONE, so a surface that renders the
+    # dollar tile beside a "N of M sessions" stat must use THIS pair
+    # (`n_sessions`/`percent_of_all_sessions`), never `candidate_sessions`/
+    # `percent_of_sessions` — a window where the driver-role case carries the
+    # whole figure has `candidate_sessions == 0`, which would render a real
+    # dollar amount beside "0%, 0 of N" (two figures over two different
+    # populations shown together).
+    percent_of_all_sessions:      float        = 0.0
     # Per-agent price arithmetic for the proposed swap (one
     # `analyzers.downsize_agents.AgentPriceRow` per agent/model group over the
     # candidate sessions): exact per-type tokens at the current model's rates
     # versus the proposed model's, over the window and projected to 30 days.
     # Typed loosely to keep `types` free of an analyzer import; empty when no
-    # candidate group had pricing data for both sides.
-    per_agent:                    list[Any]    = field(default_factory=list)
+    # candidate group had pricing data for both sides. `list[Any]` costs the
+    # round trip its TYPE, though: `hydrate_dataclass` has nothing to dispatch
+    # on, so a stored report came back with plain dicts here and every
+    # consumer reading `row.delta_usd` raised — silently, wherever an adapter
+    # caught broadly. The element type is therefore declared as DATA, resolved
+    # lazily at hydration time (see `runner._hydrate_target`), which keeps this
+    # module analyzer-free while making the round trip lossless in type as
+    # well as in value.
+    per_agent:                    list[Any]    = field(
+        default_factory=list,
+        metadata={
+            "hydrate": "tokenjam.core.optimize.analyzers.downsize_agents:AgentPriceRow",
+        },
+    )
     # --- The PRIMARY case: a premium model in the driver role ---------------
     # Sessions where a premium-tier model drove long, undelegated, tool-heavy
     # work inline instead of routing it to cheap workers. Every field here
@@ -190,6 +211,18 @@ class DowngradeFinding:
     driver_substitutes:       dict[str, str] = field(default_factory=dict)
     driver_examples:          list[DriverRoleExample] = field(default_factory=list)
     driver_estimate_basis:    str   = ""
+    #: ``session_id -> that session's own driver-role tokens``. A BREAKDOWN of
+    #: `driver_tokens`, not a second quantity: the values sum to it. It exists
+    #: so `core/optimize/rule_placement` can answer "which projects incurred
+    #: this, and in what proportion" — the fix for this card is a CLAUDE.md
+    #: rule, and a rule written into the projects that exhibited the behaviour
+    #: is re-sent in those projects only, rather than in every session of every
+    #: project the user has. Weights are TOKENS and are the single attribution
+    #: weight for both the token and the dollar split, so every destination's
+    #: implied per-token rate equals the finding's own (Critical Rule 28).
+    #: Empty when the driver-role case did not fire; placement then falls back
+    #: to the user-global file, which is the historical behaviour.
+    driver_session_tokens:    dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -302,6 +335,14 @@ class ReuseCluster:
     example_session_ids: list[str]         # top 3, ordered by recency
     skeleton_session_id: str               # which session's plan to render
     caveat:            str = REUSE_HONESTY_CAVEAT
+    # EVERY session in the cluster, not just the 3 examples above — the
+    # population `cost_proposals._net_cross_analyzer_session_overlap` needs to
+    # tell whether this cluster's claim overlaps another analyzer's (`script`
+    # clusters the identical repeated-tool-sequence shape and, absent this,
+    # claimed the same sessions a second time — see CLAUDE.md Critical Rule 27
+    # in `.claude/rules/optimize-cost-figures.md`). Defaulted for round-trip
+    # with older serialized reports.
+    member_session_ids: tuple[str, ...] = ()
 
 
 #: Capture modes whose clusters were built, wholly or partly, on tool
@@ -366,6 +407,14 @@ class OptimizeReport:
     # Existing analyzers (downsize, budget-projection) keep their
     # typed slots above for backwards-compat with cmd_optimize and mcp.
     findings:  dict = field(default_factory=dict)
+    #: Analyzers that RAISED, keyed by name, with the exception. An analyzer
+    #: whose failure is swallowed and not recorded reads as one that found
+    #: nothing, which is a positive claim the run has no evidence for — so the
+    #: dispatch loop isolates failures (one analyzer must not destroy twelve
+    #: others' findings) and records them here rather than merely omitting them.
+    #: Every surface that renders a report must be able to say "we did not get
+    #: an answer" separately from "the answer was none".
+    analyzer_errors: dict = field(default_factory=dict)
     # Dominant user persona for the window ("claude-code" | "sdk" | "mixed" |
     # "unknown") — see `tokenjam.core.framing.dominant_persona`. Computed once
     # by `runner.build_report` (mirrors `AnalyzerContext.persona` below) and
@@ -373,6 +422,41 @@ class OptimizeReport:
     # (e.g. `cost_proposals.cost_proposals_from_report`) never has to
     # recompute it from a bare `conn`.
     persona:   str = "unknown"
+    #: The analyzer names this pass actually DISPATCHED. Without it a reader
+    #: cannot tell "this analyzer ran and found nothing" from "this analyzer was
+    #: never invoked", and that distinction becomes load-bearing the moment a
+    #: report is served for a persona other than :attr:`persona`: an analyzer
+    #: the requested persona has a lever for, which this pass never ran, is
+    #: NOT-YET-KNOWN and must render as such rather than as an empty result
+    #: (root anti-pattern 22). Empty means "this report predates the field", not
+    #: "nothing ran" — a consumer must degrade to "unknown", never to "none".
+    computed_analyzers: list = field(default_factory=list)
+    #: The personas whose gates were honored when :attr:`computed_analyzers` was
+    #: selected. A pass run for several personas (the daemon's, which computes
+    #: the union so one stored artifact can answer for either side of the
+    #: "Viewing as" picker) lists them all; a single-persona pass lists just its
+    #: own. This is what tells a route whether it may answer a request for a
+    #: persona other than :attr:`persona` at all.
+    computed_for_personas: list = field(default_factory=list)
+    #: The persona this report's ROWS were restricted to, or ``None`` for the
+    #: whole corpus. :attr:`persona` says what the window is; this says what was
+    #: looked at. A consumer publishing a figure under a persona label must
+    #: check that this MATCHES that persona — a report computed over everything
+    #: cannot answer "how much is my SDK traffic costing me", and rendering it
+    #: as though it could is the whole-corpus-number-under-a-persona-label bug.
+    #: ``None`` on a report deserialized from an artifact written before this
+    #: field existed, which is indistinguishable from "unscoped" and is treated
+    #: as exactly that.
+    persona_scope: str | None = None
+    #: One fully-scoped report per persona the pass was asked to answer for,
+    #: keyed by persona and shaped like this one (``report_to_dict`` of a nested
+    #: :class:`OptimizeReport`). The dispatch gate could be widened to a union
+    #: and sliced on read because it only decides which analyzers run; a
+    #: POPULATION cannot be unioned — one number cannot cover two populations —
+    #: so the pass runs once per persona and stores each result whole. Empty
+    #: means the artifact predates per-persona scoping: a reader asking for a
+    #: specific persona then has NOT-YET-KNOWN, never this report's figures.
+    persona_reports: dict = field(default_factory=dict)
     # Why the filesystem-reading analyzers (deadweight, relearn, summarize)
     # scanned nothing, when they scanned nothing — see
     # `core/optimize/scope.py`. `None` means they DID scan, which is a
@@ -414,6 +498,31 @@ class AnalyzerContext:
     # looking at an SDK caller (e.g. deciding fix modality) read it here
     # instead of re-deriving it from `conn`.
     persona:                str            = "unknown"
+    # The persona whose POPULATION this pass is scoped to, or `None` for the
+    # whole corpus. NOT the same field as `persona` above, which records what
+    # the window IS. This one records what the pass was asked to LOOK AT, and
+    # it is what makes a dollar figure published under a persona label actually
+    # be that persona's money: the dispatch gate only decides which analyzers
+    # run, so without this every survivor still aggregates the whole mixed
+    # corpus. Analyzers apply it through
+    # `core/optimize/persona_scope.add_persona_clause` — never a hand-written
+    # prefix test, which would be a second bucketing rule free to drift from
+    # `alerts.is_interactive_coding_agent`.
+    persona_scope:          str | None     = None
+
+    @property
+    def effective_persona(self) -> str:
+        """THE persona a gate in this pass must key off.
+
+        `persona_scope` when the pass is scoped to one, else the window's own
+        dominant `persona`. Any gate that reads `persona` directly is wrong for
+        a scoped pass over a MIXED corpus: the window resolves to `mixed`, which
+        disables nothing, so a `claude-code`-scoped pass still attaches findings
+        for levers a Claude Code user does not have — measured over Claude Code
+        rows and then labelled with their persona, which is worse than the
+        unscoped version of the same card.
+        """
+        return self.persona_scope or self.persona
     # Which filesystem the filesystem-reading analyzers (deadweight, relearn,
     # summarize) may read, and why. Resolved once in `runner.build_report` via
     # `core.optimize.scope.resolve_analyzer_scope` — an analyzer must never
@@ -421,6 +530,10 @@ class AnalyzerContext:
     # stops isolating it. `None` only in a hand-built context (tests): treat it
     # as the unscoped default. See `core/optimize/scope.py` for the contract.
     scope:                  Any            = None
+    # The owning `DuckDBBackend`'s re-entrant write lock, or `None`. An
+    # analyzer that writes through `conn` directly must take it — see
+    # `.claude/rules/core-architecture.md` and `core/agent_config.store_for`.
+    write_lock:             Any            = None
 
 
 # ---------------------------------------------------------------------------

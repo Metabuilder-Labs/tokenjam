@@ -106,22 +106,31 @@ def _bump(counts: dict[str, int], raw: str) -> bool:
     return True
 
 
-def _scan_record(record: dict[str, Any], counts: dict[str, int]) -> int:
-    """Count every invocation shape carried by one transcript record.
+def invoked_names_in_record(record: dict[str, Any]) -> list[str]:
+    """Every raw (pre-alias) invocation name one transcript record carries —
+    a ``Skill``/command slug or an ``Task``/``Agent`` ``subagent_type``.
 
-    Returns how many distinct invocation events it held.
+    Split out from :func:`_scan_record` so a caller that needs to know WHICH
+    item fired (``deadweight``'s plugin recency check, which asks "did
+    anything attributable to this plugin fire in the last N days") can reuse
+    the identical shape-detection this module's own aggregate counter uses,
+    rather than keeping a second copy of the three regexes/keys in sync by
+    hand. Names are returned verbatim — the bare-suffix alias expansion
+    ``_bump`` does for a `plugin:slug` name is the CALLER's job when it
+    matters (see ``_bump`` for why: a plugin-namespaced invocation is also
+    indexed under its bare slug because that's what the file on disk is
+    named).
     """
     message = record.get("message")
     if not isinstance(message, dict):
-        return 0
+        return []
     content = message.get("content")
-    events = 0
+    names: list[str] = []
     if isinstance(content, str):
-        for hit in _COMMAND_NAME_RE.findall(content):
-            events += _bump(counts, hit)
-        return events
+        names.extend(_COMMAND_NAME_RE.findall(content))
+        return names
     if not isinstance(content, list):
-        return 0
+        return []
     for block in content:
         if not isinstance(block, dict):
             continue
@@ -129,8 +138,7 @@ def _scan_record(record: dict[str, Any], counts: dict[str, int]) -> int:
         if kind == "text":
             text = block.get("text")
             if isinstance(text, str) and "<command-name>" in text:
-                for hit in _COMMAND_NAME_RE.findall(text):
-                    events += _bump(counts, hit)
+                names.extend(_COMMAND_NAME_RE.findall(text))
             continue
         if kind != "tool_use":
             continue
@@ -139,9 +147,24 @@ def _scan_record(record: dict[str, Any], counts: dict[str, int]) -> int:
             continue
         name = block.get("name")
         if name in _SKILL_TOOLS:
-            events += _bump(counts, str(tool_input.get("skill") or ""))
+            skill = str(tool_input.get("skill") or "")
+            if skill:
+                names.append(skill)
         elif name in _AGENT_TOOLS:
-            events += _bump(counts, str(tool_input.get("subagent_type") or ""))
+            subagent = str(tool_input.get("subagent_type") or "")
+            if subagent:
+                names.append(subagent)
+    return names
+
+
+def _scan_record(record: dict[str, Any], counts: dict[str, int]) -> int:
+    """Count every invocation shape carried by one transcript record.
+
+    Returns how many distinct invocation events it held.
+    """
+    events = 0
+    for raw in invoked_names_in_record(record):
+        events += _bump(counts, raw)
     return events
 
 

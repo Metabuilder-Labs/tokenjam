@@ -19,7 +19,11 @@ npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 
 ## What you get
 
-`tj onboard` is guided setup: it writes a config, generates an ingest secret, and asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) to wire the right path. For Claude Code and Codex that means backfilling recent history and installing a statusline and hooks for live capture; restart and you're live. Onboarding unlocks all six analyzers, the Lens dashboard, and the zero-token statusline in one command.
+`tj onboard` is guided setup: it writes a config, generates an ingest secret, and asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) to wire the right path. For Claude Code and Codex that means backfilling recent history and installing a statusline and hooks for live capture; restart and you're live. Onboarding unlocks the analyzer suite, the Lens dashboard, and the zero-token statusline in one command.
+
+Your answer also decides **which analyzers run**. A coding-agent user (Claude Code, Codex) and an SDK/API user can change different things: the coding agent's harness builds the request and owns the prompt template, while an SDK process has no on-disk transcript and no subagent dispatch. Most analyzers run for both; the ones whose fix your persona can't reach are skipped rather than shown as advice you can't act on.
+
+And it doesn't stop at advice. Every analyzer ends in a fix you can apply: a rule written into the right instruction file, an unused MCP server scoped down, a subagent pinned to a cheaper model, a cache breakpoint placed in the request your code builds. Each one is staged as a diff, dry-run by default, and undoable.
 
 ## Commands
 
@@ -29,7 +33,8 @@ All arguments pass straight through to the Python CLI, so any `tj` subcommand an
 |---|---|
 | `npx tokenjam onboard` | Guided setup: writes a config, generates an ingest secret, and optionally installs the background daemon for live capture. |
 | `npx tokenjam context` | Where your quota goes: re-read vs. net-new share, recurring inclusions, `/compact` candidates. |
-| `npx tokenjam optimize` | Cost-saving candidates: model downsizing, cache opportunities, prompt trimming, workflow reuse, subagent right-sizing. |
+| `npx tokenjam optimize` | Cost-saving candidates from your actual usage: recurring blockers, repeat context, model downsizing, subagent right-sizing, unused MCP servers, oversized instruction files, and more. |
+| `npx tokenjam rules list` | The fixes on offer, and the files each would be written into. `stage` / `check` / `apply` / `undo` complete the loop. |
 | `npx tokenjam` | Bare run: still works, still zero-install, still a reference passthrough to the Python CLI. |
 
 ## Go deeper
@@ -37,11 +42,12 @@ All arguments pass straight through to the Python CLI, so any `tj` subcommand an
 `tj onboard` sets up live capture, the local Lens dashboard, and the zero-token statusline in one command. From there:
 
 ```bash
-tj optimize   # cost-saving candidates from your actual usage
-tj serve      # open the Lens dashboard at http://127.0.0.1:7391/
+tj optimize     # cost-saving candidates from your actual usage
+tj rules list   # the fixes on offer, and the files they'd be written into
+tj serve        # open the Lens dashboard at http://127.0.0.1:7391/
 ```
 
-- Full feature set, six analyzers, and Lens screenshots: [github.com/Metabuilder-Labs/tokenjam](https://github.com/Metabuilder-Labs/tokenjam)
+- Full feature set, the per-persona analyzer table, and Lens screenshots: [github.com/Metabuilder-Labs/tokenjam](https://github.com/Metabuilder-Labs/tokenjam)
 - Product site and docs: [tokenjam.dev](https://tokenjam.dev)
 
 ## How the launcher works

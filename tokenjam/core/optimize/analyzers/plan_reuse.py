@@ -43,6 +43,7 @@ from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recu
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext, ReuseCluster, ReuseFinding
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Cluster thresholds (issue #115 AC6 / savings contract). Module-level for
 # explicit visibility and easy tuning. A cluster is surfaced only when it
@@ -68,9 +69,9 @@ _MODE1_HINT = (
 # without OTEL_LOG_USER_PROMPTS=1 (see api/routes/logs.py).
 _CAPTURE_ON_NO_CONTENT_HINT = (
     "[capture] prompts is on, but no planning call in this window carried "
-    "prompt text, so clustering ran on tool-sequence signatures only. Sessions "
-    "ingested live carry prompt text only when Claude Code ran with "
-    "OTEL_LOG_USER_PROMPTS=1; `tj backfill claude-code` recovers it from the "
+    "prompt text. So clustering ran on tool-sequence signatures only. "
+    "Sessions ingested live carry prompt text only when Claude Code ran with "
+    "OTEL_LOG_USER_PROMPTS=1. `tj backfill claude-code` recovers it from the "
     "transcripts on disk."
 )
 
@@ -80,9 +81,9 @@ _CAPTURE_ON_NO_CONTENT_HINT = (
 # fully content-matched result from one that was half tool-signature guesswork.
 _MIXED_CAPTURE_HINT = (
     "Only some planning calls in this window carried prompt text; the rest "
-    "were clustered on tool-sequence signatures alone, so these clusters do "
+    "were clustered on tool-sequence signatures alone. So these clusters do "
     "not all rest on the same evidence. Sessions ingested live carry prompt "
-    "text only when Claude Code ran with OTEL_LOG_USER_PROMPTS=1; "
+    "text only when Claude Code ran with OTEL_LOG_USER_PROMPTS=1. "
     "`tj backfill claude-code` recovers it from the transcripts on disk."
 )
 
@@ -267,6 +268,10 @@ def run(ctx: AnalyzerContext) -> None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     rows = ctx.conn.execute(
         f"SELECT session_id, start_time, model, tool_name, "
@@ -372,6 +377,7 @@ def run(ctx: AnalyzerContext) -> None:
             script_replacement_recoverable_tokens=avg_tokens * reps,
             example_session_ids=example_ids,
             skeleton_session_id=by_recency[0].session_id,
+            member_session_ids=tuple(m.session_id for m in members),
         ))
 
     # Cluster listing order (independent of the finding-level headline basis

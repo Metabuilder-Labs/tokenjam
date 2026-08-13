@@ -9,6 +9,7 @@ from typing import Callable
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.server_state import find_own_serve_pid
 from tokenjam.utils.formatting import console
 
@@ -132,10 +133,10 @@ def stop_tj_serve(*, quiet: bool = False) -> tuple[bool, list[str]]:
     return (bool(stopped_via) and not failed_via), stopped_via
 
 
-@click.command("stop")
+@click.command("stop", cls=TjCommand, status_message="Stopping tj serve…")
 @click.pass_context
 def cmd_stop(ctx: click.Context) -> None:
-    """Stop the tj serve daemon or background process."""
+    """Stop the tj serve daemon."""
     stop_tj_serve()
 
 

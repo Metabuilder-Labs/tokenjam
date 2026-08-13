@@ -6,8 +6,12 @@ from typing import Any, NoReturn
 
 import click
 from rich.markup import escape as _rich_escape
+from rich.padding import Padding
+from rich.table import Table
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand, tj_status
+from tokenjam.core.optimize.analyzers.deadweight import UNUSED_RECENCY_WINDOW_DAYS
 from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
@@ -31,10 +35,12 @@ from tokenjam.core.optimize import (
     report_from_dict,
     report_to_dict,
 )
+from tokenjam.core.rulewrite.delivery import delivery_label
 from tokenjam.utils.formatting import (
     console,
     format_cost,
     format_tokens,
+    make_table,
 )
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -82,7 +88,12 @@ def _resolve_analyzer_names(requested: list[str] | None) -> list[str] | None:
     ))
 
 
-@click.command("optimize")
+#: No class-level `status_message`: the `--validate` branch (below) has its
+#: own confirmation prompt, and a live spinner colliding with a blocking
+#: stdin read corrupts both. `tj_status` is called manually below, scoped to
+#: just the report fetch/build — the one stretch that's actually silent and
+#: has no prompt anywhere in it.
+@click.command("optimize", cls=TjCommand)
 @click.argument(
     "findings",
     nargs=-1,
@@ -119,6 +130,8 @@ def _resolve_analyzer_names(requested: list[str] | None) -> list[str] | None:
                    "(default 5, max 20).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, default=False,
               help="Skip the --validate cost-estimate confirmation prompt.")
+@click.option("-v", "--verbose", "verbose_flag", is_flag=True, default=False,
+              help="Print every finding card in full instead of the scoreboard.")
 @json_option
 @click.pass_context
 def cmd_optimize(
@@ -134,9 +147,10 @@ def cmd_optimize(
     validate_finding: str | None,
     samples: int | None,
     assume_yes: bool,
+    verbose_flag: bool,
     output_json_flag: bool,
 ) -> None:
-    """Analyze recent usage for cost-saving candidates and budget exposure."""
+    """Find cost-saving opportunities."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
@@ -184,143 +198,164 @@ def cmd_optimize(
     requested = list(findings) if findings else None
     analyzer_findings = _resolve_analyzer_names(requested)
 
-    # Two paths depending on whether the daemon holds the DB lock.
-    #
-    # Local DB available (no daemon, or we got handed a real DuckDBBackend) →
-    # build the report locally using db.conn directly. Fastest, no HTTP.
-    #
-    # Daemon up (main.py handed us an ApiBackend because DuckDB refused to
-    # open) → fetch the report from /api/v1/optimize. Previously this path
-    # tried to open the DB read-only, but DuckDB blocks read-only attaches
-    # while another process holds the write lock — `tj optimize` failed with
-    # "Could not set lock on file" any time the daemon was up. See issue
-    # #68 §12.
-    conn = getattr(db, "conn", None)
-    report: OptimizeReport
-    plan_mix: dict[str, int]
-    if conn is None:
-        # API-shim path
-        from tokenjam.core.api_backend import ApiBackend
-        if not isinstance(db, ApiBackend):
-            raise click.ClickException(
-                "optimize requires either a direct DuckDB connection or a "
-                "running tj serve at the configured api.{host,port}."
-            )
-        try:
-            report_dict = db.fetch_optimize_report(
-                since=since,
+    # The one truly slow, silent stretch in this command: fetching or
+    # building the report (analyzer sweep can run to a couple of minutes on
+    # a large corpus) plus the two opportunistic background passes below it.
+    # --validate (above) never reaches here, so its confirmation prompt is
+    # never live at the same time as this spinner.
+    with tj_status("Scanning your sessions…", ctx):
+        # Two paths depending on whether the daemon holds the DB lock.
+        #
+        # Local DB available (no daemon, or we got handed a real DuckDBBackend) →
+        # build the report locally using db.conn directly. Fastest, no HTTP.
+        #
+        # Daemon up (main.py handed us an ApiBackend because DuckDB refused to
+        # open) → fetch the report from /api/v1/optimize. Previously this path
+        # tried to open the DB read-only, but DuckDB blocks read-only attaches
+        # while another process holds the write lock — `tj optimize` failed with
+        # "Could not set lock on file" any time the daemon was up. See issue
+        # #68 §12.
+        conn = getattr(db, "conn", None)
+        report: OptimizeReport
+        plan_mix: dict[str, int]
+        if conn is None:
+            # API-shim path
+            from tokenjam.core.api_backend import ApiBackend
+            if not isinstance(db, ApiBackend):
+                raise click.ClickException(
+                    "optimize requires either a direct DuckDB connection or a "
+                    "running tj serve at the configured api.{host,port}."
+                )
+            try:
+                report_dict = db.fetch_optimize_report(
+                    since=since,
+                    agent_id=agent,
+                    findings=analyzer_findings,
+                    budget_provider=budget_provider,
+                    budget_usd=budget_usd,
+                )
+            except Exception as exc:
+                raise click.ClickException(
+                    f"Failed to fetch optimize report from tj serve: {exc}"
+                ) from exc
+
+            # The daemon no longer runs analyzers on a request — it serves the
+            # report its background scan stored (`core.optimize.report_store`).
+            # A cold store is NOT an empty report: say "not computed yet" rather
+            # than rendering a report full of zeros that reads as "no waste".
+            if report_dict.get("report_available") is False:
+                _echo_scan_not_ready(report_dict, output_json)
+                return
+
+            if report_dict.get("error") == "no_data":
+                if output_json:
+                    click.echo(json.dumps(report_dict))
+                else:
+                    console.print(
+                        "[yellow]No usage data found.[/yellow] "
+                        "[dim]Let TokenJam run for a few days, or — if you use "
+                        "Claude Code — try [bold]tj backfill claude-code[/bold] to "
+                        "ingest historical sessions.[/dim]"
+                    )
+                return
+
+            report = report_from_dict(report_dict)
+            # Plan-tier mix is included in the /api/v1/optimize payload as of
+            # #68 §12 follow-up #29, so the CLI can render subscription /
+            # local / unknown framings correctly under daemon mode.
+            plan_mix = report_dict.get("plan_tier_mix") or {}
+            # Agent-persona mix (#97) — same daemon-mode plumbing as plan_mix
+            # above, so the downsize CTA matches persona whether or not the
+            # daemon is up.
+            agent_mix = report_dict.get("agent_persona_mix") or {}
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
+            ).fetchone()
+            if not row or not row[0]:
+                if output_json:
+                    click.echo(json.dumps({
+                        "error": "no_data",
+                        "message": "No span data available — let TokenJam run for a few "
+                                   "days, or `tj backfill claude-code` if you use Claude Code.",
+                    }))
+                else:
+                    console.print(
+                        "[yellow]No usage data found.[/yellow] "
+                        "[dim]Let TokenJam run for a few days, or — if you use "
+                        "Claude Code — try [bold]tj backfill claude-code[/bold] to "
+                        "ingest historical sessions.[/dim]"
+                    )
+                return
+
+            report = build_report(
+                db=db,
+                config=config,
+                since=since_dt,
+                until=until_dt,
                 agent_id=agent,
                 findings=analyzer_findings,
-                budget_provider=budget_provider,
-                budget_usd=budget_usd,
+                budget_provider_filter=budget_provider,
+                budget_usd_override=budget_usd,
             )
-        except Exception as exc:
-            raise click.ClickException(
-                f"Failed to fetch optimize report from tj serve: {exc}"
-            ) from exc
 
-        # The daemon no longer runs analyzers on a request — it serves the
-        # report its background scan stored (`core.optimize.report_store`).
-        # A cold store is NOT an empty report: say "not computed yet" rather
-        # than rendering a report full of zeros that reads as "no waste".
-        if report_dict.get("report_available") is False:
-            _echo_scan_not_ready(report_dict, output_json)
-            return
+            # The Review inbox reads this finding from relearn_store rather
+            # than recomputing it on every request. A direct CLI run has just
+            # computed the full finding, so publish that exact result before
+            # rendering it. In daemon mode the CLI only reads a stored report,
+            # and analyzer subsets that omit relearn leave the cache untouched.
+            relearn_finding = (report.findings or {}).get("relearn")
+            if relearn_finding is not None:
+                from tokenjam.core.optimize import relearn_store
 
-        if report_dict.get("error") == "no_data":
-            if output_json:
-                click.echo(json.dumps(report_dict))
-            else:
-                console.print(
-                    "[yellow]No usage data found.[/yellow] "
-                    "[dim]Let TokenJam run for a few days, or — if you use "
-                    "Claude Code — try [bold]tj backfill claude-code[/bold] to "
-                    "ingest historical sessions.[/dim]"
-                )
-            return
+                relearn_store.write_cache(relearn_finding, config=config)
 
-        report = report_from_dict(report_dict)
-        # Plan-tier mix is included in the /api/v1/optimize payload as of
-        # #68 §12 follow-up #29, so the CLI can render subscription /
-        # local / unknown framings correctly under daemon mode.
-        plan_mix = report_dict.get("plan_tier_mix") or {}
-        # Agent-persona mix (#97) — same daemon-mode plumbing as plan_mix
-        # above, so the downsize CTA matches persona whether or not the
-        # daemon is up.
-        agent_mix = report_dict.get("agent_persona_mix") or {}
-    else:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
-        ).fetchone()
-        if not row or not row[0]:
-            if output_json:
-                click.echo(json.dumps({
-                    "error": "no_data",
-                    "message": "No span data available — let TokenJam run for a few "
-                               "days, or `tj backfill claude-code` if you use Claude Code.",
-                }))
-            else:
-                console.print(
-                    "[yellow]No usage data found.[/yellow] "
-                    "[dim]Let TokenJam run for a few days, or — if you use "
-                    "Claude Code — try [bold]tj backfill claude-code[/bold] to "
-                    "ingest historical sessions.[/dim]"
-                )
-            return
+            plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
+            agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
 
-        report = build_report(
-            db=db,
-            config=config,
-            since=since_dt,
-            until=until_dt,
-            agent_id=agent,
-            findings=analyzer_findings,
-            budget_provider_filter=budget_provider,
-            budget_usd_override=budget_usd,
-        )
+            # Opportunistic adoption detection: with a direct DuckDB connection in
+            # hand, resolve any ripe past config exports into measured
+            # adopted/ignored outcomes — but only when the daemon is actually
+            # down. Holding a direct `conn` here means our own `open_db()` won a
+            # lock-free open; it does NOT guarantee `tj serve` isn't concurrently
+            # running (e.g. a narrow startup/shutdown window), and a daemon that
+            # *is* up already runs this same detection server-side on every
+            # /api/v1/recommendations read. Without an explicit check, both sides
+            # could race to resolve the same ripe export and each append a
+            # `downsize_adoption` record for it. Probe the daemon's HTTP API
+            # (same reachability check `main.py` uses on a DB-lock failure) and
+            # skip when it answers, so only one side ever runs detection for a
+            # given invocation. Fail-safe — never break optimize.
+            try:
+                from tokenjam.core.api_backend import probe_api
+                from tokenjam.core.recommendations import detect_downsize_adoption
+                api_key = config.api.auth.api_key if config.api.auth.enabled else None
+                daemon_up = probe_api(config.api.host, config.api.port, api_key) is not None
+                if not daemon_up:
+                    detect_downsize_adoption(conn, config)
+            except Exception:
+                pass
 
-        plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
-        agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
-
-        # Opportunistic adoption detection: with a direct DuckDB connection in
-        # hand, resolve any ripe past config exports into measured
-        # adopted/ignored outcomes — but only when the daemon is actually
-        # down. Holding a direct `conn` here means our own `open_db()` won a
-        # lock-free open; it does NOT guarantee `tj serve` isn't concurrently
-        # running (e.g. a narrow startup/shutdown window), and a daemon that
-        # *is* up already runs this same detection server-side on every
-        # /api/v1/recommendations read. Without an explicit check, both sides
-        # could race to resolve the same ripe export and each append a
-        # `downsize_adoption` record for it. Probe the daemon's HTTP API
-        # (same reachability check `main.py` uses on a DB-lock failure) and
-        # skip when it answers, so only one side ever runs detection for a
-        # given invocation. Fail-safe — never break optimize.
-        try:
-            from tokenjam.core.api_backend import probe_api
-            from tokenjam.core.recommendations import detect_downsize_adoption
-            api_key = config.api.auth.api_key if config.api.auth.enabled else None
-            daemon_up = probe_api(config.api.host, config.api.port, api_key) is not None
-            if not daemon_up:
-                detect_downsize_adoption(conn, config)
-        except Exception:
-            pass
-
-        # Opportunistic cost-proposal refresh: until now the ONLY producer of
-        # the cost-proposal store (core.optimize.cost_proposals
-        # .recompute_cost_proposals) was the web Review inbox's manual
-        # refresh button — a pure-CLI user who never runs `tj serve` plus the
-        # web UI would never have a cost proposal computed at all, so `tj
-        # relearn cost-proposals` would sit permanently empty regardless of
-        # how good its renderer is. Piggyback the same recompute here so a
-        # plain `tj optimize` run keeps that store warm too.
-        # `recompute_cost_proposals` already never raises (it returns [] on
-        # failure), so a broken window here degrades to a stale/empty
-        # cost-proposals list, never a broken `tj optimize`.
-        try:
-            from tokenjam.core.optimize.cost_proposals import recompute_cost_proposals
-            recompute_cost_proposals(db, config, agent_id=agent)
-        except Exception:
-            pass
+            # Opportunistic cost-proposal refresh: until now the ONLY producer of
+            # the cost-proposal store (core.optimize.cost_proposals
+            # .recompute_cost_proposals) was the web Review inbox's manual
+            # refresh button — a pure-CLI user who never runs `tj serve` plus the
+            # web UI would never have a cost proposal computed at all, so `tj
+            # relearn cost-proposals` would sit permanently empty regardless of
+            # how good its renderer is. Piggyback the same recompute here so a
+            # plain `tj optimize` run keeps that store warm too.
+            # `recompute_cost_proposals` already never raises — it returns a
+            # `CostRecomputeResult` whose `status` says whether it built anything
+            # (`ready`), stood aside for a scan cycle or a concurrent recompute
+            # (`declined`), or blew up (`failed`). This call is opportunistic
+            # upkeep of someone else's store, not a figure `tj optimize` renders,
+            # so it acts on none of those: a broken window here degrades to a
+            # stale/empty cost-proposals list, never a broken `tj optimize`.
+            try:
+                from tokenjam.core.optimize.cost_proposals import recompute_cost_proposals
+                recompute_cost_proposals(db, config, agent_id=agent)
+            except Exception:
+                pass
 
     dominant = dominant_plan(plan_mix)
     pricing_mode = pricing_mode_for(dominant)
@@ -421,13 +456,33 @@ def cmd_optimize(
         click.echo(json.dumps(payload, default=str))
         return
 
-    _render_report(
-        report, agent=agent, plan_mix=plan_mix,
-        dominant_plan=dominant, pricing_mode=pricing_mode,
-        declared_plan=declared_plan,
-        requested=requested,
-        persona=persona,
-    )
+    # Three views over one renderer set (see `_render_scoreboard`). The card
+    # path is reached deliberately — by naming an analyzer, or by asking for
+    # everything with -v — rather than being the default nobody chose.
+    # `-v` is byte-for-byte what a bare `tj optimize` used to print, which is
+    # also the migration path for the tests that pin that output.
+    # Either position turns it on. The scoreboard's Next block advertises
+    # `tj optimize -v`, which parsed as "No such option" while the flag lived
+    # only on the group: reading `ctx.obj` is not the same as accepting the
+    # flag. Both copies are booleans meaning the same thing, so OR is the
+    # entire resolution rule.
+    verbose = verbose_flag or bool(ctx.obj.get("verbose"))
+    if verbose or requested:
+        _render_report(
+            report, agent=agent, plan_mix=plan_mix,
+            dominant_plan=dominant, pricing_mode=pricing_mode,
+            declared_plan=declared_plan,
+            requested=requested,
+            persona=persona,
+        )
+    else:
+        _render_scoreboard(
+            report, agent=agent, plan_mix=plan_mix,
+            dominant_plan=dominant, pricing_mode=pricing_mode,
+            declared_plan=declared_plan,
+            cost_proposal_count=cost_proposal_count,
+        )
+
     if cost_diff is not None:
         from tokenjam.cli.cmd_cost import _render_diff
         console.print("\n[bold]Window comparison[/bold]")
@@ -441,7 +496,9 @@ def cmd_optimize(
     # in `tj optimize`'s output pointed anywhere — the fix for e.g. a `cache`
     # or `deadweight` finding lived only in the web Review inbox's cost-proposal
     # cards (core.optimize.cost_proposals), never named from the terminal.
-    if cost_proposal_count:
+    # Card path only: the scoreboard names the same command in its Next block,
+    # so printing it here too would say it twice.
+    if cost_proposal_count and (verbose or requested):
         console.print(
             f"[dim]{cost_proposal_count} cost fix"
             f"{'es' if cost_proposal_count != 1 else ''} available, each with "
@@ -756,6 +813,32 @@ def _format_plan_multiplier(multiplier: float) -> str:
     return f"{multiplier:.1f}×"
 
 
+#: The analyzers whose evidence is the filesystem rather than the span table
+#: (docs/configuration.md, "Which filesystem the analyzers read") — the ones a
+#: skipped scan actually costs the reader.
+_FILESYSTEM_SCAN_ANALYZERS = ("deadweight", "relearn", "summarize")
+
+
+def _filesystem_scan_note(report: OptimizeReport) -> str | None:
+    """The "these did not look" line for a skipped filesystem scan, or None.
+
+    Hardcoding the three names made the note assert something false for a
+    persona whose gate had already dropped some of them: `deadweight` and
+    `summarize` are gated off for `sdk`, so naming them under a SCOPE reason
+    blames the scope for an absence the persona gate caused. Names are filtered
+    against the gate, and a skip that cost this reader nothing says nothing.
+    """
+    reason = report.filesystem_scan_skipped_reason
+    if not reason:
+        return None
+    disabled = _disabled_analyzers(report.persona or "unknown")
+    names = [n for n in _FILESYSTEM_SCAN_ANALYZERS if n not in disabled]
+    if not names:
+        return None
+    joined = f"{', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else names[0]
+    return f"  [dim]{joined} did not run: {_rich_escape(str(reason))}.[/dim]"
+
+
 def _render_report(
     report: OptimizeReport,
     agent: str | None,
@@ -855,14 +938,12 @@ def _render_report(
     if report.notes:
         console.print()
 
-    # Said out loud, because the alternative is three analyzers rendering as
+    # Said out loud, because the alternative is analyzers rendering as
     # "nothing found" when the truth is that they never looked (root
     # anti-pattern 22). See `core/optimize/scope.py`.
-    if report.filesystem_scan_skipped_reason:
-        console.print(
-            "  [dim]deadweight, relearn and summarize did not run: "
-            f"{_rich_escape(report.filesystem_scan_skipped_reason)}.[/dim]"
-        )
+    scan_note = _filesystem_scan_note(report)
+    if scan_note:
+        console.print(scan_note)
         console.print()
 
     # An analyzer the user typed by name that this persona's skip gate dropped
@@ -875,9 +956,20 @@ def _render_report(
             set(requested) & _disabled_analyzers(report.persona or "unknown")
         )
         if gated:
+            # The REASON is persona-specific, and one sentence cannot carry
+            # both: a `claude-code` window loses analyzers whose lever lives on
+            # the harness's side of the line, while an `sdk` window loses ones
+            # whose INPUT it structurally does not have (a Claude Code
+            # transcript, a populated `sub_agent_id`, an agent instruction
+            # file). Stating the wrong one is worse than terse. Per-analyzer
+            # reasons live in `PERSONA_DISABLED_ANALYZERS`.
+            reason = (
+                "No fix for these exists inside an interactive coding-agent session"
+                if (report.persona or "") == "claude-code"
+                else "These read an input an SDK/API window does not have"
+            )
             console.print(
-                f"  [dim]Not run: {', '.join(gated)}. No fix for these exists "
-                f"inside an interactive coding-agent session, so they are "
+                f"  [dim]Not run: {', '.join(gated)}. {reason}, so they are "
                 f"skipped rather than reported as findings you cannot act "
                 f"on.[/dim]\n"
             )
@@ -1020,6 +1112,416 @@ def _render_report(
             "[dim]No candidates flagged in this window. Either spend is small or "
             "all sessions already use a cost-effective model.[/dim]"
         )
+
+
+# ---------------------------------------------------------------------------
+# Scoreboard — the default `tj optimize` view
+# ---------------------------------------------------------------------------
+# `_render_report` above prints every finding card in full: candidate lists,
+# verbatim caveats, methodology paragraphs. That is the right screen once you
+# have chosen an area to work on, and the wrong one as an opening screen —
+# several pages of justified prose in which the headline numbers, the
+# per-area findings and the next command all sit at equal weight.
+#
+# So the card path is now reached deliberately rather than by default:
+#
+#   tj optimize            → the scoreboard below (never calls a card renderer)
+#   tj optimize <area>     → that one card, in full, renderer untouched
+#   tj optimize -v         → byte-for-byte what `tj optimize` printed before
+#
+# The one-line summaries live HERE, in the CLI layer, rather than as a new
+# `summary` field on every analyzer's finding dataclass: they are a
+# presentation concern of this one screen, and the analyzers must stay the
+# single source of the prose that has to render verbatim.
+#
+# Honesty rails, which are the whole reason this is a summary and not a
+# rewrite (Critical Rule 14 in tokenjam/CLAUDE.md, root anti-pattern 22):
+#
+#   * A `caveat` / `estimate_basis` / `coverage_note` is NEVER paraphrased
+#     into a summary line. The scoreboard carries a pointer at the card that
+#     prints them verbatim, and nothing else.
+#   * A finding with no priced figure shows `—` in RECOVERABLE. Never `0`,
+#     never blank: zero reads as "no waste", which is the opposite claim.
+#   * An analyzer that ran and found nothing gets no row, and the
+#     `N analyzers · M findings` header line carries the did-it-run signal so
+#     silence is still not ambiguous.
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _summarize_downsize(f: Any) -> tuple[str, str] | None:
+    if not f.candidate_sessions:
+        return None
+    return _plural(f.candidate_sessions, "downsize candidate"), "which sessions"
+
+
+def _summarize_cache(f: Any) -> tuple[str, str] | None:
+    flagged = list(f.flagged) if f.flagged else []
+    root_caused = (
+        len(f.uncached_agents or []) + len(f.thrash_agents or [])
+        + len(f.lookback_miss_agents or [])
+    )
+    if not flagged and not root_caused:
+        return None
+    if flagged:
+        line = (
+            f"{_plural(len(flagged), 'model')} below "
+            f"{f.efficacy_threshold * 100:.0f}% cache efficacy"
+        )
+    else:
+        line = _plural(root_caused, "cache root-cause candidate")
+    return line, "why"
+
+
+def _summarize_cache_recommend(f: Any) -> tuple[str, str] | None:
+    candidates = list(f.candidates) if f.candidates else []
+    if not candidates:
+        return None
+    return _plural(len(candidates), "uncached repeated prefix"), "which prefixes"
+
+
+def _summarize_resend(f: Any) -> tuple[str, str] | None:
+    if f.repeat_share is None:
+        return None
+    share = f"{f.repeat_share * 100:.0f}%"
+    return f"{share} of prompt tokens re-sent", f"why {share}"
+
+
+def _summarize_script(f: Any) -> tuple[str, str] | None:
+    clusters = list(f.clusters) if f.clusters else []
+    if not clusters:
+        return None
+    return _plural(len(clusters), "scriptable repeated workflow"), "which workflows"
+
+
+def _summarize_reuse(f: Any) -> tuple[str, str] | None:
+    clusters = list(f.clusters) if f.clusters else []
+    if not clusters:
+        return None
+    return _plural(len(clusters), "repeated plan cluster"), "which plans"
+
+
+def _summarize_trim(f: Any) -> tuple[str, str] | None:
+    per_prompt = list(f.per_prompt) if f.per_prompt else []
+    if not per_prompt:
+        return None
+    return _plural(len(per_prompt), "prompt with low-significance text"), "which regions"
+
+
+def _summarize_subagent(f: Any) -> tuple[str, str] | None:
+    flagged = list(f.flagged) if f.flagged else []
+    if not flagged:
+        return None
+    return _plural(len(flagged), "over-powered candidate"), "which subagents"
+
+
+def _summarize_relearn(f: Any) -> tuple[str, str] | None:
+    clusters = list(f.clusters) if f.clusters else []
+    if not clusters:
+        return None
+    return _plural(len(clusters), "recurring blocker"), "which blockers"
+
+
+def _summarize_verbosity(f: Any) -> tuple[str, str] | None:
+    candidates = list(f.candidates) if f.candidates else []
+    if not candidates:
+        return None
+    total = f.total_candidates or len(candidates)
+    return _plural(total, "high-output candidate"), "which sessions"
+
+
+def _summarize_deadweight(f: Any) -> tuple[str, str] | None:
+    unused = list(f.unused_servers) if f.unused_servers else []
+    unused_plugins = list(getattr(f, "unused_plugins", None) or [])
+    total = len(unused) + len(unused_plugins)
+    if not total:
+        return None
+    parts = []
+    if unused:
+        parts.append(_plural(len(unused), "MCP server"))
+    if unused_plugins:
+        parts.append(_plural(len(unused_plugins), "plugin"))
+    return f"{' + '.join(parts)} injected, never invoked", "which servers/plugins"
+
+
+def _summarize_placement(f: Any) -> tuple[str, str] | None:
+    candidates = list(f.candidates) if f.candidates else []
+    if not candidates:
+        return None
+    return _plural(len(candidates), "batch-placement candidate"), "which jobs"
+
+
+def _summarize_summarize(f: Any) -> tuple[str, str] | None:
+    candidates = list(f.candidates) if f.candidates else []
+    if not candidates:
+        return None
+    return _plural(len(candidates), "summarizable prompt file"), "which files"
+
+
+def _summarize_stream_usage(f: Any) -> tuple[str, str] | None:
+    if not f.call_sites:
+        return None
+    return (
+        f"{f.streams_missing_usage} of {f.streams_observed} streams reported no usage",
+        "which call sites",
+    )
+
+
+# Dispatch table — analyzer registration name → one-line summarizer. Mirrors
+# `_FINDING_RENDERERS`; a summarizer returns None when its analyzer ran and
+# found nothing, which is how a clean analyzer earns no row.
+_FINDING_SUMMARIES = {
+    "downsize":      _summarize_downsize,
+    "cache":         _summarize_cache,
+    "cache-recommend": _summarize_cache_recommend,
+    "resend":        _summarize_resend,
+    "script":        _summarize_script,
+    "reuse":         _summarize_reuse,
+    "trim":          _summarize_trim,
+    "subagent":      _summarize_subagent,
+    "relearn":       _summarize_relearn,
+    "verbosity":     _summarize_verbosity,
+    "deadweight":    _summarize_deadweight,
+    "placement":     _summarize_placement,
+    "summarize":     _summarize_summarize,
+    "stream-usage":  _summarize_stream_usage,
+}
+
+# Findings whose headline figure is NOT a recoverable amount, so the
+# RECOVERABLE column must stay `—` for them however well-priced they are.
+# `stream-usage` carries `undercounted_usd`: spend that already happened and
+# was never recorded. A data-quality number sitting in a savings column is
+# read as a saving.
+_UNPRICED_IN_SCOREBOARD = {"stream-usage"}
+
+
+def _scoreboard_recoverable(name: str, finding: Any, framing: Framing) -> str:
+    """RECOVERABLE cell for one row — `—` whenever there is no priced figure.
+
+    `render_savings` already returns the `—` marker for a missing figure, so
+    an absent estimate can never surface as `0` or an empty cell.
+    """
+    if name in _UNPRICED_IN_SCOREBOARD:
+        return "—"
+    return render_savings(
+        getattr(finding, "past_overspend_usd", None),
+        getattr(finding, "past_overspend_tokens", None),
+        framing,
+    )
+
+
+def _scoreboard_sort_value(name: str, finding: Any, framing: Framing) -> float | None:
+    """The numeric behind the RECOVERABLE cell, for ordering the rows.
+
+    Deliberately mirrors `_scoreboard_recoverable` field for field, including
+    which figure each pricing mode renders (`local` shows tokens, everything
+    else dollars). A sort key read from a different field than the column
+    displays produces exactly the defect this replaces: a table that looks
+    ranked and is not.
+
+    `None` for anything the column renders as the null marker, so an unpriced
+    row sorts to the bottom instead of being treated as a zero-value row.
+    """
+    if name in _UNPRICED_IN_SCOREBOARD:
+        return None
+    if framing.pricing_mode == "local":
+        tokens = getattr(finding, "past_overspend_tokens", None)
+        return None if tokens is None else float(tokens)
+    usd = getattr(finding, "past_overspend_usd", None)
+    return None if usd is None else float(usd)
+
+
+def _render_scoreboard(
+    report: OptimizeReport,
+    agent: str | None,
+    plan_mix: dict[str, int] | None = None,
+    dominant_plan: str = "unknown",
+    pricing_mode: str = "unknown",
+    declared_plan: str | None = None,
+    cost_proposal_count: int = 0,
+) -> None:
+    """The default `tj optimize` screen: header, findings table, Next block."""
+    w = report.window
+    scope_tag = f", {agent}" if agent else ""
+    days_int = max(int(round(w.days)), 1)
+    plan_mix = plan_mix or {}
+    unknown_count = plan_mix.get("unknown", 0)
+    total_sessions = sum(plan_mix.values()) or w.sessions
+    all_unknown = total_sessions > 0 and unknown_count == total_sessions
+
+    counts = f"[bold]{w.sessions}[/bold] sessions · [bold]{format_tokens(w.total_tokens)}[/bold] tokens"
+
+    # ----- Header -----
+    if all_unknown:
+        console.print(f"\n  {counts} (last {days_int}d{scope_tag})")
+        console.print(
+            "  [dim]All sessions have unknown plan tier; dollar figures "
+            "suppressed. Run [accent]tj onboard --claude-code --reconfigure"
+            "[/accent] to set your plan.[/dim]"
+        )
+    elif pricing_mode == "subscription":
+        label, fee = PLAN_LABEL_AND_FEE.get(dominant_plan, (dominant_plan, None))
+        plan_suffix = f" (${fee:.0f}/mo)" if fee else ""
+        console.print(f"\n  {counts} · [bold]{label}[/bold]{plan_suffix}")
+        if fee and w.total_cost_usd > 0:
+            multiplier = w.total_cost_usd / fee
+            console.print(
+                f"  [dim]Implied API value [bold]{format_cost(w.total_cost_usd)}"
+                f"[/bold], about {_format_plan_multiplier(multiplier)} your "
+                f"plan cost.[/dim]"
+            )
+        else:
+            console.print(
+                f"  [dim]Implied API value [bold]{format_cost(w.total_cost_usd)}"
+                f"[/bold] (what this usage would cost at API list prices).[/dim]"
+            )
+    elif pricing_mode == "local":
+        console.print(f"\n  {counts} (last {days_int}d{scope_tag})")
+        console.print("  [dim]Local inference; no marginal cost.[/dim]")
+    else:
+        console.print(
+            f"\n  {counts} · [bold]{format_cost(w.total_cost_usd)}[/bold] spend "
+            f"(last {days_int}d{scope_tag})"
+        )
+        if unknown_count > 0:
+            console.print(
+                f"  [dim]{unknown_count} of {total_sessions} sessions have "
+                f"unknown plan tier; dollar figures may overstate actual cost "
+                f"for those. Run [accent]tj onboard --claude-code --reconfigure"
+                f"[/accent] to resolve.[/dim]"
+            )
+
+    if (
+        declared_plan
+        and declared_plan != dominant_plan
+        and declared_plan in PLAN_LABEL_AND_FEE
+    ):
+        label, _ = PLAN_LABEL_AND_FEE[declared_plan]
+        console.print(
+            f"  [dim]Your config declares [bold]{label}[/bold] but historical "
+            f"sessions ran under a different plan; rendering reflects what "
+            f"actually ran.[/dim]"
+        )
+
+    if w.sessions == 0:
+        console.print("\n  [dim]No sessions in window.[/dim]")
+        return
+
+    # ----- Rows -----
+    ranked = _rank_findings(report, requested=None)
+    framing = Framing(
+        pricing_mode=("unknown" if all_unknown else pricing_mode),
+        window_total_tokens=w.total_tokens,
+    )
+    rows: list[tuple[str, str, str, str]] = []
+    # `_rank_findings` orders by reclaimable TOKEN share, which is the right
+    # order for the card path it was written for (it also drives the
+    # de-minimis pointer collapsing there) and the wrong one here: this table
+    # publishes a RECOVERABLE column, and a table sorted by a quantity it does
+    # not show reads as unsorted — a $48 row landing above a $296 one. So the
+    # rows are re-sorted on the figure the column actually prints, with the
+    # token-share rank kept only as a deterministic tie-break.
+    ordered: list[tuple[float | None, int, str, str, str, str]] = []
+    for rank, (name, _share) in enumerate(ranked):
+        summarize = _FINDING_SUMMARIES.get(name)
+        if summarize is None:
+            continue
+        finding = report.downgrade if name == "downsize" else report.findings.get(name)
+        if finding is None:
+            continue
+        summary = summarize(finding)
+        if summary is None:
+            continue
+        line, why = summary
+        ordered.append((
+            _scoreboard_sort_value(name, finding, framing), rank,
+            name, line, _scoreboard_recoverable(name, finding, framing), why,
+        ))
+
+    # An unpriced row sorts last and keeps its null marker: it is a finding
+    # with no figure, not a finding worth nothing.
+    ordered.sort(key=lambda r: (r[0] is None, -(r[0] or 0.0), r[1]))
+    rows = [(name, line, recoverable, why) for _v, _r, name, line, recoverable, why in ordered]
+    # Rows carrying an actual figure. Drives the overlap disclosure below,
+    # which only has something to say once two figures sit in one column.
+    priced_rows = sum(1 for value, *_rest in ordered if value is not None)
+
+    console.print(
+        f"  [dim]{_plural(len(ranked), 'analyzer')} · "
+        f"{_plural(len(rows), 'finding')}[/dim]\n"
+    )
+
+    # Said out loud rather than left as quiet absences: an analyzer that
+    # never looked is not an analyzer that found nothing (root anti-pattern 22).
+    for note in report.notes:
+        console.print(f"  [warn]![/warn] {_rich_escape(note)}")
+    scan_note = _filesystem_scan_note(report)
+    if scan_note:
+        console.print(scan_note)
+    if report.notes or scan_note:
+        console.print()
+
+    if rows:
+        table = make_table("ANALYZERS", "FINDING", "RECOVERABLE")
+        for name, line, recoverable, _why in rows:
+            # The recoverable figure is weight, not colour: the accent role
+            # means "a string you can type" and nothing else (Critical Rule 35
+            # in tokenjam/CLAUDE.md).
+            table.add_row(name, _rich_escape(line), f"[label]{recoverable}[/label]")
+        console.print(table)
+        # A column of dollar figures invites the reader to add it up, and the
+        # sum would be wrong: the analyzers price overlapping angles on the
+        # SAME sessions (`downsize` deliberately excludes `sub_agent_id IS NOT
+        # NULL` spans because `subagent` already prices the identical swap over
+        # them), so summing them sums waste measured twice. Same reasoning and
+        # substantially the same wording as `_recoverable_overlap_note` in
+        # api/routes/cost.py, condensed for a terminal; that route's
+        # `recoverable_additive: False` is the machine-readable form of it.
+        # This is why the screen prints no total: the top row, being the
+        # largest single lever, is not a sum of anything and is the one figure
+        # that is honest standing alone.
+        if priced_rows >= 2:
+            # Padded rather than prefixed with two spaces: this is the one
+            # note here long enough to wrap, and a hand-written prefix indents
+            # only the first line, dropping the continuation to column 0.
+            console.print(Padding(
+                f"[dim]These {priced_rows} estimates are computed from "
+                f"overlapping angles on the same sessions, so they do not add "
+                f"up to an amount you could recover. The largest single line "
+                f"is the one to act on first.[/dim]",
+                (0, 0, 0, 2),
+            ))
+        console.print(
+            "  [dim]Estimates carry method notes and caveats. See "
+            "[accent]tj optimize <analyzer>[/accent].[/dim]\n"
+        )
+    else:
+        console.print(
+            "  [dim]No candidates flagged in this window. Either spend is small "
+            "or your sessions already use a cost-effective shape.[/dim]\n"
+        )
+
+    # ----- Next -----
+    # Literal runnable commands, not advice. A finding with nowhere to go is
+    # a diagnosis the user cannot act on.
+    next_lines: list[tuple[str, str]] = []
+    if cost_proposal_count:
+        next_lines.append((
+            "tj relearn cost-proposals",
+            f"{cost_proposal_count} copy-paste fix"
+            f"{'' if cost_proposal_count == 1 else 'es'}",
+        ))
+    if rows:
+        top_name, _line, _rec, top_why = rows[0]
+        next_lines.append((f"tj optimize {top_name}", top_why))
+    next_lines.append(("tj optimize -v", "every finding in full"))
+
+    width = max(len(cmd) for cmd, _ in next_lines)
+    for i, (cmd, hint) in enumerate(next_lines):
+        prefix = "  Next:  " if i == 0 else "         "
+        console.print(f"{prefix}[accent]{cmd:<{width}}[/accent]   [dim]{hint}[/dim]")
 
 
 def _sampling_ci_suffix(d: DowngradeFinding) -> str:
@@ -1459,6 +1961,51 @@ def _usd_with_tokens(usd: float, tokens: int | None) -> str:
     return format_cost(usd)
 
 
+def _render_prose(
+    text: str, *, marker: str = "", style: str | None = None, escape: bool = True,
+    indent: int = 5,
+) -> None:
+    """Render an analyzer prose field (`caveat`, `estimate_basis`, `notes`,
+    `coverage_note`, and their siblings — `friction`, `measurement_note`,
+    `accounting_note`) so every line hangs indented under the first
+    paragraph's text, not just the first line.
+
+    These fields were rewritten from single 40-90 word run-on paragraphs into
+    short sentences grouped into paragraphs separated by a literal blank line
+    (`"\\n\\n"`), which the web dashboard already renders correctly. A
+    hand-written prefix like `f"     [yellow]![/yellow] [italic]{caveat}[/italic]"`
+    only indents line 1 — rich reflows everything after it, both the
+    soft-wrapped continuation of a long sentence and every paragraph after a
+    blank line, starting back at column 0 and visually detaching it from the
+    marker it belongs to.
+
+    Built on a borderless two-column `Table.grid` (elsewhere in this file,
+    `_render_scoreboard`'s `priced_rows` note reaches for `Padding` to solve
+    the same class of problem for an unmarked block): the marker column is
+    `no_wrap` so it never reflows and fixes a left column, and rich aligns
+    every line of the prose column — wrapped or blank-line-broken alike —
+    under that same column start (root anti-pattern 30: pin the indent to
+    every line the renderer produces, not just the first one it happened to
+    be written for).
+
+    `marker` is one-time leading markup (e.g. `"[yellow]![/yellow]"` for a
+    caveat, `""` for a plain dim line) rendered once at `indent` spaces;
+    continuation paragraphs align under the TEXT, not under the marker.
+    `style` wraps the prose itself (`"italic"`, `"dim"`). `escape` must match
+    each call site's PRE-EXISTING `_rich_escape` usage — several of these
+    fields (caveat, estimate_basis) print unescaped today, and this helper
+    only fixes indentation, not that.
+    """
+    body = _rich_escape(text) if escape else text
+    content = f"[{style}]{body}[/{style}]" if style else body
+    lead = " " * indent + (f"{marker} " if marker else "")
+    grid = Table.grid(padding=0)
+    grid.add_column(no_wrap=True)
+    grid.add_column()
+    grid.add_row(lead, content)
+    console.print(grid)
+
+
 def _render_cache_control_or_no_lever(snippet: str, persona: str) -> None:
     """Persona-gated `cache_control` snippet render, shared by every
     cache-family CLI renderer that prints one (`cache`'s A1/A2/A3
@@ -1887,7 +2434,7 @@ def _render_workflow_restructure(
                 f"replacing with a deterministic script would eliminate it.[/dim]"
             )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_prompt_bloat(
@@ -2072,10 +2619,11 @@ def _render_reuse(
             )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
     if finding.clusters:
-        console.print(
-            f"     [yellow]![/yellow] [italic]{finding.clusters[0].caveat}[/italic]"
+        _render_prose(
+            finding.clusters[0].caveat, marker="[yellow]![/yellow]", style="italic",
+            escape=False,
         )
 
 
@@ -2161,7 +2709,7 @@ def _render_subagent(
             f"[dim](over_powered subagents at their cheaper same-family model)[/dim]"
         )
 
-    console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+    _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _relearn_past_overspend(cluster, *, pricing_mode: str = "api") -> str:
@@ -2194,64 +2742,22 @@ def _relearn_past_overspend(cluster, *, pricing_mode: str = "api") -> str:
     return ""
 
 
-def _relearn_write_gate_line(cluster) -> str:
-    """Why no permanent fix is on offer for this cluster, or "" when one is.
-
-    The reason string is the write budget's OWN sentence
-    (``core/optimize/write_budget.py`` owns the wording so the CLI, the API
-    payload and the Review inbox row cannot drift into three explanations of
-    one flag). The payback arithmetic is appended only where the budget
-    actually computed one: a rung-3 hook is never sent as prompt text, so it
-    has no standing cost and no ratio at all.
-    """
-    if getattr(cluster, "write_offered", True):
-        return ""
-    # The SHORT label here, not the full sentence: a real corpus gates ~50 of
-    # 55 clusters, so the long form would print a paragraph under every row.
-    # The full sentence still renders where there is room for it (the expanded
-    # Review card, `--json`).
-    short = str(getattr(cluster, "write_blocked_short", "") or "").strip()
-    if not short:
-        short = _short_reason_fallback(cluster)
-    if not short:
-        return ""
-    per_session = getattr(cluster, "standing_cost_tokens_per_session", 0) or 0
-    ratio = getattr(cluster, "payback_ratio", None)
-    if not per_session or ratio is None:
-        return f"no permanent fix offered: {short}"
-    return (
-        f"no permanent fix offered: {short} "
-        f"(~{format_tokens(per_session)} tok/session forever, "
-        f"modelled payback {ratio:.2f}x)"
-    )
-
-
-def _short_reason_fallback(cluster) -> str:
-    """Derive the short label from the long reason for a cluster read out of a
-    cache written before ``write_blocked_short`` existed. Keeps an older cache
-    rendering the verdict instead of silently dropping it."""
-    from tokenjam.core.optimize.write_budget import short_reason
-
-    return short_reason(getattr(cluster, "write_blocked_reason", "") or "")
-
-
 def _render_relearn_gate_summary(clusters) -> None:
-    """One line naming how many clusters carry no permanent fix, and why.
-
-    Without it the list reads as though every cluster is actionable. It is
-    stated as a gap in what WE can act on — never as a finding that the
-    remaining failures were harmless, which is the reading a bare count
-    invites.
+    """One line naming how many clusters have no apply path at all (advisory
+    families, or a workspace/persona that has no write surface). Without it
+    the list reads as though every cluster is actionable, when a few carry no
+    apply path of their own — never a finding that those failures were
+    harmless, which is the reading a bare count invites.
     """
-    gated = [c for c in clusters if not getattr(c, "write_offered", True)]
+    gated = [c for c in clusters if getattr(c, "advise_only", False)]
     if not gated:
         return
     console.print(
-        f"     [dim]{len(gated)} of {len(clusters)} carry no permanent fix of "
-        f"their own (no derived template, a rule modelled as costing more to "
-        f"keep than it returns, or this window's rule budget). Each still cost "
-        f"what is shown above: the gate is a gap in what we can act on, not a "
-        f"finding that the failure was harmless.[/dim]"
+        f"     [dim]{len(gated)} of {len(clusters)} have no permanent-rule "
+        f"apply path of their own (no workspace to write into, or the "
+        f"harness already self-corrects). Each still cost what is shown "
+        f"above: the gap is in what we can act on, not a finding that the "
+        f"failure was harmless.[/dim]"
     )
 
 
@@ -2283,25 +2789,23 @@ def _render_relearn(
         f"cluster{'s' if len(finding.clusters) != 1 else ''} found — "
         f"recurring blockers this agent silently re-hits"
     )
-    # Lead each row with what the recurrence ALREADY COST, not with the
-    # fix-gated forward claim. The write budget zeroes that claim whenever no
-    # permanent rule is worth offering, which on a real corpus is the large
-    # majority of clusters — so a forward-only line printed "$0.00" for most
-    # of the list while those same clusters had spent real money. A gate on
-    # our side is a gap in OUR fix library, never a finding that the failure
-    # was free (CLAUDE.md anti-pattern 32b).
+    # Lead each row with what the recurrence ALREADY COST, never a fix-gated
+    # forward claim — a cluster's cost stands whether or not it has a
+    # permanent-rule apply path (CLAUDE.md anti-pattern 32b).
     for c in finding.clusters[:10]:
         cost = _relearn_past_overspend(c, pricing_mode=pricing_mode)
         console.print(
             f"       [bold]{c.signature}[/bold]  "
             f"{c.occurrences} occurrence{'s' if c.occurrences != 1 else ''} / "
             f"{c.sessions} session{'s' if c.sessions != 1 else ''}  "
-            f"[dim](rung {c.rung})[/dim]"
+            f"[dim]({delivery_label(getattr(c, 'delivery', ''))})[/dim]"
             + (f"  [bold]{cost}[/bold] [dim]already spent[/dim]" if cost else "")
         )
-        gate = _relearn_write_gate_line(c)
-        if gate:
-            console.print(f"         [dim]{gate}[/dim]")
+        if getattr(c, "advise_only", False):
+            console.print(
+                "         [dim]no permanent-rule apply path — see the "
+                "example sessions for what to change by hand[/dim]"
+            )
     if len(finding.clusters) > 10:
         console.print(f"       [dim]… and {len(finding.clusters) - 10} more.[/dim]")
     _render_relearn_gate_summary(finding.clusters)
@@ -2310,7 +2814,7 @@ def _render_relearn(
         "full detail with [bold]tj optimize relearn --json[/bold].[/dim]"
     )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_verbosity(
@@ -2375,7 +2879,7 @@ def _render_verbosity(
             f"[bold]tj optimize --validate[/bold].[/dim]"
         )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_summarize(
@@ -2449,7 +2953,79 @@ def _render_summarize(
         "then [bold]tj summarize prep <path>[/bold] to generate a rewrite."
     )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
+
+
+def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
+    """The plugin half of the deadweight finding.
+
+    Renders the RESIDENT count against the installed count, always, because the
+    gap is the story: on a real machine most of what is installed is switched
+    off or scoped to one project and costs nothing, and a reader shown only a
+    dollar figure has no way to know which of those they are looking at.
+
+    Three-state gating per plugin (never a number with no evidence behind
+    it): `unused` gets the priced row + disable arrow; `partial_use_no_fix`
+    names which components are unused and says plainly no fix is available
+    (enable/disable is whole-plugin only); `insufficient_history` renders as
+    "not enough history yet" — never a number, never a fix arrow. A plugin
+    with nothing measurable (no components, or only unmeasured MCP servers)
+    never reaches ANY of these three rows — see `PluginDeadweight.unused`'s
+    vacuous-truth guard — so a `$0` row with a disable arrow cannot render.
+    """
+    plugins = list(getattr(finding, "plugins", []) or [])
+    if not plugins:
+        return
+    resident = int(getattr(finding, "plugins_resident", 0) or 0)
+    console.print(
+        f"     [dim]Plugins: {resident} of {len(plugins)} installed are resident "
+        f"(the rest are disabled or scoped to one project and cost "
+        f"nothing).[/dim]"
+    )
+    for plugin in getattr(finding, "unused_plugins", []) or []:
+        # Guaranteed by the analyzer's own vacuous-truth guard, but re-asserted
+        # here rather than trusted blindly: a $0 row must never carry a
+        # disable arrow (Part C). If this ever fires it is a bug upstream,
+        # not a row worth printing.
+        if not plugin.estimated_tax_tokens_window:
+            continue
+        console.print(
+            f"       [bold]{plugin.name}[/bold] [dim]({plugin.skills} skill"
+            f"{'s' if plugin.skills != 1 else ''}, {plugin.agents} agent"
+            f"{'s' if plugin.agents != 1 else ''} listed every session)[/dim]"
+        )
+        if pricing_mode == "api" and plugin.estimated_tax_usd_window is not None:
+            tax = (
+                f"~{format_tokens(plugin.estimated_tax_tokens_window)} tokens / "
+                f"{format_cost(plugin.estimated_tax_usd_window)} in this window "
+                f"[dim](estimated, priced at {plugin.priced_model})[/dim]"
+            )
+        else:
+            tax = (
+                f"~{format_tokens(plugin.estimated_tax_tokens_window)} tokens in "
+                f"this window [dim](estimated; no priced model observed, so no "
+                f"dollar figure)[/dim]"
+            )
+        console.print(f"          [dim]tax[/dim] {tax}")
+        if plugin.tax_construction:
+            console.print(f"          [dim]{_rich_escape(plugin.tax_construction)}[/dim]")
+        if plugin.fix:
+            console.print(f"          [yellow]→[/yellow] {_rich_escape(plugin.fix)}")
+    for plugin in getattr(finding, "plugins", []) or []:
+        if plugin.partial_use_no_fix:
+            console.print(
+                f"       [bold]{plugin.name}[/bold] [dim](some components used, "
+                f"some not)[/dim]"
+            )
+            console.print(f"          [dim]{_rich_escape(plugin.fix)}[/dim]")
+    insufficient = [p for p in plugins if p.resident and p.insufficient_history]
+    if insufficient:
+        names = ", ".join(p.name for p in insufficient)
+        console.print(
+            f"     [dim]Not enough session history yet to say whether "
+            f"{names} {'is' if len(insufficient) == 1 else 'are'} used "
+            f"(need {UNUSED_RECENCY_WINDOW_DAYS} days).[/dim]"
+        )
 
 
 def _render_deadweight(
@@ -2474,33 +3050,45 @@ def _render_deadweight(
             f"{'s' if finding.sessions_scanned != 1 else ''}; no MCP server is "
             f"configured, so nothing is being injected.[/dim]"
         )
+        # The plugin lane is INDEPENDENT of the MCP one and must still render
+        # here: a user with no MCP servers at all can be paying for an enabled
+        # plugin in every session, and returning early would make the whole
+        # lane invisible to exactly that user (Critical Rule 24 — a capability
+        # nobody has a path to does not exist).
+        _render_deadweight_plugins(finding, pricing_mode=pricing_mode)
         if finding.coverage_note:
-            console.print(
-                f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
-            )
+            _render_prose(finding.coverage_note, marker="[yellow]![/yellow]", style="dim")
         return
 
-    if not finding.dead_servers:
-        # _rich_escape: the analyzer's own note names the config key in
-        # bracket form ("Lower [optimize] min_sessions_deadweight..."), which
-        # Rich would otherwise parse as an unknown style tag and silently
-        # drop from the printed line.
+    if not finding.unused_servers:
+        # _rich_escape: the analyzer's own note may name a config key in
+        # bracket form, which Rich would otherwise parse as an unknown style
+        # tag and silently drop from the printed line.
         for note in finding.notes:
-            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+            _render_prose(note, style="dim")
         if not finding.notes:
             console.print(
                 f"     [dim]All {finding.configured_servers} configured MCP "
                 f"server{'s' if finding.configured_servers != 1 else ''} were "
                 f"invoked at least once in this window.[/dim]"
             )
+        insufficient = [s for s in finding.servers if s.insufficient_history]
+        if insufficient:
+            names = ", ".join(s.name for s in insufficient)
+            console.print(
+                f"     [dim]Not enough session history yet to say whether "
+                f"{names} {'is' if len(insufficient) == 1 else 'are'} used "
+                f"(need {UNUSED_RECENCY_WINDOW_DAYS} days).[/dim]"
+            )
     else:
-        n = len(finding.dead_servers)
+        n = len(finding.unused_servers)
         console.print(
-            f"     • [bold]{n}[/bold] dead MCP server{'s' if n != 1 else ''} of "
+            f"     • [bold]{n}[/bold] unused MCP server{'s' if n != 1 else ''} of "
             f"[bold]{finding.configured_servers}[/bold] configured "
-            f"[dim](schemas injected every session, never called)[/dim]"
+            f"[dim](schemas injected every session, nothing fired in the last "
+            f"{UNUSED_RECENCY_WINDOW_DAYS} days)[/dim]"
         )
-        for s in finding.dead_servers:
+        for s in finding.unused_servers:
             console.print(
                 f"       [bold]{s.name}[/bold] [dim]({s.scope} · {s.source})[/dim]  "
                 f"present in {s.sessions_present} session"
@@ -2527,6 +3115,8 @@ def _render_deadweight(
                 console.print(f"          [dim]{s.tax_construction}[/dim]")
             console.print(f"          [yellow]→[/yellow] {s.fix}")
 
+    _render_deadweight_plugins(finding, pricing_mode=pricing_mode)
+
     # C2 context tax: every always-injected content source, dead or alive. Kept
     # to the top rows so it stays a pointer rather than a second report.
     if finding.tax_table:
@@ -2549,13 +3139,17 @@ def _render_deadweight(
             )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
+    # The MEASUREMENT coverage note, beside the figure it qualifies. Without it
+    # the terminal showed a priced dollar total for the servers that could be
+    # measured and said nothing about the ones excluded — an undisclosed FLOOR
+    # rendered as a total. The number was honest; the presentation was not.
+    if getattr(finding, "measurement_note", ""):
+        _render_prose(finding.measurement_note, marker="[yellow]![/yellow]", style="dim")
     if finding.coverage_note:
-        console.print(
-            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
-        )
+        _render_prose(finding.coverage_note, marker="[yellow]![/yellow]", style="dim")
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _cadence_phrase(seconds: float) -> str:
@@ -2641,9 +3235,9 @@ def _render_placement(
         )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
     if finding.friction:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.friction}[/italic]")
+        _render_prose(finding.friction, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_resend(
@@ -2669,7 +3263,7 @@ def _render_resend(
         # Below the data threshold (too few sessions/turns) — empty-state
         # discipline: never a bare "nothing found", always the reason.
         for note in finding.notes:
-            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+            _render_prose(note, style="dim")
         if not finding.notes:
             console.print("     [dim]No LLM turns in this window.[/dim]")
         return
@@ -2725,7 +3319,7 @@ def _render_resend(
             console.print(f"          [green]→[/green] {_rich_escape(r.fix)}")
     else:
         for note in finding.notes:
-            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+            _render_prose(note, style="dim")
 
     # Recoverable figure: fed through framing.render_savings rather than a
     # hand-rolled pricing_mode branch, so it can't quietly disagree with the
@@ -2757,9 +3351,9 @@ def _render_resend(
             f"avoidable across every session with repeat volume.[/dim]"
         )
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
 
-    console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+    _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
     _render_resend_fix(finding, persona)
 
 
@@ -2803,7 +3397,28 @@ def _render_resend_fix(finding, persona: str) -> None:
                 finding.fix_cache_control, markup=False, highlight=False, soft_wrap=True,
             )
     else:  # persona in {"claude-code", "unknown"}
-        console.print(f"     [bold]Fix:[/bold] {finding.fix_compaction}")
+        # LEADS WITH THE DURABLE FIX, same as the Review inbox card for this
+        # same finding. This branch used to print `fix_compaction` — so the
+        # card led with the offload rule while the CLI led with `/compact`, for
+        # one finding, and the CLI led with the weaker one. `COMPACTION_FIX`'s
+        # own text disclaims it ("never fixes the pattern going forward — treat
+        # it as immediate relief for an already-full session, not the durable
+        # fix"), so the CLI was leading with something the constant itself says
+        # is not the fix. Rendered through the SAME helper the card builds its
+        # advise from, so the two cannot drift into different wordings again.
+        from tokenjam.core.optimize.cost_proposals import compound_offload_fix
+
+        console.print(
+            f"     [bold]Fix:[/bold] "
+            f"{compound_offload_fix({}, finding.fix_subagent_offload, finding.fix_rightsize)}"
+        )
+        if finding.fix_compaction:
+            # Same secondary position the card gives it: immediate relief for
+            # an already-full session, explicitly not the durable fix.
+            console.print(
+                f"     [dim]Immediate relief in an already-full session: "
+                f"{finding.fix_compaction}[/dim]"
+            )
         if finding.fix_cache_control:
             console.print(
                 "     [dim]If you also run SDK agents against these models, "
@@ -2878,8 +3493,8 @@ def _render_stream_usage(
         )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{_rich_escape(finding.estimate_basis)}[/dim]")
-    console.print(f"     [dim]{_rich_escape(finding.accounting_note)}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim")
+    _render_prose(finding.accounting_note, style="dim")
 
 
 # Dispatch table — analyzer registration name → renderer.

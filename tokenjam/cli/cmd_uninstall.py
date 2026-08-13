@@ -10,6 +10,7 @@ from pathlib import Path
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand, tj_status
 from tokenjam.utils.formatting import console
 
 
@@ -210,7 +211,13 @@ def _pip_tj_on_path() -> str | None:
     tj_path = shutil.which("tj")
     if not tj_path:
         return None
-    norm = tj_path.replace("\\", "/")
+    # `shutil.which("tj")` returns the SHIM on PATH (e.g. ~/.local/bin/tj), which
+    # for a pipx / uv-tool install is a SYMLINK into the managed venv. Resolve it
+    # before the exclusion check — the shim's own path does not contain
+    # pipx/venvs/ or /uv/tools/, so an un-resolved check misses and double-counts
+    # a pipx-managed install as a plain-pip one (#669).
+    real = os.path.realpath(tj_path)
+    norm = real.replace("\\", "/")
     if "pipx/venvs/" in norm or "/uv/tools/" in norm:
         return None
     if (
@@ -256,6 +263,13 @@ def _find_persistent_install() -> list[PersistentInstall]:
             argv=["uv", "tool", "uninstall", "tokenjam"],
             display="uv tool uninstall tokenjam",
         ))
+    # The realpath resolution in `_pip_tj_on_path` is what fixes the double-count:
+    # a pipx / uv shim now resolves into its managed venv and is excluded there,
+    # so a pipx-only install never reaches this branch. A `tj` that survives the
+    # exclusion is a GENUINELY separate plain-pip / editable install, and it must
+    # be reported even when a pipx/uv install also exists — a machine can carry
+    # both, and suppressing this one would silently leave a real install behind
+    # (#669, Greptile).
     if _pip_tj_on_path():
         installs.append(PersistentInstall(
             manager="pip", auto=False, argv=None,
@@ -288,11 +302,14 @@ def _uninstall_confirm_prompt(installs: list[PersistentInstall]) -> str:
     return base + ". Continue?"
 
 
-@click.command("uninstall")
+#: No class-level `status_message`: the confirmation prompt below must not
+#: run under a live spinner. `tj_status` is called manually after the
+#: prompt resolves, wrapping only the package-removal step.
+@click.command("uninstall", cls=TjCommand)
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
 def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
-    """Remove TokenJam entirely: config/daemon/wiring AND the tokenjam package.
+    """Remove tj entirely (config + package).
 
     The full symmetric counterpart to `tj onboard`. For a config-only reset
     that leaves the tokenjam CLI installed (e.g. to reconfigure or pause),
@@ -327,8 +344,9 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
 
     console.print()
     console.print("[dim]Removing the tokenjam package...[/dim]")
-    for install in installs:
-        _remove_persistent_install(install)
+    with tj_status("Removing the tokenjam package…", ctx):
+        for install in installs:
+            _remove_persistent_install(install)
 
 
 def _teardown_side_effects(ctx: click.Context) -> None:

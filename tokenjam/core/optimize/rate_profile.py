@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from tokenjam.core.optimize.span_pricing import SPAN_UTC_DAY_SQL
+from tokenjam.core.persona_scope import add_persona_clause
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ def blended_rate_profile(
     since: Any = None,
     until: Any = None,
     agent_id: str | None = None,
+    persona_scope: str | None = None,
 ) -> RateProfile | None:
     """Blend input + cache-read rates over the spans the filters select.
 
@@ -81,6 +83,10 @@ def blended_rate_profile(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope — see `core/persona_scope.py`. The blend has
+    # to be taken over the same rows the figure it prices is measured over, or
+    # a persona-scoped token count is priced at the whole corpus's model mix.
+    add_persona_clause(clauses, persona_scope)
 
     try:
         rows = conn.execute(

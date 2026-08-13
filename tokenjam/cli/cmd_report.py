@@ -21,6 +21,7 @@ from pathlib import Path
 import click
 from rich.markup import escape as _rich_escape
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.utils.formatting import console
 
 
@@ -33,7 +34,7 @@ def _report_dir() -> Path:
     return base
 
 
-@click.command("report")
+@click.command("report", cls=TjCommand, status_message="Building the report…")
 @click.option("--trim", "trim_agent", default=None, flag_value="",
               is_flag=False, help="Generate the Trim HTML report. "
                                    "Optional agent_id scopes the report.")
@@ -46,7 +47,7 @@ def _report_dir() -> Path:
 @click.pass_context
 def cmd_report(ctx: click.Context, trim_agent: str | None,
                reuse_agent: str | None, since: str, no_open: bool) -> None:
-    """Generate detailed HTML reports for analyzer findings."""
+    """Generate HTML reports of findings."""
     if trim_agent is not None and reuse_agent is not None:
         raise click.UsageError("Pass only one of --trim / --reuse.")
     if trim_agent is not None:

@@ -8,8 +8,12 @@ import functools
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
+import uuid
+import weakref
+from contextlib import ExitStack
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol, Sequence, cast, runtime_checkable
@@ -17,6 +21,7 @@ from typing import Any, Protocol, Sequence, cast, runtime_checkable
 import duckdb
 
 from tokenjam.core.config import StorageConfig
+from tokenjam.core.data_span import MIN_PLAUSIBLE_YEAR
 from tokenjam.core.models import (
     AgentRecord,
     Alert,
@@ -36,6 +41,7 @@ from tokenjam.core.models import (
     TraceFilters,
     TraceRecord,
 )
+from tokenjam.core.persona_scope import add_persona_clause, persona_agent_clause
 from tokenjam.utils.time_parse import utcnow
 
 logger = logging.getLogger("tokenjam.db")
@@ -70,6 +76,9 @@ def _is_cost_outlier(
 class StorageBackend(Protocol):
     def insert_span(self, span: NormalizedSpan) -> None: ...
     def bulk_insert_spans(self, spans: Sequence[NormalizedSpan]) -> None: ...
+    def bulk_overlay_span_attrs(
+        self, updates: Sequence[tuple[str, str | None, str | None, dict | None]],
+    ) -> int: ...
     def insert_alert(self, alert: Alert) -> None: ...
     def insert_validation(self, result: SchemaValidationResult) -> None: ...
     def insert_policy_decision(self, decision: PolicyDecisionRecord) -> None: ...
@@ -93,6 +102,7 @@ class StorageBackend(Protocol):
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
     def count_traces(self, filters: TraceFilters) -> int: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
+    def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None: ...
     def get_trace_cost_stats(self, filters: TraceFilters) -> TraceCostStats: ...
     def get_session_id_for_trace(self, trace_id: str) -> str | None: ...
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]: ...
@@ -121,12 +131,20 @@ class StorageBackend(Protocol):
     def count_unknown_plan_tier_sessions(self) -> int: ...
     def get_window_cost_totals(
         self, since: datetime, until: datetime, agent_id: str | None = None,
+        persona: str | None = None,
     ) -> tuple[int, int, int, int, int, float]: ...
     def get_cost_delta_by_group(
         self, group_col: str, current_since: datetime, current_until: datetime,
         prev_since: datetime, prev_until: datetime, top_n: int,
+        persona: str | None = None,
     ) -> list[dict]: ...
-    def delete_spans_before(self, cutoff: datetime) -> int: ...
+    def delete_spans_before(
+        self,
+        cutoff: datetime,
+        *,
+        retention_days: int | None = None,
+        analysis_span_days: int | None = None,
+    ) -> tuple[int, int]: ...
     def close(self) -> None: ...
 
 
@@ -149,6 +167,13 @@ CREATE TABLE IF NOT EXISTS spans (
     kind                TEXT NOT NULL,
     status_code         TEXT NOT NULL,
     status_message      TEXT,
+    -- NOT NULL, and deliberately so. A row with no observed time is REJECTED at
+    -- ingest rather than stored (see api/routes/logs.py) — the alternative,
+    -- a nullable column, moves the problem into ~25 `ORDER BY start_time` sites
+    -- whose null placement is a DuckDB session setting rather than a property of
+    -- the query, and buys only the ability to keep rows that can never time
+    -- anything. What must never appear here is an epoch SENTINEL: a 1970 stamp
+    -- participates in MIN() and drags a span measure back by decades.
     start_time          TIMESTAMPTZ NOT NULL,
     end_time            TIMESTAMPTZ,
     duration_ms         DOUBLE,
@@ -170,14 +195,37 @@ CREATE TABLE IF NOT EXISTS spans (
 );
 """
 
-# Secondary indexes on spans. Single-sourced so migration 3 and the repair path
-# create the same set; keep in sync with the DROPs in migration 2.
-SPANS_INDEX_SQL = (
-    "CREATE INDEX IF NOT EXISTS idx_spans_trace_id    ON spans(trace_id);\n"
-    "CREATE INDEX IF NOT EXISTS idx_spans_agent_id    ON spans(agent_id);\n"
-    "CREATE INDEX IF NOT EXISTS idx_spans_start_time  ON spans(start_time);\n"
-    "CREATE INDEX IF NOT EXISTS idx_spans_tool_name   ON spans(tool_name);\n"
-    "CREATE INDEX IF NOT EXISTS idx_spans_conv_id     ON spans(conversation_id)"
+# Secondary indexes on spans, as (index name, indexed column). Single-sourced so
+# migration 3, the repair path, and the integrity check all speak about the same
+# set; keep in sync with the DROPs in migration 2. The index-corruption check
+# below probes each entry individually, so a name added here is checked without
+# any further edit — the point being that the check cannot fall behind the
+# schema the way a hand-kept second list would.
+SPANS_INDEXES: tuple[tuple[str, str], ...] = (
+    ("idx_spans_trace_id",   "trace_id"),
+    ("idx_spans_agent_id",   "agent_id"),
+    ("idx_spans_start_time", "start_time"),
+    ("idx_spans_tool_name",  "tool_name"),
+    ("idx_spans_conv_id",    "conversation_id"),
+)
+
+# Secondary indexes on sessions. Single-sourced for the same reason as the spans
+# set above: DuckDB refuses to ALTER a column on a table carrying ART indexes, so
+# migration 21 has to drop and re-issue these, and a second copy of the DDL there
+# would be free to drift from the one the initial schema creates.
+SESSIONS_INDEXES: tuple[tuple[str, str], ...] = (
+    ("idx_sessions_agent_id", "agent_id"),
+    ("idx_sessions_conv_id",  "conversation_id"),
+)
+
+SESSIONS_INDEX_SQL = ";\n".join(
+    f"CREATE INDEX IF NOT EXISTS {name} ON sessions({column})"
+    for name, column in SESSIONS_INDEXES
+)
+
+SPANS_INDEX_SQL = ";\n".join(
+    f"CREATE INDEX IF NOT EXISTS {name} ON spans({column})"
+    for name, column in SPANS_INDEXES
 )
 
 # ---------------------------------------------------------------------------
@@ -262,6 +310,111 @@ def _build_bulk_span_insert_sql() -> str:
 
 
 _BULK_SPAN_INSERT_SQL = _build_bulk_span_insert_sql()
+
+# ---------------------------------------------------------------------------
+# Columnar overlay of sub_agent_id / sub_agent_type / attributes onto
+# EXISTING spans
+# ---------------------------------------------------------------------------
+#
+# A normal (non-`--reingest`) backfill only ever INSERTs spans whose span_id
+# is not yet in the store — `_BULK_SPAN_INSERT_SQL` above never touches a row
+# that already exists. That is correct for the row's money/token fields (they
+# must never move under an existing span), but it means anything added AFTER a
+# span was first ingested can never fill on a row inserted before it existed —
+# the row is never "new" again. Two independent cases share this shape:
+#   - `sub_agent_type` (migration 19) is simply absent on older rows.
+#   - `attributes` carries content keys (`gen_ai.prompt.content` etc.) only
+#     when `[capture]` was ON at parse time — a row backfilled before the user
+#     enabled it never gets the content, even though the SAME transcript can
+#     supply it on a later re-parse.
+# This is the set-based sibling of `_insert_session_idempotent`'s per-row
+# `--reingest` UPDATE, sized for the full-history case: one vectorized
+# `UPDATE ... FROM read_json` instead of a Python loop per span. Both cases
+# go through this ONE primitive rather than two — see `_dedup_new_spans`'s
+# `overlay_candidates` for how a span qualifies for either half.
+#
+# Strictly additive by construction:
+#   - `COALESCE(spans.col, src.col)` for the two scalar columns only ever
+#     replaces a NULL, so a value the row already carries (from any source,
+#     live or backfill) can never be overwritten with a different one.
+#   - `json_merge_patch(src.attributes, spans.attributes)` for the JSON
+#     column — NOT the other argument order. RFC 7396 merge-patch semantics
+#     make the SECOND argument win on any key both sides carry, so putting
+#     the STORED attributes second means a key the row already has (e.g. from
+#     live ingest, or a previous capture-content overlay) is never replaced;
+#     only keys present in the freshly-parsed `src.attributes` and ABSENT
+#     from the stored row get added. (Merge-patch also treats an explicit
+#     JSON `null` value as "delete this key" — never a concern here, since
+#     nothing in this codebase ever stores a literal null attribute value.)
+# Re-running either overlay over an unchanged transcript is therefore always
+# a no-op (the parsed value is stable), and this is what makes the AUTOMATIC,
+# unattended catch-up loop safe to run this against on every pass.
+#
+# Reports the changed count via a separate COUNT query sharing the exact same
+# JOIN + WHERE as the UPDATE, run first under the same write-lock hold — NOT
+# `UPDATE ... RETURNING`, which crashed with an internal DuckDB fatal error
+# ("Failed to append to PRIMARY_spans_0", a PRIMARY KEY constraint violation
+# despite the source batch holding no duplicate span_id — reproduced on
+# DuckDB 1.5.1 against the real `spans` table at ~25k rows/batch; a synthetic
+# minimal table did NOT reproduce it, so it's specific to this table's shape,
+# not a general RETURNING bug) the one time this ran against a real ~700k-span
+# corpus. Two passes over the same batch costs one extra vectorized scan,
+# negligible next to the crash it avoids.
+_SUBAGENT_OVERLAY_COLUMNS: tuple[str, ...] = (
+    "span_id", "sub_agent_id", "sub_agent_type", "attributes",
+)
+_SUBAGENT_OVERLAY_READ_TYPES: dict[str, str] = {
+    "span_id": "VARCHAR", "sub_agent_id": "VARCHAR", "sub_agent_type": "VARCHAR",
+    "attributes": "JSON",
+}
+
+# Match when a fill will actually HAPPEN on at least one column — a null slot
+# paired with a non-null offered value for the two scalars, or a genuinely
+# different (superset) attributes JSON for the content case — not merely
+# "some column somewhere is null/could differ and something is offered",
+# which would also match rows where no pairing does anything and inflate the
+# count with no-op rows.
+_SUBAGENT_OVERLAY_MATCH_PREDICATE = (
+    "spans.span_id = src.span_id\n"
+    "  AND (\n"
+    "    (spans.sub_agent_id IS NULL AND src.sub_agent_id IS NOT NULL)\n"
+    "    OR (spans.sub_agent_type IS NULL AND src.sub_agent_type IS NOT NULL)\n"
+    "    OR (\n"
+    "      src.attributes IS NOT NULL\n"
+    "      AND json_merge_patch(src.attributes, spans.attributes) != spans.attributes\n"
+    "    )\n"
+    "  )"
+)
+
+
+def _subagent_overlay_read_json_clause() -> str:
+    read_cols = ", ".join(
+        f"'{c}': '{_SUBAGENT_OVERLAY_READ_TYPES[c]}'" for c in _SUBAGENT_OVERLAY_COLUMNS
+    )
+    return (
+        f"read_json(\n"
+        f"    ?, format='newline_delimited', records='true',\n"
+        f"    columns={{{read_cols}}},\n"
+        f"    maximum_object_size={_SPAN_BULK_MAX_OBJECT_BYTES}\n"
+        f") AS src"
+    )
+
+
+_BULK_SUBAGENT_OVERLAY_COUNT_SQL = (
+    f"SELECT COUNT(*) FROM spans, {_subagent_overlay_read_json_clause()}\n"
+    f"WHERE {_SUBAGENT_OVERLAY_MATCH_PREDICATE}"
+)
+
+_BULK_SUBAGENT_OVERLAY_UPDATE_SQL = (
+    "UPDATE spans SET "
+    "sub_agent_id = COALESCE(spans.sub_agent_id, src.sub_agent_id), "
+    "sub_agent_type = COALESCE(spans.sub_agent_type, src.sub_agent_type), "
+    "attributes = CASE WHEN src.attributes IS NOT NULL "
+    "THEN json_merge_patch(src.attributes, spans.attributes) "
+    "ELSE spans.attributes END\n"
+    f"FROM {_subagent_overlay_read_json_clause()}\n"
+    f"WHERE {_SUBAGENT_OVERLAY_MATCH_PREDICATE}"
+)
 
 
 def _span_to_json_obj(span: NormalizedSpan) -> dict:
@@ -389,12 +542,70 @@ CREATE TABLE IF NOT EXISTS schema_validations (
     errors          JSON DEFAULT '[]'
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_agent_id  ON sessions(agent_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_conv_id   ON sessions(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_agent_id    ON alerts(agent_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_fired_at    ON alerts(fired_at);
 """
+    + SESSIONS_INDEX_SQL
 )
+
+# The retention ledger's DDL, single-sourced so migration 20 and the
+# `EXPECTED_TABLES` self-heal below create the same table.
+RETENTION_EVENTS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS retention_events (\n"
+    "    event_id            TEXT PRIMARY KEY,\n"
+    "    ran_at              TIMESTAMPTZ NOT NULL,\n"
+    "    cutoff              TIMESTAMPTZ NOT NULL,\n"
+    "    retention_days      INTEGER,\n"
+    "    analysis_span_days  INTEGER,\n"
+    "    spans_deleted       BIGINT NOT NULL DEFAULT 0,\n"
+    "    sessions_deleted    BIGINT NOT NULL DEFAULT 0,\n"
+    "    oldest_kept         TIMESTAMPTZ\n"
+    ")"
+)
+
+# The ingested agent-config surface, single-sourced so migration 22 and the
+# `EXPECTED_TABLES` self-heal create the same table. See `core/agent_config.py`
+# for what each column answers and why the measurement columns are separate
+# from the size ones: `tokens` is what the file's own text costs, while
+# `measured_tokens` is what an MCP server's tool schemas were MEASURED to inject
+# and is NULL until something actually measured them. A NULL there is load-
+# bearing — no consumer may substitute a default for it, because "we have not
+# measured this server" and "this server injects nothing" are different answers.
+AGENT_CONFIG_FILES_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS agent_config_files (\n"
+    "    config_id       TEXT PRIMARY KEY,\n"
+    "    kind            TEXT NOT NULL,\n"
+    "    scope           TEXT NOT NULL,\n"
+    "    root            TEXT,\n"
+    "    name            TEXT,\n"
+    "    path            TEXT NOT NULL,\n"
+    "    size_bytes      BIGINT NOT NULL DEFAULT 0,\n"
+    "    tokens          BIGINT NOT NULL DEFAULT 0,\n"
+    "    content_hash    TEXT,\n"
+    "    last_seen       TIMESTAMPTZ NOT NULL,\n"
+    "    subkind         TEXT,\n"
+    "    detail          JSON,\n"
+    "    measured_tokens BIGINT,\n"
+    "    measured_at     TIMESTAMPTZ,\n"
+    "    measure_status  TEXT,\n"
+    "    seq             BIGINT NOT NULL DEFAULT 0\n"
+    ")"
+)
+
+# The table's secondary indexes, single-sourced beside the DDL for the same
+# reason `SPANS_INDEX_SQL` is: a fresh install and the `EXPECTED_TABLES`
+# self-heal must create the SAME set, or a database quietly ends up missing an
+# index that nothing will ever put back (migrations are already recorded
+# applied). `repair_explicit_indexes` does not read this constant -- it
+# re-issues each index from its own catalogue DDL, so it repairs indexes this
+# module has never heard of.
+AGENT_CONFIG_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_agent_config_kind "
+    "ON agent_config_files(kind);\n"
+    "CREATE INDEX IF NOT EXISTS idx_agent_config_last_seen "
+    "ON agent_config_files(last_seen)"
+)
+
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, INITIAL_SCHEMA_SQL),
@@ -657,6 +868,64 @@ MIGRATIONS: list[tuple[int, str]] = [
     # Populated by the backfill parser from the `agent-<id>.meta.json` sidecar;
     # `tj backfill --reingest` re-tags pre-column history.
     (19, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_type TEXT"),
+    # Migration 20: the retention ledger. Deleting a user's own history and
+    # leaving no account of it is the fault this closes — the only way to learn
+    # that eight weeks of the oldest history had gone was to measure the store
+    # twice, days apart, and diff the two answers. One row per run of the
+    # retention job, written in the same transaction as the delete, so a
+    # deletion that happened always has a record and a record that exists always
+    # describes a deletion. `tj doctor` reads it; nothing else writes it.
+    (20, RETENTION_EVENTS_TABLE_SQL),
+    # Migration 21: session provenance + task identity.
+    #
+    # `source` records what PRODUCED a session — 'claude-code' (matches
+    # `agent_kind.CODING_AGENT_GROUPS`'s spelling exactly) / 'codex' / 'sdk' —
+    # at the point of ingest, from the strongest signal available at
+    # that ingest path (a literal constant for the two dedicated backfill
+    # adapters, which parse ONLY that tool's transcripts; `agent_kind
+    # .classify_agent_kind` for the live path, which sees a mix — its exact/
+    # prefix rules are grounded in verified id-minting behavior, not a guess).
+    # Before this, nothing recorded provenance at write time at all; every
+    # reader re-derived a "coding vs SDK" answer from `agent_id` naming
+    # conventions, and two independently-maintained predicates
+    # (`core.agent_kind` vs `core.alerts.is_interactive_coding_agent`)
+    # disagree BY DESIGN on Codex prefix-vs-exact matching (see
+    # `agent_kind`'s module docstring). This column does NOT merge them —
+    # both predicates, and their five existing call sites plus the pinned
+    # margin-case test, are UNCHANGED; this is a new, more precise field a
+    # caller can additionally choose to read.
+    #
+    # `task_statement_hash` / `dominant_model` support "did this session
+    # repeat prior work" without storing raw prompt text: the only
+    # high-confidence "same task" signal is the first user prompt, which
+    # lived only in the on-disk transcript (rotated ~30 days by Claude Code)
+    # and was discarded at ingest — unrecoverable once gone. Masked (hashed),
+    # never the raw prompt. `dominant_model` records the model that actually
+    # ran the bulk of the session, alongside the hash, for the same
+    # correlate-across-sessions use case (`core.optimize.repeat_task`).
+    (21,
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS task_statement_hash TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS dominant_model TEXT"),
+    # Migration 22: the ingested agent-config surface.
+    #
+    # Three analyzers each walked the filesystem themselves at analysis time to
+    # answer "what config does this user have" — `deadweight` re-read
+    # `~/.claude.json` and every project's `.mcp.json`, `core/summarize/
+    # candidates` re-globbed the prompt-file catalog, and `prompt_bloat` globbed
+    # it a second time through its own helper. Nothing about any of it was
+    # stored, so the same tree was walked three times per run and no question
+    # about it could be answered without touching disk.
+    #
+    # This table is what those analyzers now read; the walk is only how it gets
+    # populated. One row per instruction file, hook, or (MCP server, declaring
+    # config file), carrying presence, size, token count, content hash and when
+    # it was last seen. `measured_tokens` is the separate, independently taken
+    # measurement of what an MCP server's tool schemas actually inject — cached
+    # here precisely because taking it means STARTING the server, so it must
+    # survive between analysis runs and be invalidated by the spec hash rather
+    # than re-taken on a schedule.
+    (22, AGENT_CONFIG_FILES_TABLE_SQL + ";\n" + AGENT_CONFIG_INDEX_SQL),
 ]
 
 
@@ -690,6 +959,9 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("spans",    "prompt_template_version", "TEXT"),               # migration 17
     ("spans",    "pricing_source",          "TEXT"),               # migration 18
     ("spans",    "sub_agent_type",          "TEXT"),               # migration 19
+    ("sessions", "source",                  "TEXT"),               # migration 21
+    ("sessions", "task_statement_hash",     "TEXT"),               # migration 21
+    ("sessions", "dominant_model",          "TEXT"),               # migration 21
 ]
 
 
@@ -790,6 +1062,10 @@ EXPECTED_TABLES: dict[str, str] = {
         "    created_at     TIMESTAMPTZ NOT NULL\n"
         ")"
     ),
+    # migration 20
+    "retention_events": RETENTION_EVENTS_TABLE_SQL,
+    # migration 22
+    "agent_config_files": AGENT_CONFIG_FILES_TABLE_SQL,
 }
 
 
@@ -1077,6 +1353,86 @@ def stored_observations_by_call(
     return by_call
 
 
+def unresolved_subagent_type_stats(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[int, float]:
+    """Count + spend of Claude Code subagent spans with no resolved TYPE.
+
+    `sub_agent_id IS NOT NULL` scopes to spans backfill has already tagged as
+    a real Task-tool subagent dispatch (see Critical Rule 34 in CLAUDE.md);
+    `sub_agent_type IS NULL` among those is either a row inserted before
+    migration 19 landed (fixable — `tj backfill claude-code` re-derives it from
+    the on-disk `agent-<id>.meta.json` sidecar and overlays it), a dispatch
+    whose sidecar/transcript Claude Code has since pruned (unfixable — the
+    source is gone), or a deliberate `_PER_DISPATCH_TASK_KINDS` carve-out
+    (correct, not a gap). This count cannot distinguish the three from stored
+    columns alone — see `_subagent_type_for` in `core/backfill.py`.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(cost_usd), 0.0) FROM spans "
+        "WHERE sub_agent_id IS NOT NULL AND sub_agent_type IS NULL"
+    ).fetchone()
+    if not row:
+        return 0, 0.0
+    return int(row[0] or 0), float(row[1] or 0.0)
+
+
+#: The backfill provenance tag every Claude Code backfill LLM/tool span
+#: carries in `attributes.source` (mirrors `backfill._CLAUDE_CODE_SOURCE`,
+#: not imported directly to keep `core/db.py` free of a `core/backfill.py`
+#: import — the string is a stable, long-standing wire value, not an
+#: implementation detail either side is free to change independently).
+_BACKFILL_CLAUDE_CODE_SOURCE_TAG = "backfill.claude_code"
+
+
+def missing_captured_content_stats(
+    conn: duckdb.DuckDBPyConnection, *, prompts: bool, completions: bool,
+) -> int:
+    """Count backfill-sourced `gen_ai.llm.call` spans missing content
+    `[capture]` says should be there — the linkage `bulk_overlay_span_attrs`'s
+    content half exists to close: a row backfilled before the user turned
+    `[capture]` on never gets the content on its own, even though a later
+    `tj backfill claude-code` re-run CAN supply it from the same transcript.
+
+    Counts a span missing `gen_ai.prompt.content` (when `prompts`) OR
+    `gen_ai.completion.content` (when `completions`) — either is enough to
+    flag it if both toggles are on. See `missing_captured_tool_input_stats`
+    for `tool_inputs`, kept separate since it scopes to `gen_ai.tool.call`
+    spans, a disjoint set from the LLM spans this counts.
+    """
+    if not (prompts or completions):
+        return 0
+    clauses = []
+    if prompts:
+        clauses.append("(attributes -> '$.\"gen_ai.prompt.content\"') IS NULL")
+    if completions:
+        clauses.append("(attributes -> '$.\"gen_ai.completion.content\"') IS NULL")
+    where = " OR ".join(clauses)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM spans "
+        "WHERE name = 'gen_ai.llm.call' "
+        "AND (attributes ->> '$.source') = $1 "
+        f"AND ({where})",
+        [_BACKFILL_CLAUDE_CODE_SOURCE_TAG],
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def missing_captured_tool_input_stats(conn: duckdb.DuckDBPyConnection) -> int:
+    """Count backfill-sourced tool spans missing `gen_ai.tool.input` — the
+    `tool_inputs` half of `missing_captured_content_stats`, kept separate
+    because it scopes to `gen_ai.tool.call` spans, not the LLM spans that
+    function counts."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM spans "
+        "WHERE name = 'gen_ai.tool.call' "
+        "AND (attributes ->> '$.source') = $1 "
+        "AND (attributes -> '$.\"gen_ai.tool.input\"') IS NULL",
+        [_BACKFILL_CLAUDE_CODE_SOURCE_TAG],
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def duplicate_call_observations(
     conn: duckdb.DuckDBPyConnection, limit: int = 20,
 ) -> tuple[int, float, list[tuple[str, int, float]]]:
@@ -1311,6 +1667,9 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         service_instance_id=d.get("service_instance_id"),
         run_id=d.get("run_id"),
         parent_session_id=d.get("parent_session_id"),
+        source=d.get("source"),
+        task_statement_hash=d.get("task_statement_hash"),
+        dominant_model=d.get("dominant_model"),
     )
 
 
@@ -1596,6 +1955,170 @@ def check_spans_stats_corruption(conn: duckdb.DuckDBPyConnection) -> bool:
     return False
 
 
+# Rows stamped with an epoch sentinel instead of an observed time. The ingest
+# paths that could write one are closed (a record with no observed time is
+# rejected at the boundary now), so this is a one-shot cleanup for corpora an
+# older build already wrote — surfaced by `tj doctor` and removed by
+# `tj doctor --repair` rather than living as a SQL snippet in a PR description.
+_SENTINEL_TABLES: tuple[tuple[str, str], ...] = (
+    ("spans", "start_time"),
+    ("sessions", "started_at"),
+)
+
+
+def count_sentinel_timestamp_rows(
+    conn: duckdb.DuckDBPyConnection,
+) -> dict[str, int]:
+    """Per-table counts of rows dated before ``MIN_PLAUSIBLE_YEAR``.
+
+    Only tables with a non-zero count appear, so an empty dict means clean. A
+    missing table contributes nothing rather than failing the whole probe.
+    """
+    found: dict[str, int] = {}
+    for table, column in _SENTINEL_TABLES:
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {table} "  # noqa: S608 - table names are literals above
+                f"WHERE {column} IS NOT NULL "
+                f"AND EXTRACT(year FROM {column}) < $1",
+                [MIN_PLAUSIBLE_YEAR],
+            ).fetchone()
+        except duckdb.Error:
+            continue
+        count = int(row[0]) if row else 0
+        if count:
+            found[table] = count
+    return found
+
+
+def purge_sentinel_timestamp_rows(
+    conn: duckdb.DuckDBPyConnection,
+) -> dict[str, int]:
+    """Delete the sentinel-dated rows, returning what was removed per table.
+
+    Deleted rather than corrected: there is nothing to correct TO. A row whose
+    only recorded fact about time was false has no other evidence of when it
+    happened, and leaving it would keep a row that every ``COUNT(*)`` counts and
+    nothing can place on a calendar.
+    """
+    removed = count_sentinel_timestamp_rows(conn)
+    for table, column in _SENTINEL_TABLES:
+        if table not in removed:
+            continue
+        conn.execute(
+            f"DELETE FROM {table} "  # noqa: S608 - table names are literals above
+            f"WHERE {column} IS NOT NULL AND EXTRACT(year FROM {column}) < $1",
+            [MIN_PLAUSIBLE_YEAR],
+        )
+    return removed
+
+
+def check_spans_index_corruption(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[tuple[str, str]]:
+    """The ``spans`` secondary indexes that are missing or disagree with the table.
+
+    Returns ``(index name, what is wrong)`` pairs; empty means all five are
+    sound. ``check_spans_stats_corruption`` above asks one question about one
+    column — is the row-group statistics fast-path lying about ``trace_id`` —
+    which is narrower than "can this table be read and DELETED from
+    predictably", and the gap between the two is where a secondary-index fault
+    lives. DuckDB maintains every index inside the deleting transaction, so a
+    damaged one can abort a ``DELETE`` part-way through and leave a statement
+    reporting that it removed fewer rows than it matched. Retention runs exactly
+    that ``DELETE``, which is what makes this load-bearing rather than cosmetic:
+    a deletion that cannot be relied on to complete is a deletion whose extent
+    nobody can state afterwards.
+
+    Two independent faults, because they have different causes and the same
+    remedy:
+
+    * **absent** — the index is not in the catalogue at all. A rebuild that
+      copies data without the DDL drops all five permanently (the ``CREATE
+      TABLE … AS SELECT`` trap ``repair_spans_stats`` documents), and migrations
+      are already recorded applied, so nothing puts them back.
+    * **inconsistent** — the index answers a point lookup with fewer rows than
+      the table holds. Probed the same way the stats check probes: take a value
+      known to be present, ask for it once in a form an index can serve and once
+      in a form it cannot.
+
+      **The unindexable form must be ``CAST(col AS VARCHAR) || ''``, not a bare
+      ``CAST``.** Four of the five columns here are already ``VARCHAR``, so
+      casting them is a no-op the planner discards — the index then serves BOTH
+      sides and the probe compares a damaged index against itself, reporting
+      sound whatever the damage. Only ``start_time`` was ever really being
+      tested. Concatenating an empty string is a real expression over the
+      column for every type, so it always forces the scan. Demonstrated on a
+      damaged index elsewhere in this schema: the equality form answered 7
+      where the table held 94, and the bare-``CAST`` form also answered 7.
+
+    An empty table, an unreadable column, or a column holding only NULLs
+    contributes nothing: this reports what it can demonstrate, never suspicion.
+    """
+    try:
+        # A pre-migration database has no spans table, so it has no indexes to
+        # be missing. Reporting five absent ones there would flag every fresh
+        # install as corrupt.
+        conn.execute("SELECT 1 FROM spans LIMIT 0").fetchall()
+        present = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'spans'"
+            ).fetchall()
+        }
+    except duckdb.Error:
+        return []
+
+    faults: list[tuple[str, str]] = []
+    for index_name, column in SPANS_INDEXES:
+        if index_name not in present:
+            faults.append((index_name, "absent from the catalogue"))
+            continue
+        try:
+            sample = conn.execute(
+                f"SELECT {column} FROM spans WHERE {column} IS NOT NULL LIMIT 3"
+            ).fetchall()
+        except duckdb.Error:
+            continue
+        for (value,) in sample:
+            try:
+                indexed_row = conn.execute(
+                    f"SELECT COUNT(*) FROM spans WHERE {column} = $1", [value]
+                ).fetchone()
+                scanned_row = conn.execute(
+                    f"SELECT COUNT(*) FROM spans "
+                    f"WHERE CAST({column} AS VARCHAR) || '' = CAST($1 AS VARCHAR)",
+                    [value],
+                ).fetchone()
+            except duckdb.Error:
+                break
+            indexed = indexed_row[0] if indexed_row else 0
+            scanned = scanned_row[0] if scanned_row else 0
+            if indexed < scanned:
+                faults.append((
+                    index_name,
+                    f"returns {indexed} of {scanned} matching row(s)",
+                ))
+                break
+    return faults
+
+
+def repair_spans_indexes(conn: duckdb.DuckDBPyConnection) -> None:
+    """Drop and recreate every ``spans`` secondary index from the canonical DDL.
+
+    Cheaper than ``repair_spans_stats`` and sufficient for the index fault: the
+    table's rows are the source of truth and are never touched, so a rebuilt
+    index can only agree with them. Idempotent, and safe on a healthy database.
+    """
+    for index_name, _ in SPANS_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+    for statement in SPANS_INDEX_SQL.split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
+    conn.execute("CHECKPOINT")
+
+
 def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
     """Rebuild the spans table to refresh column statistics.
 
@@ -1644,6 +2167,412 @@ def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("CHECKPOINT")
 
 
+#: An index name / column name we are willing to interpolate into SQL. These
+#: come from DuckDB's own catalogue rather than from a user, but a probe that
+#: builds SQL by string-splicing validates its identifiers anyway.
+_SQL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _index_columns(expressions: str) -> list[str]:
+    """Column names out of ``duckdb_indexes().expressions``.
+
+    That column is a VARCHAR rendering of the indexed expression list, e.g.
+    ``'[kind]'`` or ``'[agent_id, started_at]'`` — not a real list, so it is
+    parsed rather than unnested.
+    """
+    inner = (expressions or "").strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    return [part.strip() for part in inner.split(",") if part.strip()]
+
+
+def explicit_indexes(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[tuple[str, str, list[str], str]]:
+    """Every explicit index in the database: ``(name, table, columns, ddl)``.
+
+    Read from ``duckdb_indexes()``, which lists only indexes created by an
+    explicit ``CREATE INDEX``. A ``PRIMARY KEY``'s own ART is NOT in there, so
+    a repair driven by this list structurally cannot touch a primary key —
+    which is the property that makes the sweep safe to run unattended.
+    ``is_primary``/``is_unique`` are filtered as well, belt and braces.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT index_name, table_name, expressions, sql FROM duckdb_indexes() "
+            "WHERE NOT is_primary AND NOT is_unique ORDER BY table_name, index_name"
+        ).fetchall()
+    except duckdb.Error:
+        return []
+    out = []
+    for name, table, expressions, ddl in rows:
+        if not _SQL_IDENTIFIER.match(str(name)) or not _SQL_IDENTIFIER.match(str(table)):
+            continue
+        out.append((str(name), str(table), _index_columns(expressions), str(ddl or "")))
+    return out
+
+
+#: Values to compare per index when the table is small enough to enumerate its
+#: value space. Above `_PROBE_EXHAUSTIVE_MAX_ROWS` the probe falls back to a
+#: few samples, because the scan side of each comparison is a full table scan.
+_PROBE_VALUE_LIMIT = 200
+_PROBE_EXHAUSTIVE_MAX_ROWS = 50_000
+_PROBE_SAMPLE_VALUES = 3
+
+
+def check_index_divergence(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """Sweep EVERY explicit index for disagreement with its table.
+
+    Returns ``(faults, unproven)``, each a list of ``(index, table, reason)``.
+
+    **A clean `faults` list is NOT a proof of soundness, and `unproven` is how
+    that is said out loud.** This probe compares counts for particular VALUES,
+    so it can only find damage in the entries it looked at. Learned the hard
+    way: on a genuinely damaged database a three-value sample found three of
+    four damaged indexes, the fourth reported clean, and a repair driven by
+    that verdict left the table still raising the fatal. So an index is only
+    reported sound when every distinct value was compared; anything less lands
+    in ``unproven`` with the reason, and callers that must be CORRECT rather
+    than cheap repair everything instead of trusting this (see
+    ``repair_explicit_indexes`` and ``recover_invalidated_database``).
+
+    Coverage is exhaustive for a table small enough to enumerate and sampled
+    above that, because the scan side of each comparison is a full table scan
+    and the cost is per distinct value.
+
+    **Why the scan side multiplies by an empty string.** The probe asks the
+    same question in a form an index can serve and one it cannot. Picking the
+    second form is the whole difficulty: ``CAST(col AS VARCHAR)`` is a NO-OP on
+    a column already stored as ``VARCHAR``, so the planner discards it and the
+    index ends up serving BOTH sides — the probe then compares a damaged index
+    against itself and reports it sound whatever the damage. Concatenating an
+    empty string is a real expression over the column for every type. Measured
+    on a genuinely damaged index: the equality form answered 7 where the table
+    held 94, the bare-``CAST`` form also answered 7, the concatenated form 94.
+    """
+    faults: list[tuple[str, str, str]] = []
+    unproven: list[tuple[str, str, str]] = []
+    row_counts: dict[str, int] = {}
+    for index_name, table, columns, _ddl in explicit_indexes(conn):
+        if len(columns) != 1 or not _SQL_IDENTIFIER.match(columns[0]):
+            unproven.append((
+                index_name, table,
+                "indexed on an expression this single-column comparison "
+                "cannot test",
+            ))
+            continue
+        column = columns[0]
+        try:
+            if table not in row_counts:
+                count_row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                row_counts[table] = int(count_row[0]) if count_row else 0
+            small = row_counts[table] <= _PROBE_EXHAUSTIVE_MAX_ROWS
+            limit = _PROBE_VALUE_LIMIT if small else _PROBE_SAMPLE_VALUES
+            values = conn.execute(
+                f"SELECT DISTINCT {column} FROM {table} "
+                f"WHERE {column} IS NOT NULL LIMIT {limit + 1}"
+            ).fetchall()
+        except duckdb.Error as exc:
+            unproven.append((index_name, table, f"could not be probed: {exc}"))
+            continue
+        if not values:
+            continue  # empty table or all-NULL column: nothing to demonstrate
+        complete = small and len(values) <= limit
+        diverged = False
+        for (value,) in values[:limit]:
+            try:
+                indexed_row = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {column} = $1", [value]
+                ).fetchone()
+                scanned_row = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} "
+                    f"WHERE CAST({column} AS VARCHAR) || '' = CAST($1 AS VARCHAR)",
+                    [value],
+                ).fetchone()
+            except duckdb.Error as exc:
+                unproven.append((index_name, table, f"could not be probed: {exc}"))
+                diverged = True  # not a fault, but not proven either
+                break
+            indexed = indexed_row[0] if indexed_row else 0
+            scanned = scanned_row[0] if scanned_row else 0
+            if indexed < scanned:
+                faults.append((
+                    index_name, table,
+                    f"returns {indexed} of {scanned} matching row(s)",
+                ))
+                diverged = True
+                break
+        if not diverged and not complete:
+            unproven.append((
+                index_name, table,
+                f"only {min(len(values), limit)} of the table's distinct values "
+                f"were compared, so a clean result here is not proof",
+            ))
+    return faults, unproven
+
+
+def repair_explicit_indexes(
+    conn: duckdb.DuckDBPyConnection,
+    index_names: "Sequence[str] | None" = None,
+) -> list[str]:
+    """Drop and recreate explicit indexes from their own catalogue DDL.
+
+    ``index_names`` limits the repair to those indexes; ``None`` repairs every
+    explicit index. Returns the names actually rebuilt. Idempotent, and safe on
+    a healthy database.
+
+    **What it cannot do, structurally.** The DDL is read back from
+    ``duckdb_indexes()``, which does not list a ``PRIMARY KEY``'s ART, so no
+    primary key or unique constraint is reachable from here. No rows are read,
+    written or moved and no table is rebuilt: the table's rows are the source
+    of truth, so a re-issued index can only agree with them. That is why this
+    is safe unattended where `repair_spans_stats`'s table rebuild would not be.
+
+    An index whose catalogue entry carries no DDL is left alone rather than
+    dropped — dropping without being able to re-create it would turn a damaged
+    index into a missing one, and migrations are already recorded applied, so
+    nothing else would put it back.
+    """
+    wanted = set(index_names) if index_names is not None else None
+    rebuilt: list[str] = []
+    for index_name, _table, _columns, ddl in explicit_indexes(conn):
+        if wanted is not None and index_name not in wanted:
+            continue
+        if not ddl.strip():
+            logger.warning(
+                "index %s has no DDL in the catalogue; leaving it in place rather "
+                "than dropping an index that could not be recreated", index_name,
+            )
+            continue
+        conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+        for statement in ddl.split(";"):
+            statement = statement.strip()
+            if statement:
+                conn.execute(statement)
+        rebuilt.append(index_name)
+    if rebuilt:
+        conn.execute("CHECKPOINT")
+    return rebuilt
+
+
+# ---------------------------------------------------------------------------
+# Fatal errors and database invalidation
+# ---------------------------------------------------------------------------
+#
+# A DuckDB `FatalException` is categorically different from every other error
+# this module handles, and the difference is not visible at the call site that
+# raises it. Verified against duckdb 1.5.5, holding one root connection, one
+# sibling cursor and one connection opened afterwards:
+#
+#   * The exception invalidates the whole DATABASE INSTANCE, not the connection
+#     that raised it. Every other cursor over that database starts raising
+#     `FATAL Error: Failed: database has been invalidated because of a previous
+#     fatal error. The database must be restarted prior to being used again.`
+#   * `duckdb.connect(same_path)` AFTERWARDS hands back the SAME dead instance
+#     — DuckDB caches instances per path within a process, so "just reconnect"
+#     is not a recovery. This is why a fatal raised on a background scan's own
+#     `DuckDBBackend` takes down the web server's unrelated connections too.
+#   * Closing EVERY connection to that path evicts the instance from that
+#     cache; the next `duckdb.connect` then opens a healthy database, in the
+#     same process, with no restart. That is the only in-process recovery, and
+#     it is why recovery has to be a property of the process rather than of one
+#     backend object — hence the registry below.
+#
+# The consequence for error handling: any `except Exception` that treats a
+# failure as skip-this-row-and-continue MUST re-check for a fatal first. After
+# a fatal there are no more rows to skip, only queries that will all fail, and
+# a handler that logs a per-record warning turns a hard stop into a process
+# that keeps serving traffic on a database it can no longer read.
+
+#: Text DuckDB uses for every post-fatal query on an invalidated instance.
+DATABASE_INVALIDATED_MESSAGE = "database has been invalidated"
+
+
+def is_fatal_db_error(exc: BaseException) -> bool:
+    """True when ``exc`` means the database instance is gone, not this row.
+
+    Matches on the exception TYPE and, as a backstop, on the invalidation text:
+    the type is authoritative, but the message check keeps the classification
+    correct if a fatal reaches us wrapped by an intermediate layer.
+    """
+    fatal_type = getattr(duckdb, "FatalException", None)
+    if fatal_type is not None and isinstance(exc, fatal_type):
+        return True
+    return DATABASE_INVALIDATED_MESSAGE in str(exc)
+
+
+# Every live `DuckDBBackend`, so recovery can close all of a path's connections
+# — the necessary condition for DuckDB to evict the invalidated instance.
+# Weak, so a backend that goes out of scope is not kept alive by being here.
+_LIVE_BACKENDS: "weakref.WeakSet[DuckDBBackend]" = weakref.WeakSet()
+_FATAL_LOCK = threading.RLock()
+#: Set when a fatal is observed anywhere in this process; cleared by a
+#: successful recovery. Process-wide because the invalidation is.
+_FATAL_DB_ERROR: str | None = None
+
+
+def note_fatal_db_error(exc: BaseException) -> None:
+    """Record that a fatal happened, so surfaces stop claiming to be healthy."""
+    global _FATAL_DB_ERROR
+    with _FATAL_LOCK:
+        if _FATAL_DB_ERROR is None:
+            _FATAL_DB_ERROR = f"{type(exc).__name__}: {exc}".split("\n")[0]
+    logger.error(
+        "database instance invalidated by a fatal DuckDB error (%s: %s); every "
+        "connection in this process is now dead until it is re-established",
+        type(exc).__name__, str(exc).split("\n")[0],
+    )
+
+
+def fatal_db_error() -> str | None:
+    """The recorded fatal, or None. Cheap; safe to call from a request path."""
+    with _FATAL_LOCK:
+        return _FATAL_DB_ERROR
+
+
+def clear_fatal_db_error() -> None:
+    global _FATAL_DB_ERROR
+    with _FATAL_LOCK:
+        _FATAL_DB_ERROR = None
+
+
+def handle_if_fatal(exc: BaseException, *, what: str) -> bool:
+    """Whether ``exc`` was fatal; if so, record it and re-establish connections.
+
+    The hook for every broad `except Exception` that logs a failure and carries
+    on. Those handlers are correct for the errors they were written for and
+    catastrophic for this one, and the difference is invisible at the catch
+    site — which is how a fatal ends up swallowed by a `pass` on a background
+    thread while the request path quietly dies. Ask this first:
+
+        except Exception as exc:
+            if not handle_if_fatal(exc, what="the job"):
+                logger.warning("the job failed", exc_info=True)
+
+    Returns True when it handled a fatal (already logged, recovery attempted),
+    so the caller's ordinary logging is skipped rather than duplicated.
+    """
+    if not is_fatal_db_error(exc):
+        return False
+    note_fatal_db_error(exc)
+    if recover_invalidated_database():
+        logger.warning("%s: database connections re-established", what)
+    else:
+        logger.error(
+            "%s: the database could not be re-established; this process can no "
+            "longer read it. /health reports unhealthy until `tj serve` is "
+            "restarted and `tj doctor --repair` has run.", what,
+        )
+    return True
+
+
+def recover_if_fatal_noted(*, what: str) -> bool:
+    """Recover if a fatal was recorded anywhere in this process, however it was
+    caught. Returns whether a recovery ran.
+
+    **The swallow-proof backstop, and the reason it has to exist.**
+    `handle_if_fatal` only fires when the exception REACHES the handler that
+    calls it, and in this codebase a fatal from an analyzer's database write
+    crosses several broad `except Exception` handlers on its way out — the
+    per-analyzer one that records a failure and continues with the rest, and
+    the store one that keeps a pass alive. Any of them can absorb it, and
+    adding the classification to each is a game nobody wins: the next handler
+    someone writes reopens the hole silently.
+
+    Exception propagation is therefore the wrong channel. `note_fatal_db_error`
+    is called at the point the fatal is RECOGNISED, before it is re-raised, so
+    the process-wide record survives every handler that swallows the exception
+    itself. Call this from the `finally` of any long-running job and the
+    recovery happens whether or not the exception ever escaped.
+    """
+    if fatal_db_error() is None:
+        return False
+    logger.error(
+        "%s: a fatal DuckDB error was recorded during this pass; the exception "
+        "may have been absorbed by an intermediate handler. Recovering.", what,
+    )
+    if recover_invalidated_database():
+        logger.warning("%s: database connections re-established", what)
+    else:
+        logger.error(
+            "%s: the database could not be re-established; /health reports "
+            "unhealthy until `tj serve` is restarted.", what,
+        )
+    return True
+
+
+def recover_invalidated_database(*, repair: bool = True) -> bool:
+    """Re-establish every connection in this process; returns whether it worked.
+
+    Closes all registered backends' connections FIRST and only then reconnects
+    them, because a single surviving connection pins the invalidated instance
+    in DuckDB's per-path cache and every reconnect would hand back that same
+    dead instance (see the note above). In-memory backends are skipped: their
+    database IS their connection, so closing it discards the data, and there is
+    nothing on disk to reopen.
+
+    With ``repair``, rebuilds EVERY explicit index on the way back up.
+
+    **All of them, not just the ones the probe flags, and that is deliberate.**
+    The exception does not name the index that raised it, and
+    ``check_index_divergence`` compares particular values, so a clean verdict
+    from it is not a proof of soundness — measured on a real damaged database,
+    a sampled sweep found three of four damaged indexes and a repair driven by
+    that verdict left the table still raising the fatal on the next write.
+    Recovering into the same fatal is the one outcome this path must not have,
+    so it rebuilds the lot. That is affordable because the rebuild reads no
+    rows and moves no data: measured at ~1.1s for all fourteen indexes of a
+    3.9GB / 736k-row database, against a fault that otherwise 500s every route.
+    """
+    with _FATAL_LOCK:
+        backends = [b for b in _LIVE_BACKENDS if b.recoverable]
+        ok = True
+        rebuilt: list[str] = []
+        # Hold every backend's connection lock across teardown AND reopen, so
+        # no thread can be handed a cursor from the window in between. Without
+        # this, `conn` on another thread sees the bumped generation, calls
+        # `.cursor()` on the already-closed root connection, and either raises
+        # into a 500 or drops a write -- which would make the recovery path
+        # itself do the thing this whole change exists to prevent. `conn`
+        # blocks for the duration instead, which is the right trade: recovery
+        # is sub-second and the alternative is serving a dead handle.
+        with ExitStack() as locks:
+            for backend in backends:
+                locks.enter_context(backend._conn_lock)
+            for backend in backends:
+                backend._teardown_connections()
+            for backend in backends:
+                if not backend._reopen():
+                    ok = False
+            if ok and repair:
+                # One rebuild per database, not per backend: every registered
+                # backend on this path shares the instance we just reopened.
+                # Still under the locks: a half-repaired index set is no safer
+                # to hand out than a closed connection.
+                for backend in backends:
+                    try:
+                        faults, _unproven = check_index_divergence(backend.conn)
+                        if faults:
+                            logger.error(
+                                "index damage found while recovering: %s",
+                                "; ".join(f"{n} on {t} {r}" for n, t, r in faults),
+                            )
+                        rebuilt = repair_explicit_indexes(backend.conn)
+                    except duckdb.Error as exc:
+                        logger.error("index repair failed after recovery: %s", exc)
+                        ok = False
+                    break
+        if ok:
+            clear_fatal_db_error()
+            logger.warning(
+                "database connections re-established after a fatal DuckDB error; "
+                "rebuilt %d index(es) so the fault does not recur", len(rebuilt),
+            )
+        return ok
+
+
 # ---------------------------------------------------------------------------
 # DuckDBBackend
 # ---------------------------------------------------------------------------
@@ -1680,15 +2609,71 @@ _SESSION_TOTALS_ACCUMULATE = """
 """
 
 
+def _connect_bounded(db_path: str, memory_limit: str, threads: int):
+    """Open `db_path` with an explicit buffer-pool ceiling.
+
+    Every connection to the telemetry database goes through here — `__init__`
+    AND `_reopen`. That matters more than it looks: a bound applied only at
+    startup silently disappears the first time the backend recovers from a
+    fatal error, and the recovered daemon then runs unbounded with no symptom
+    until the machine is swapping. See `StorageConfig.memory_limit` for why the
+    default is small.
+
+    `temp_directory` is what makes the ceiling safe rather than fatal — past the
+    limit DuckDB spills there instead of raising — and it sits beside the
+    database so the spill lands on the volume already allotted to this tool. A
+    value DuckDB rejects must never make the database unopenable, so a bad
+    override degrades to the default rather than propagating.
+    """
+    # Annotated because duckdb's `config=` parameter is typed as an invariant
+    # dict over a union: an inferred dict[str, str] is rejected by mypy even
+    # though every value here is a str.
+    settings: dict[str, str | bool | int | float | list[str]] = {
+        "memory_limit": memory_limit or StorageConfig.memory_limit,
+        "threads": str(threads or StorageConfig.threads),
+        "temp_directory": str(Path(db_path).parent / "duckdb_temp"),
+    }
+    try:
+        return duckdb.connect(db_path, config=settings)
+    except duckdb.Error:
+        logger.warning(
+            "storage.memory_limit=%r / storage.threads=%r rejected by DuckDB; "
+            "falling back to %s / %s",
+            memory_limit, threads,
+            StorageConfig.memory_limit, StorageConfig.threads,
+        )
+        settings["memory_limit"] = StorageConfig.memory_limit
+        settings["threads"] = str(StorageConfig.threads)
+        return duckdb.connect(db_path, config=settings)
+
+
 class DuckDBBackend:
     """Concrete DuckDB implementation of StorageBackend."""
 
     def __init__(self, config: StorageConfig) -> None:
         db_path = Path(config.path).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = duckdb.connect(str(db_path))
+        self._db_path: str | None = str(db_path)
+        self._memory_limit = config.memory_limit
+        self._threads = config.threads
+        self._conn = _connect_bounded(str(db_path), config.memory_limit, config.threads)
         run_migrations(self._conn)
         self._local = threading.local()
+        # Every cursor `conn` has handed out. Recovery must close ALL of them —
+        # a `threading.local` cannot be enumerated from another thread, and one
+        # surviving connection is enough to keep an invalidated database
+        # instance alive in DuckDB's per-path cache (see `is_fatal_db_error`).
+        # `_generation` is how a thread notices its cursor belongs to a
+        # torn-down connection and lazily takes a fresh one.
+        self._cursors: list[duckdb.DuckDBPyConnection] = []
+        self._generation = 0
+        # Deliberately NOT `write_lock`. Connection lifecycle must not order
+        # against the write path: a writer that hits a fatal records it under
+        # `_FATAL_LOCK` while still on the write path, and recovery holds
+        # `_FATAL_LOCK` while tearing connections down — sharing one lock
+        # between the two would make that pair deadlock-able.
+        self._conn_lock = threading.RLock()
+        _LIVE_BACKENDS.add(self)
         # Serializes *writes* across threads. Reads use per-thread cursors and
         # stay lock-free (#124), but DuckDB uses optimistic concurrency control:
         # two transactions mutating the same table from different threads can
@@ -1721,10 +2706,78 @@ class DuckDBBackend:
         behavior is unchanged for them.
         """
         cur = getattr(self._local, "cursor", None)
-        if cur is None:
-            cur = self._conn.cursor()
+        if cur is None or getattr(self._local, "generation", None) != self._generation:
+            with self._conn_lock:
+                cur = self._conn.cursor()
+                self._cursors.append(cur)
             self._local.cursor = cur
+            self._local.generation = self._generation
         return cur
+
+    # -- connection health and recovery --
+    #
+    # See the module-level "Fatal errors and database invalidation" note for
+    # why recovery cannot be done by one backend alone, and why it works at all.
+
+    @property
+    def recoverable(self) -> bool:
+        """Whether this backend can be torn down and reopened from disk.
+
+        False for `InMemoryBackend`, whose database only exists inside its
+        connection — closing it would discard the data rather than recover it.
+        """
+        return self._db_path is not None
+
+    def check_health(self) -> bool:
+        """Whether this backend can still answer a query.
+
+        `SELECT 1` is enough: an invalidated instance fails it, which is what
+        makes a health probe able to tell "the process is up" apart from "the
+        process can still read its database". Never raises.
+        """
+        try:
+            self.conn.execute("SELECT 1").fetchone()
+        except Exception as exc:  # noqa: BLE001 - a probe reports, never raises
+            if is_fatal_db_error(exc):
+                note_fatal_db_error(exc)
+            return False
+        return True
+
+    def _teardown_connections(self) -> None:
+        """Close every connection this backend holds, ignoring close errors.
+
+        Errors are ignored deliberately: closing an already-invalidated handle
+        can itself raise, and a failure to close cleanly must not stop us from
+        closing the REST — the eviction only happens once they are all gone.
+        """
+        with self._conn_lock:
+            for cur in self._cursors:
+                try:
+                    cur.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._cursors.clear()
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            # Bump BEFORE reopening so any thread racing in on the old cursor
+            # is forced to take a fresh one rather than reusing a closed handle.
+            self._generation += 1
+
+    def _reopen(self) -> bool:
+        if self._db_path is None:
+            return False
+        try:
+            with self._conn_lock:
+                self._conn = _connect_bounded(
+                    self._db_path, self._memory_limit, self._threads,
+                )
+                run_migrations(self._conn)
+            return self.check_health()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("could not re-establish the database connection: %s", exc)
+            return False
 
     # -- writes --
 
@@ -1732,6 +2785,8 @@ class DuckDBBackend:
         # Named-column INSERT so future migrations adding columns don't break
         # positional-arg ordering (migration 4 added billing_account at the
         # end of the table, but we don't want to silently rely on that).
+        from tokenjam.core.optimize import ingest_watermark
+
         with self._write_lock:
             self.conn.execute(
                 "INSERT INTO spans ("
@@ -1763,6 +2818,7 @@ class DuckDBBackend:
                     span.pricing_source, span.sub_agent_type,
                 ],
             )
+        ingest_watermark.bump(1)
 
     def bulk_insert_spans(self, spans: Sequence[NormalizedSpan]) -> None:
         """Columnar bulk-append of many spans in a single vectorized statement.
@@ -1781,6 +2837,8 @@ class DuckDBBackend:
         """
         if not spans:
             return
+        from tokenjam.core.optimize import ingest_watermark
+
         # Write the NDJSON payload OUTSIDE the write lock (pure CPU/IO, no DB),
         # then hold the lock only for the single vectorized INSERT..SELECT.
         fd, path = tempfile.mkstemp(prefix="tj-spans-", suffix=".ndjson")
@@ -1791,6 +2849,60 @@ class DuckDBBackend:
                     fh.write("\n")
             with self._write_lock:
                 self.conn.execute(_BULK_SPAN_INSERT_SQL, [path])
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        # Upper bound, not the exact post-anti-join insert count: the
+        # anti-join can skip already-present span_ids, and counting precisely
+        # would mean a second query on the hot path for a signal that only
+        # needs "did anything happen". Overcounting only makes the watermark
+        # gate marginally more willing to fire — never less safe.
+        ingest_watermark.bump(len(spans))
+
+    def bulk_overlay_span_attrs(
+        self, updates: Sequence[tuple[str, str | None, str | None, dict | None]],
+    ) -> int:
+        """Fill `sub_agent_id`/`sub_agent_type`/`attributes` on EXISTING
+        spans, additively.
+
+        `updates` is `(span_id, sub_agent_id, sub_agent_type, attributes)`
+        tuples — the freshly re-parsed values for spans a caller already
+        knows are present in the store (e.g. a backfill re-walking
+        transcripts it has ingested before, or re-parsing now that
+        `[capture]` is on). `attributes` is the span's FULL freshly-parsed
+        attributes dict (or `None` to skip the content overlay for that
+        span); see `_SUBAGENT_OVERLAY_MATCH_PREDICATE` for why the merge can
+        never clobber a key the stored row already carries, scalar or JSON.
+        Returns the number of spans that actually changed (not
+        `len(updates)` — most calls offer values the row already has, which
+        is a no-op).
+        """
+        if not updates:
+            return 0
+        fd, path = tempfile.mkstemp(prefix="tj-subagent-overlay-", suffix=".ndjson")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                for span_id, sub_agent_id, sub_agent_type, attributes in updates:
+                    fh.write(json.dumps({
+                        "span_id": span_id,
+                        "sub_agent_id": sub_agent_id,
+                        "sub_agent_type": sub_agent_type,
+                        "attributes": attributes,
+                    }))
+                    fh.write("\n")
+            with self._write_lock:
+                # COUNT first, then the plain UPDATE (no RETURNING — see the
+                # module comment above `_BULK_SUBAGENT_OVERLAY_COUNT_SQL` for
+                # why). Both share `_SUBAGENT_OVERLAY_MATCH_PREDICATE` and run
+                # back-to-back under the write lock, so nothing else can
+                # change the matched set between the two.
+                changed = self.conn.execute(
+                    _BULK_SUBAGENT_OVERLAY_COUNT_SQL, [path],
+                ).fetchone()
+                self.conn.execute(_BULK_SUBAGENT_OVERLAY_UPDATE_SQL, [path])
+            return int(changed[0]) if changed else 0
         finally:
             try:
                 os.remove(path)
@@ -1953,9 +3065,26 @@ class DuckDBBackend:
                     session_id, agent_id, conversation_id, started_at, ended_at,
                     status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
                     tool_call_count, error_count, plan_tier, service_namespace,
-                    service_instance_id, cache_write_tokens, run_id, parent_session_id
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                    service_instance_id, cache_write_tokens, run_id, parent_session_id,
+                    source, task_statement_hash, dominant_model
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
                 ON CONFLICT (session_id) DO UPDATE SET
+                    -- `started_at` was absent from this list entirely, which
+                    -- made it WRITE-ONCE: whatever the first span to reach a
+                    -- session stamped was permanent, and no genuinely earlier
+                    -- span arriving later could correct it. Since only
+                    -- `ended_at` ever advanced, a session opened by an
+                    -- out-of-order or mis-stamped span stayed wrong forever —
+                    -- which is why bad session timestamps accumulated in a
+                    -- corpus instead of healing. A session starts when its
+                    -- EARLIEST observed span does, so take the minimum; the
+                    -- COALESCE keeps a NULL incoming value from erasing a
+                    -- stored one, since MIN semantics here must not be
+                    -- confused with "unknown wins".
+                    started_at = LEAST(
+                        sessions.started_at,
+                        COALESCE(EXCLUDED.started_at, sessions.started_at)
+                    ),
                     ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                     -- Refuse to downgrade a row the live path already marked
                     -- 'active' when the incoming write's own last-activity is
@@ -1985,7 +3114,14 @@ class DuckDBBackend:
                     service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
                     service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id),
                     run_id = COALESCE(EXCLUDED.run_id, sessions.run_id),
-                    parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id)
+                    parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id),
+                    -- Provenance and task identity are properties of the
+                    -- session as a WHOLE, fixed at its first observation —
+                    -- fill once, like plan_tier above, never flip a value a
+                    -- prior write already resolved.
+                    source = COALESCE(sessions.source, EXCLUDED.source),
+                    task_statement_hash = COALESCE(sessions.task_statement_hash, EXCLUDED.task_statement_hash),
+                    dominant_model = COALESCE(sessions.dominant_model, EXCLUDED.dominant_model)
                 """,
                 [
                     session.session_id, session.agent_id, session.conversation_id,
@@ -1995,6 +3131,7 @@ class DuckDBBackend:
                     session.plan_tier, session.service_namespace,
                     session.service_instance_id, session.cache_write_tokens,
                     session.run_id, session.parent_session_id,
+                    session.source, session.task_statement_hash, session.dominant_model,
                 ],
             )
 
@@ -2288,6 +3425,10 @@ class DuckDBBackend:
             clauses.append(f"status_code = ${idx}")
             params.append(filters.status)
             idx += 1
+        # The persona scope, applied HERE so every consumer of this WHERE — the
+        # row list, `count_traces`, and `get_trace_cost_stats`' outlier
+        # quartiles — covers the same population by construction.
+        add_persona_clause(clauses, filters.persona)
         where = " AND ".join(clauses) if clauses else "1=1"
         return where, params, idx
 
@@ -2436,13 +3577,31 @@ class DuckDBBackend:
         cols = [d[0] for d in cur.description]
         return [_row_to_span(r, cols) for r in rows]
 
+    def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None:
+        """Targeted single-span fetch (#653).
+
+        A WHERE span_id=? lookup so the span-detail lazy-load reads ONE row
+        instead of scanning + deserializing the whole trace's attributes on
+        every expand. `trace_id` is part of the predicate so the route's
+        404-on-unknown behavior stays scoped to the trace the user is viewing.
+        """
+        cur = self.conn.execute(
+            "SELECT * FROM spans WHERE trace_id = $1 AND span_id = $2 LIMIT 1",
+            [trace_id, span_id],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in cur.description]
+        return _row_to_span(row, cols)
+
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]:
         # SDK cost-attribution dimensions (tenant/feature/environment/prompt
         # version) — added alongside agent/model/day/tool. All four are plain
         # columns on `spans` (see migration 17).
         attribution_dims = ("tenant", "feature", "environment", "prompt_version")
         group_col_map = {
-            "day": "CAST(start_time AS DATE)",
+            "day": "CAST(start_time AT TIME ZONE 'UTC' AS DATE)",
             "agent": "agent_id",
             "model": "model",
             "tool": "tool_name",
@@ -2451,7 +3610,9 @@ class DuckDBBackend:
             "environment": "environment",
             "prompt_version": "prompt_template_version",
         }
-        group_expr = group_col_map.get(filters.group_by, "CAST(start_time AS DATE)")
+        group_expr = group_col_map.get(
+            filters.group_by, "CAST(start_time AT TIME ZONE 'UTC' AS DATE)"
+        )
 
         # gen_ai.tool.call spans are separate rows from the LLM completion
         # spans that carry model/cost/tokens (otel/otlp_parsing.py) — a span
@@ -2505,15 +3666,16 @@ class DuckDBBackend:
             clauses.append(f"prompt_template_version = ${idx}")
             params.append(filters.prompt_version)
             idx += 1
+        add_persona_clause(clauses, filters.persona)
         where = " AND ".join(clauses)
 
         # Cache-read + cache-write are summed alongside in/out so callers can
         # show the full token picture (cache-write is often the dominant cost
-        # driver yet was invisible above the DB — issue #17). call_count is
-        # the only genuinely honest metric for the "tool" grouping: tool-call
-        # spans carry no cost/tokens of their own — cost is attributed to the
-        # LLM completion span the tool call accompanied, not the tool
-        # invocation itself.
+        # driver yet was invisible above the DB before this column existed).
+        # call_count is the only genuinely honest metric for the "tool"
+        # grouping: tool-call spans carry no cost/tokens of their own — cost
+        # is attributed to the LLM completion span the tool call accompanied,
+        # not the tool invocation itself.
         token_cols = (
             "COALESCE(SUM(input_tokens), 0), "
             "COALESCE(SUM(output_tokens), 0), "
@@ -2591,6 +3753,7 @@ class DuckDBBackend:
             idx += 1
         if filters.unread:
             clauses.append("acknowledged = false")
+        add_persona_clause(clauses, filters.persona)
         where = " AND ".join(clauses) if clauses else "1=1"
         sql = (
             f"SELECT * FROM alerts WHERE {where} "
@@ -2810,12 +3973,14 @@ class DuckDBBackend:
 
     def get_window_cost_totals(
         self, since: datetime, until: datetime, agent_id: str | None = None,
+        persona: str | None = None,
     ) -> tuple[int, int, int, int, int, float]:
         clauses = ["start_time >= $1", "start_time < $2"]
         params: list = [since, until]
         if agent_id:
             clauses.append(f"agent_id = ${len(params) + 1}")
             params.append(agent_id)
+        add_persona_clause(clauses, persona)
         where = " AND ".join(clauses)
         row = self.conn.execute(
             f"SELECT COUNT(DISTINCT session_id) AS sessions, "
@@ -2836,11 +4001,16 @@ class DuckDBBackend:
     def get_cost_delta_by_group(
         self, group_col: str, current_since: datetime, current_until: datetime,
         prev_since: datetime, prev_until: datetime, top_n: int,
+        persona: str | None = None,
     ) -> list[dict]:
         # group_col is an internal, fixed identifier (never user input); the
         # allow-list keeps it that way so the interpolation below stays safe.
         if group_col not in ("agent_id", "model"):
             raise ValueError(f"Unsupported group_col {group_col!r}")
+        # Parameter-free, so it interpolates into the SQL below without
+        # disturbing the positional `$n` numbering that block depends on.
+        persona_clause = persona_agent_clause(persona)
+        persona_sql = f" AND {persona_clause}" if persona_clause else ""
         sql = f"""
             SELECT {group_col} AS grp,
                    COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
@@ -2855,7 +4025,7 @@ class DuckDBBackend:
                                           + cache_write_tokens ELSE 0 END), 0) AS prev_tokens
             FROM spans
             WHERE (start_time >= $3 AND start_time < $2)
-              AND {group_col} IS NOT NULL
+              AND {group_col} IS NOT NULL{persona_sql}
             GROUP BY {group_col}
             HAVING ABS(cur_cost - prev_cost) > 0.0001
             ORDER BY ABS(cur_cost - prev_cost) DESC
@@ -2872,18 +4042,103 @@ class DuckDBBackend:
             for r in rows
         ]
 
-    def delete_spans_before(self, cutoff: datetime) -> int:
-        result = self.conn.execute(
-            "SELECT COUNT(*) FROM spans WHERE start_time < $1", [cutoff]
-        ).fetchone()
-        count = result[0] if result else 0
+    def delete_spans_before(
+        self,
+        cutoff: datetime,
+        *,
+        retention_days: int | None = None,
+        analysis_span_days: int | None = None,
+    ) -> tuple[int, int]:
+        """Delete aged-out history AND write its ledger row, ATOMICALLY.
+
+        Returns ``(spans deleted, sessions deleted)``.
+
+        **The ledger row is written in the SAME TRANSACTION as the deletes, and
+        that is the point rather than a detail.** What this mechanism has to
+        guarantee is that a delete of the user's own history is observable after
+        the fact; a ledger the process can skip by dying between two commits
+        delivers that only on the happy path, which is exactly the path where
+        nobody needs it. This job runs from an apscheduler cron inside an ad-hoc
+        ``tj serve``, so being killed mid-run is an ordinary event — and a
+        completed delete with no trace is the precise failure the ledger exists
+        to make impossible. Either both land or neither does.
+
+        Three statements, in order:
+
+        1. Aged-out spans go.
+        2. Sessions the delete ORPHANED go with them. Deleting only from
+           ``spans`` used to leave parent ``sessions`` rows in place forever,
+           and those are not inert: ``data_span`` unions ``sessions.started_at``
+           into the day set it measures the available span from, so every orphan
+           went on asserting that a day carried data after that day's data was
+           destroyed — the deletion skewed the measure of its own aftermath. A
+           session goes only once it has NO spans left, which is strictly
+           narrower than "started before the cutoff": a long session straddling
+           the boundary keeps every span the cutoff spared, so deleting it would
+           discard live rows' parent. A pre-cutoff session that never had spans
+           goes too — it is aged-out history like any other, and leaving it
+           would let it keep asserting a day beyond the retention horizon.
+        3. The ledger row, with ``oldest_kept`` read after the deletes (visible
+           within the transaction) so it states what survived rather than what
+           was intended to.
+
+        **Both counts come from the DELETEs themselves, not from a preceding
+        ``COUNT(*)``.** DuckDB returns the affected-row count for a ``DELETE``,
+        and using it is what makes the ledger's figure the number of rows this
+        transaction actually removed rather than an estimate of how many it
+        expected to. A separate count is wrong even inside the transaction and
+        badly wrong outside it: an ingest committing an aged-out span between
+        the count and the delete would have that span destroyed while the ledger
+        persisted the smaller, earlier number. Deriving the figure from the
+        delete makes that race structurally impossible instead of merely narrow,
+        which matters because the entire purpose of this ledger is that it can
+        be trusted about what was destroyed.
+        """
         with self._write_lock:
-            self.conn.execute("DELETE FROM spans WHERE start_time < $1", [cutoff])
-        return count
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                span_row = self.conn.execute(
+                    "DELETE FROM spans WHERE start_time < $1", [cutoff]
+                ).fetchone()
+                spans_deleted = int(span_row[0]) if span_row else 0
+                session_row = self.conn.execute(
+                    "DELETE FROM sessions s WHERE s.started_at < $1 "
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM spans p WHERE p.session_id = s.session_id)",
+                    [cutoff],
+                ).fetchone()
+                sessions_deleted = int(session_row[0]) if session_row else 0
+                oldest_row = self.conn.execute(
+                    "SELECT MIN(start_time) FROM spans WHERE start_time IS NOT NULL"
+                ).fetchone()
+                self.conn.execute(
+                    "INSERT INTO retention_events (event_id, ran_at, cutoff, "
+                    "retention_days, analysis_span_days, spans_deleted, "
+                    "sessions_deleted, oldest_kept) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                    [
+                        str(uuid.uuid4()), utcnow(), cutoff, retention_days,
+                        analysis_span_days, spans_deleted, sessions_deleted,
+                        oldest_row[0] if oldest_row else None,
+                    ],
+                )
+            except Exception:
+                # A ledger row that cannot be written takes the delete down with
+                # it. Keeping the delete and merely logging the failure — which
+                # is what this used to do — produces exactly the state the
+                # ledger exists to prevent: history gone, nothing saying so.
+                self.conn.execute("ROLLBACK")
+                raise
+            self.conn.execute("COMMIT")
+
+        return spans_deleted, sessions_deleted
 
     def close(self) -> None:
-        # Closing the root connection tears down the database and all cursors.
-        self._conn.close()
+        # Every cursor explicitly, then the root connection. Closing the root
+        # alone does tear the cursors down, but DuckDB only evicts an
+        # invalidated instance from its per-path cache once no handle to it
+        # survives, and relying on GC for that makes recovery non-deterministic.
+        self._teardown_connections()
 
 
 # ---------------------------------------------------------------------------
@@ -2898,9 +4153,15 @@ class InMemoryBackend(DuckDBBackend):
         # connection share the same in-memory database, so the per-thread cursor
         # property (#124) works identically here — including cross-thread
         # visibility, which the threadpool-backed integration tests rely on.
+        # `_db_path = None` marks it unrecoverable: there is no file to reopen,
+        # so tearing the connection down would destroy the data, not restore it.
+        self._db_path = None
         self._conn = duckdb.connect(":memory:")
         run_migrations(self._conn)
         self._local = threading.local()
+        self._cursors = []
+        self._generation = 0
+        self._conn_lock = threading.RLock()
         # Inherited write methods take this lock (async-hooks concurrency, #124).
         self._write_lock = threading.RLock()
 

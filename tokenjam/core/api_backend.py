@@ -6,7 +6,7 @@ queries through the REST API.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, cast
+from typing import Any
 
 import httpx
 
@@ -76,6 +76,28 @@ class ApiBackend:
         resp.raise_for_status()
         return resp.json()
 
+    def _post(self, path: str, body: dict) -> dict:
+        """POST `body` as JSON to `path` and return the parsed JSON response."""
+        resp = self.client.post(path, json=body)
+        resp.raise_for_status()
+        return resp.json()
+
+    def fetch_ingested_session_ids(self, session_ids: list[str]) -> set[str]:
+        """Subset of `session_ids` present in the daemon's sessions table.
+
+        The serve-mode counterpart to `transcript_sync._ingested_session_ids`'s
+        direct SQL anti-join: when `tj serve` holds the DB write-lock the CLI
+        gets an `ApiBackend` with no `.conn`, so `tj backfill status` reported
+        `0 already ingested` on a fully-ingested install (#642). Routes the same
+        anti-join through the daemon that owns the connection.
+        """
+        if not session_ids:
+            return set()
+        data = self._post(
+            "/api/v1/sessions/ingested-ids", {"session_ids": session_ids}
+        )
+        return {str(s) for s in data.get("ingested", [])}
+
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
         params: dict[str, str | int] = {"limit": filters.limit, "offset": filters.offset}
         if filters.agent_id:
@@ -90,14 +112,14 @@ class ApiBackend:
             params["span_name"] = filters.span_name
         data = self._get("/api/v1/traces", params)
         return [
+            # `TraceRecord.start_time` is non-Optional (models.py) for the same
+            # reason `NormalizedSpan.start_time` is — see the guard in
+            # `_dict_to_span` below; the same lying `cast()` used to sit here.
             TraceRecord(
                 trace_id=t["trace_id"],
                 agent_id=t["agent_id"],
                 name=t["name"],
-                start_time=cast(
-                    datetime,
-                    datetime.fromisoformat(t["start_time"]) if t.get("start_time") else None,
-                ),
+                start_time=_require_start_time(t),
                 duration_ms=t.get("duration_ms"),
                 cost_usd=t.get("cost_usd"),
                 status_code=t.get("status_code", "ok"),
@@ -107,8 +129,28 @@ class ApiBackend:
         ]
 
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
+        # No ?attributes=false -> the route defaults to FULL spans, so the shim
+        # reconstructs complete spans (attributes intact) exactly as the DuckDB
+        # backend does. The light waterfall payload is opt-in and used only by
+        # the Lens UI (#653); do NOT add attributes=false here or exports and
+        # every other complete-span consumer silently lose captured content.
         data = self._get(f"/api/v1/traces/{trace_id}")
         return [_dict_to_span(s) for s in data.get("spans", [])]
+
+    def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None:
+        """Targeted single-span fetch over the daemon (#653).
+
+        Mirrors DuckDBBackend.get_span: hits the single-span endpoint (a WHERE
+        span_id=? lookup server-side) rather than pulling the whole trace.
+        Returns None on 404 so the route's 404-on-unknown contract holds.
+        """
+        try:
+            data = self._get(f"/api/v1/traces/{trace_id}/spans/{span_id}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        return _dict_to_span(data)
 
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]:
         params: dict[str, str] = {}
@@ -338,6 +380,7 @@ class ApiBackend:
         compare: str = "previous",
         agent_id: str | None = None,
         top_n: int = 5,
+        persona: str | None = None,
     ) -> dict:
         """
         Fetch a window-vs-window cost diff from tj serve. Mirrors
@@ -351,6 +394,8 @@ class ApiBackend:
         }
         if agent_id:
             params["agent_id"] = agent_id
+        if persona:
+            params["persona"] = persona
         return self._get(
             "/api/v1/cost/compare", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT
         )
@@ -509,6 +554,25 @@ class ApiBackend:
         self.client.close()
 
 
+def _require_start_time(d: dict) -> datetime:
+    """Parse a wire record's ``start_time``, or fail loudly if it's missing.
+
+    ``NormalizedSpan.start_time`` and ``TraceRecord.start_time`` are both
+    non-Optional by design (models.py): ingest already rejects any span with
+    no observed time rather than substituting a default, so a record the
+    daemon serialized always carries a real ``start_time``. A missing or
+    unparseable value here means the wire response itself is malformed, not
+    that the field is legitimately absent — fail loudly instead of passing a
+    `None` off as a `datetime` (a `cast()` used to paper over exactly that,
+    silently disabling the type checker for every downstream consumer that
+    dereferences `start_time` unguarded).
+    """
+    if not d.get("start_time"):
+        ident = d.get("span_id") or d.get("trace_id")
+        raise ValueError(f"record {ident!r} has no start_time in API response")
+    return datetime.fromisoformat(d["start_time"])
+
+
 def _dict_to_span(d: dict) -> NormalizedSpan:
     return NormalizedSpan(
         span_id=d["span_id"],
@@ -516,10 +580,7 @@ def _dict_to_span(d: dict) -> NormalizedSpan:
         name=d["name"],
         kind=SpanKind(d.get("kind", "internal")),
         status_code=SpanStatus(d.get("status_code", "ok")),
-        start_time=cast(
-            datetime,
-            datetime.fromisoformat(d["start_time"]) if d.get("start_time") else None,
-        ),
+        start_time=_require_start_time(d),
         parent_span_id=d.get("parent_span_id"),
         session_id=d.get("session_id"),
         agent_id=d.get("agent_id"),

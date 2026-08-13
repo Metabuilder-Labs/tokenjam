@@ -52,6 +52,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tokenjam.core.distill import is_tokenjam_invoke_cwd
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,6 +102,12 @@ class SyncReport:
     files_unreadable: int = 0
     disk_sessions: int = 0
     ingested_sessions: int = 0
+    #: True once the disk-vs-DB anti-join actually completed. Stays ``False``
+    #: when the ingested-id lookup could not run (e.g. the daemon holds the
+    #: write-lock and its HTTP shim call failed) — the ingested/missing/skipped
+    #: buckets are then meaningless and MUST NOT be rendered as a confident
+    #: "0 ingested · everything is ingested" (issue #642, Greptile P1).
+    verified: bool = True
     #: On disk, not in the DB, and carries at least one billable assistant turn.
     missing: list[DiskSession] = field(default_factory=list)
     #: On disk, not in the DB, but parses to zero spans (no assistant turn) —
@@ -141,6 +149,7 @@ class SyncReport:
             "files_unreadable": self.files_unreadable,
             "disk_sessions": self.disk_sessions,
             "ingested_sessions": self.ingested_sessions,
+            "verified": self.verified,
             "missing_count": self.missing_count,
             "skipped_empty_count": self.skipped_empty_count,
             "days_until_rotation": self.days_until_rotation(),
@@ -166,17 +175,20 @@ def _parse_ts(value: object) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _header_fields(path: Path) -> tuple[str | None, datetime | None]:
-    """Read the internal ``sessionId`` + first timestamp out of a transcript's
-    leading records WITHOUT parsing the whole file.
+def _header_fields(path: Path) -> tuple[str | None, datetime | None, str | None]:
+    """Read the internal ``sessionId`` + first timestamp + ``cwd`` out of a
+    transcript's leading records WITHOUT parsing the whole file.
 
     Deriving the id from content is the entire point: a nested
     ``subagents/agent-*.jsonl`` file has its own filename but its parent's
     ``sessionId``, so keying on the filename double-counts it as a separate
-    session.
+    session. ``cwd`` is read the same way so ``scan_disk_sessions`` can
+    exclude tokenjam's own internal model calls (see
+    ``core.distill.is_tokenjam_invoke_cwd``) without a second file open.
     """
     session_id: str | None = None
     started_at: datetime | None = None
+    cwd: str | None = None
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for index, line in enumerate(fh):
@@ -197,12 +209,16 @@ def _header_fields(path: Path) -> tuple[str | None, datetime | None]:
                         session_id = candidate
                 if started_at is None:
                     started_at = _parse_ts(record.get("timestamp"))
-                if session_id is not None and started_at is not None:
+                if cwd is None:
+                    candidate_cwd = record.get("cwd")
+                    if isinstance(candidate_cwd, str) and candidate_cwd:
+                        cwd = candidate_cwd
+                if session_id is not None and started_at is not None and cwd is not None:
                     break
     except OSError as exc:
         logger.debug("could not read transcript header %s: %s", path, exc)
-        return None, None
-    return session_id, started_at
+        return None, None, None
+    return session_id, started_at, cwd
 
 
 def scan_disk_sessions(
@@ -233,9 +249,16 @@ def scan_disk_sessions(
             if mtime < since:
                 continue
         scanned += 1
-        session_id, started_at = _header_fields(path)
+        session_id, started_at, cwd = _header_fields(path)
         if not session_id:
             unreadable += 1
+            continue
+        if is_tokenjam_invoke_cwd(cwd):
+            # tokenjam's own distill/presence model calls, not a session the
+            # user worked — see core.distill.is_tokenjam_invoke_cwd. Excluded
+            # here too (not just core.backfill's parse loop) so this reader,
+            # used by the reconciliation gap report, never counts one as
+            # "missing" and pulls it in via a catch-up backfill.
             continue
         try:
             project = path.relative_to(root).parts[0]
@@ -327,15 +350,38 @@ def reconcile_claude_code(
     report.files_unreadable = unreadable
     report.disk_sessions = len(sessions)
 
+    disk_ids = sorted(sessions)
     conn = getattr(db, "conn", None)
-    if conn is None:
-        logger.debug("reconcile: backend exposes no connection; nothing to compare")
-        return report
-
-    ingested = _ingested_session_ids(conn, sorted(sessions))
+    if conn is not None:
+        ingested = _ingested_session_ids(conn, disk_ids)
+    else:
+        # `tj serve` holds the DB write-lock, so the CLI got a connection-less
+        # HTTP shim (`ApiBackend`). Route the anti-join through the daemon that
+        # owns the connection rather than bailing to `0 already ingested` on a
+        # fully-ingested install (#642).
+        fetch = getattr(db, "fetch_ingested_session_ids", None)
+        if fetch is None:
+            logger.debug(
+                "reconcile: backend exposes no connection and no HTTP shim; "
+                "nothing to compare"
+            )
+            # Could not verify — do NOT let the empty buckets read as a
+            # confident "0 ingested · everything ingested" (#642 P1).
+            report.verified = False
+            return report
+        try:
+            ingested = fetch(disk_ids)
+        except Exception:
+            # Auth/connectivity/server/decode failure. Returning here with the
+            # buckets left at 0 would reprint the exact misleading status #642
+            # set out to kill, so mark the report unverified and let the caller
+            # surface an honest "couldn't verify" instead (Greptile P1).
+            logger.warning("reconcile: daemon ingested-id lookup failed", exc_info=True)
+            report.verified = False
+            return report
     report.ingested_sessions = len(ingested)
 
-    candidates = [sessions[sid] for sid in sorted(sessions) if sid not in ingested]
+    candidates = [sessions[sid] for sid in disk_ids if sid not in ingested]
     if not classify_empty:
         report.missing = candidates
         return report
@@ -483,9 +529,23 @@ def start_catch_up(
                 logger.warning("stale-active session sweep failed", exc_info=True)
             if on_done is not None:
                 on_done(result)
-        except Exception:
-            logger.warning("transcript catch-up failed", exc_info=True)
+        except Exception as exc:
+            # "Errors are logged, never raised" holds for a catch-up that
+            # failed. It must NOT hold for a DuckDB fatal: that invalidates the
+            # whole database instance rather than this thread's connection, so
+            # logging it as one job's warning leaves the request path dead with
+            # nothing reporting it.
+            from tokenjam.core.db import handle_if_fatal
+
+            if not handle_if_fatal(exc, what="transcript catch-up"):
+                logger.warning("transcript catch-up failed", exc_info=True)
         finally:
+            # Swallow-proof backstop, same reasoning as the analyzer cycle's:
+            # recovery keys off the process-wide record, not off this frame
+            # having caught the exception.
+            from tokenjam.core.db import recover_if_fatal_noted
+
+            recover_if_fatal_noted(what="transcript catch-up")
             if backend is not None:
                 try:
                     backend.close()

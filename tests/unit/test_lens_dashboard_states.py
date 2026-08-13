@@ -23,6 +23,7 @@ is unknown.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -190,9 +191,17 @@ def test_recoverable_tiles_are_derived_only_from_an_answer_we_hold(html):
 
 
 def _dashboard(html: str) -> str:
+    """``DashboardView``'s body, bounded by the next TOP-LEVEL declaration.
+
+    This used to end at a ``// Two lenses, one router`` comment, which vanished
+    with the dead Improve/Observe lens and took all four assertions below down
+    with it -- an extractor anchored on prose is only as durable as the prose.
+    A column-0 declaration is a structural boundary instead.
+    """
     start = html.index("function DashboardView")
-    end = html.index("// Two lenses, one router", start)
-    return html[start:end]
+    nxt = re.search(r"\n(?:function|const|class) ", html[start + 10:])
+    assert nxt, "no top-level declaration follows DashboardView; update this extractor"
+    return html[start:start + 10 + nxt.start()]
 
 
 def test_no_panel_waits_on_another_panel_s_endpoint(html):
@@ -252,7 +261,7 @@ def test_the_timeout_state_says_it_timed_out_and_offers_a_way_forward(html):
 
 
 def test_the_failure_state_says_it_failed_and_offers_a_retry(html):
-    assert "Couldn't scan for recoverable waste." in html
+    assert "Couldn't scan for optimization opportunities." in html
     assert "Try again" in html
 
 
@@ -291,7 +300,7 @@ def test_an_unreported_spend_field_does_not_become_a_zero_spend_tile(html):
     spend = html[html.index("function spendTileDisplay"):]
     spend = spend[:spend.index("function PlanBadge")]
     assert "const unknown = spendUsd == null;" in spend
-    assert "if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };" in spend
+    assert "if (unknown) return { label: 'Implied plan value', value: UNKNOWN_FIGURE };" in spend
     assert "value: unknown ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd)" in spend
 
 
@@ -319,12 +328,22 @@ def test_an_unknown_health_tile_says_which_kind_of_unknown_it_is(html):
 
 def test_every_health_tile_declares_the_status_of_its_source(html):
     # A tile without a status= defaults to 'ready' and would silently resume
-    # publishing derived zeros, so all five must pass one.
-    start = html.index('<div class="band-label">Health at a glance</div>')
+    # publishing derived zeros, so every one of them must pass one. The count is
+    # four since the "Agents drifting" tile was removed with the rest of the
+    # Drift surface (founder decision, un-surfaced not deleted): pinned as a
+    # number so a tile that arrives without a status is still caught.
+    start = html.index('<div class="section-band">Health at a glance</div>')
     end = html.index("<!-- The HERO", start)
     band = html[start:end]
-    assert band.count("<${HealthTile}") == 5
-    assert band.count("status=$") == 5
+    assert band.count("<${HealthTile}") == 4
+    assert band.count("status=$") == 4
+    # The removed tile, pinned absent: it published a figure and a reassuring
+    # caption ("within baseline") for a surface nothing else links to.
+    assert 'label="Agents drifting"' not in band
+    # Comment prose names the removed route to explain the removal, so the link
+    # check runs against code only.
+    band_code = re.sub(r"/\*.*?\*/", "", band, flags=re.S)
+    assert "#/drift" not in band_code
 
 
 def test_the_front_door_empty_card_requires_its_inputs_to_have_answered(html):
@@ -368,20 +387,23 @@ def test_the_pricing_qualifier_banner_is_gone(html):
     assert 'class="qualifier"' not in html
 
 
-def test_the_recoverable_waste_heading_has_no_estimated_badge(html):
-    # The amber "estimated" pill beside the "Recoverable waste" band heading
-    # was removed by product decision; the heading text itself is unchanged.
-    # The .estimated-tag CLASS survives (Optimize/Summarize still use it on
-    # their own per-analyzer tiles), so this pins the Dashboard heading's
-    # markup specifically rather than banning the class outright.
-    # The heading now also carries the scan's provenance + rescan control, so it
-    # spans several lines; the property being pinned is that no "estimated" pill
-    # sits beside the heading TEXT, not the exact one-line markup it used to have.
-    idx = html.index(">Recoverable waste<")
+def test_the_past_overspend_heading_has_no_estimated_badge(html):
+    # The amber "estimated" pill beside the triage band's heading was removed by
+    # product decision; the heading text itself ("Past overspend", renamed from
+    # "Recoverable waste") is unchanged otherwise. The .estimated-tag CLASS
+    # survives (Optimize/Summarize still use it on their own per-analyzer
+    # tiles), so this pins the Dashboard heading's markup specifically rather
+    # than banning the class outright.
+    # The heading text is followed by the band's own window statement
+    # ("· over the last N days"), so anchor on the text rather than on a
+    # closing bracket that no longer sits immediately after it. The heading
+    # uses the shared `.section-band` zone-heading primitive (lens redesign),
+    # not a page-local `.band-label`.
+    idx = html.index(">Opportunities to optimize token efficiency")
     heading = html[idx - 400:idx + 400]
-    assert "band-label" in heading
+    assert "section-band" in heading
     assert "estimated-tag" not in heading
-    assert 'Recoverable waste <span class="estimated-tag"' not in html
+    assert 'Opportunities to optimize token efficiency <span class="estimated-tag"' not in html
     assert "estimated-tag" in html  # still used elsewhere (Optimize/Summarize)
 
 
@@ -444,9 +466,12 @@ def test_the_shimmer_primitive_honors_reduced_motion(html):
 # now accept as an override, defaulting to fmtCost everywhere else.
 def _fmt_dash_usd_source() -> str:
     src = _UI.read_text(encoding="utf-8")
+    start = src.index("function roundToCents(n)")
+    end = src.index("\n}\n", start) + 2
+    round_block = src[start:end]
     start = src.index("function fmtDashUsd(v)")
     end = src.index("\n}\n", start) + 2
-    return src[start:end]
+    return round_block + "\n" + src[start:end]
 
 
 def _dash_usd(v):
@@ -551,6 +576,7 @@ def _dedup_source() -> str:
 
     return "\n".join([
         block("function fmtCost(usd)"),
+        block("function roundToCents(n)"),
         block("function fmtDashUsd(v)"),
         block("function fmtTokens(n)"),
         block("function fmtFramedDollar(v, framing, dollarFmt = fmtCost)"),
@@ -614,7 +640,7 @@ def test_spend_tile_display_is_deliberately_not_deduplicated():
     api = _run_dedup_js("spendTileDisplay(500, %s)" % _API_FRAMING)
     assert api == {"label": "Spend", "value": "$500.00"}
     sub = _run_dedup_js("spendTileDisplay(500, %s)" % _SUB_FRAMING)
-    assert sub == {"label": "Implied value", "value": "2.5× plan value"}
+    assert sub == {"label": "Implied plan value", "value": "2.5×"}
     assert _run_dedup_js("spendTileDisplay(500, %s)" % _LOCAL_FRAMING) is None
 
 

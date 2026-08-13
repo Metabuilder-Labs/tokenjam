@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Any
 
 from tokenjam.core.optimize.span_pricing import price_span
+from tokenjam.core.persona_scope import add_persona_clause
 
 #: Runtimes report a thinking/reasoning token count under these span-attribute
 #: keys (Codex writes ``reasoning_token_count``). Anthropic bills thinking as
@@ -42,9 +43,9 @@ PROJECTION_DAYS = 30.0
 #: construction footnote so no channel can print the dollar delta bare.
 AGENT_PRICE_BASIS = (
     "Each agent's own input, output, cache read and cache write tokens over the "
-    "candidate sessions, priced at its current model's published rates and "
+    "candidate sessions. Priced at its current model's published rates and "
     "repriced at the proposed model's rates. The difference is arithmetic on "
-    "measured tokens, given the switch; it is not a claim that the cheaper "
+    "measured tokens, given the switch. It is not a claim that the cheaper "
     "model answers as well."
 )
 
@@ -144,7 +145,7 @@ def thinking_share(thinking_tokens: int | None, output_tokens: int) -> float | N
 
 def thinking_tokens_by_session(
     conn: Any, since: datetime, until: datetime, agent_id: str | None,
-    *, main_thread_only: bool = False,
+    *, persona_scope: str | None = None, main_thread_only: bool = False,
 ) -> dict[str, int]:
     """Reported thinking/reasoning tokens per session, from span attributes.
 
@@ -164,6 +165,10 @@ def thinking_tokens_by_session(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     coalesce = " + ".join(
         f"COALESCE(TRY_CAST(json_extract_string(attributes, '$.{key}') AS BIGINT), 0)"

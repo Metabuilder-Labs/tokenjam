@@ -19,18 +19,21 @@ top-level). Advisory only — reads and reports, never writes.
 from __future__ import annotations
 
 import fnmatch
-import glob as _glob
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence
 
+from tokenjam.core import agent_config
 from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.core.summarize.detect import MIN_PROSE_WORDS, analyze
-from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO, tokens_saved
+from tokenjam.core.summarize.estimate import UNMEASURED_PRIOR_RATIO, tokens_saved
+from tokenjam.core.summarize.relocate import relocatable_content_chars
+from tokenjam.core.summarize.route import recommend_route
 
 if TYPE_CHECKING:
+    from tokenjam.core.agent_config import AgentConfigStore, ConfigRecord
     from tokenjam.core.config import TjConfig
 
 # Directories never descended into during a --recursive walk.
@@ -74,9 +77,7 @@ class Candidate:
     always_resident_tokens_saved: int = 0
     on_demand_tokens_saved: int = 0
     #: Source size of the always-resident portion (the whole file for an
-    #: ALWAYS-class one, the frontmatter for an on-demand one). The write-side
-    #: budget in ``core/optimize/write_budget`` measures the existing agent-file
-    #: footprint off this, so read and write price the same quantity.
+    #: ALWAYS-class one, the frontmatter for an on-demand one).
     always_resident_chars: int = 0
     #: The scan root this file was found under. ``path`` relative to it is the
     #: file's SLOT (``CLAUDE.md``, ``.claude/commands/ship.md``) — the same slot
@@ -84,6 +85,30 @@ class Candidate:
     #: identifies copies without assuming their bytes still agree. Empty for a
     #: global-scope file, which has no project root.
     scan_root: str = ""
+    #: Which route to a smaller file this candidate actually wants — see
+    #: ``core/summarize/route``. Compression is one of four routes to the
+    #: published size target and the only one that costs specificity, so a
+    #: rule-heavy instruction file is flagged as a PRUNE candidate rather than
+    #: being offered compression as though it were the obvious move. The full
+    #: user-facing reasoning is NOT carried per candidate (it is a paragraph and
+    #: a corpus scan holds hundreds of these); surfaces render it via
+    #: `route.recommend_route` for the one file the user is looking at.
+    reduction_route: str = ""
+    #: Share of this file's prose words living in discrete directives — the
+    #: evidence behind ``reduction_route``, carried so a consumer can show the
+    #: evidence and not only the verdict.
+    directive_share: float = 0.0
+    #: True when this rule already declares `paths:` frontmatter, so it is never
+    #: told to path-scope itself. Advice only; deliberately does not reprice it.
+    already_path_scoped: bool = False
+    #: Content characters this file would shed by RELOCATING its reference
+    #: sections into a non-loaded document — net of the pointer stubs left
+    #: behind, and zero unless the classifier is confident (see
+    #: ``core/summarize/relocate`` and ``core/summarize/classify``). A different
+    #: OPERATION on the same file, not an addition to ``est_tokens_saved``:
+    #: relocating a section and then compressing it would price the same text
+    #: twice (Critical Rule 27), so consumers pick one, never a sum.
+    relocatable_content_chars: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -102,7 +127,20 @@ class Candidate:
             "on_demand_tokens_saved": self.on_demand_tokens_saved,
             "always_resident_chars": self.always_resident_chars,
             "scan_root": self.scan_root,
+            "reduction_route": self.reduction_route,
+            "directive_share": round(self.directive_share, 4),
+            "already_path_scoped": self.already_path_scoped,
+            "relocatable_content_chars": self.relocatable_content_chars,
+            "relocatable_tokens": self.relocatable_tokens,
         }
+
+    @property
+    def relocatable_tokens(self) -> int:
+        """One-time always-resident token reduction from relocating, on the
+        shared chars->tokens constant so it is comparable with
+        ``est_tokens_saved``."""
+        from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
+        return max(0, round(self.relocatable_content_chars / CHARS_PER_TOKEN))
 
 
 @dataclass(frozen=True)
@@ -258,8 +296,22 @@ def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
     # two halves of the real text rather than apportioned by a ratio: only the
     # always-resident half is worth (sessions x calls), the on-demand half is
     # worth (invocations). See core/summarize/load_semantics.
-    load_class = load_semantics.classify(str(path))
+    load_class = load_semantics.classify(str(path), text)
     resident_text, on_demand_text = load_semantics.split_always_resident(text, load_class)
+    # Why this file is long, and therefore which route to a smaller one it
+    # wants. Compression is only one of four, and the only one that costs
+    # specificity — so a rule-heavy instruction file is not offered compression
+    # as though it were the obvious move. Diagnosis only; nothing is written.
+    advice = recommend_route(text=text, load_class=load_class)
+    # How much of this file is REFERENCE that could be moved out wholesale
+    # instead of compressed in place. Measured here, where the text is already
+    # in hand, rather than by a second read in the analyzer. Only meaningful
+    # for an always-resident file: relocating a skill BODY saves nothing,
+    # because the body is not resident until it is invoked.
+    relocatable = (
+        relocatable_content_chars(text)
+        if load_class == load_semantics.ALWAYS else 0
+    )
     return Candidate(
         scan_root=str(scan_root) if scan_root is not None else "",
         path=str(path), prose_words=b.prose_words, total_chars=b.total_chars,
@@ -270,6 +322,9 @@ def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
         always_resident_tokens_saved=tokens_saved(analyze(resident_text), ratio),
         on_demand_tokens_saved=tokens_saved(analyze(on_demand_text), ratio),
         always_resident_chars=len(resident_text),
+        reduction_route=advice.route, directive_share=advice.directive_share,
+        already_path_scoped=advice.already_path_scoped,
+        relocatable_content_chars=relocatable,
     )
 
 
@@ -285,54 +340,92 @@ def _pricing_mode(config: "TjConfig | None") -> str:
 # Target enumeration
 # --------------------------------------------------------------------------- #
 
-def _expand_home(raw: str, home: Path | None) -> str:
-    """Expand a leading `~` against `home`, or the real home when None.
+# WHERE THE CATALOG IS ENUMERATED, AND WHY IT IS NOT HERE ANY MORE.
+#
+# `_global_targets` and `_project_targets` used to expand the catalog inline,
+# at scan time, with `prompt_bloat` keeping a second near-identical pair of
+# helpers doing the same expansion a different way. Both now come through
+# `core/agent_config` — `catalog_global_paths` / `catalog_project_paths` — so
+# "the catalog is the source of truth for which paths count" is enforced by
+# there being one expander rather than by two modules agreeing to behave.
+#
+# The walk below is still the only thing that can DISCOVER a file. What changed
+# is that its output is INGESTED (path, size, token count, content hash, last
+# seen) and this scan then reads the population back out of the store, so a
+# consumer can answer "what config is present and how big is it" without a stat
+# call, and so the MCP schema measurement has somewhere to live between runs.
 
-    `home` is the analyzer scope's home (see `core/optimize/scope.py`). The
-    catalog's global paths span several agent homes (`~/.claude`, `~/.gemini`,
-    `~/.codex`), so scoping them means redirecting `~` itself — anything
-    narrower would leave most of the catalog reading the operator's real files
-    while a `--projects-root` was in force.
+
+def _ingest_and_read(
+    store: "AgentConfigStore",
+    records: "list[ConfigRecord]",
+    *,
+    scope: str,
+    root: str = "",
+) -> list[Path]:
+    """Store ``records``, then read that same population back, in scan order.
+
+    The read is filtered on the pass's own timestamp AND its root. A persistent
+    store holds every root ever scanned, so an unfiltered read would hand this
+    scan files from a repo the caller never asked about — the stored table has
+    to answer the same question the live walk answered, not a broader one.
     """
-    if home is None:
-        return os.path.expanduser(raw)
-    if raw == "~":
-        return str(home)
-    if raw.startswith("~/"):
-        return str(home / raw[2:])
-    return raw
+    if not records:
+        return []
+    at = records[0].last_seen
+    store.upsert(records)
+    return [Path(r.path) for r in store.select(
+        kind=agent_config.KIND_INSTRUCTION, scope=scope, root=root, seen_at=at,
+    )]
 
 
-def _global_targets(home: Path | None = None) -> list[Path]:
-    """Catalog global/system paths ("~" expanded; glob patterns expanded)."""
-    out: list[Path] = []
-    for raw in load_catalog().global_paths:
-        ep = _expand_home(raw, home)
-        if any(ch in ep for ch in "*?["):
-            # recursive=True so a `**` in a catalog global path (e.g.
-            # `~/.claude/rules/**/*.md`) descends; without it `glob` treats `**`
-            # as a plain `*` and sees only the top level of a nested rule tree.
-            out.extend(Path(x) for x in sorted(_glob.glob(ep, recursive=True)))
-        else:
-            out.append(Path(ep))
-    return out
+def _global_targets(
+    store: "AgentConfigStore", home: Path | None = None,
+) -> list[Path]:
+    """Catalog global/system paths that exist, ingested then read back."""
+    return _ingest_and_read(
+        store,
+        agent_config.scan_instruction_files(
+            home=home, include_global=True, catalog=load_catalog(),
+        ),
+        scope=agent_config.SCOPE_GLOBAL,
+    )
 
 
-def _project_targets(root: Path, ext_set: set[str]) -> Iterator[Path]:
+def _project_targets(
+    store: "AgentConfigStore", root: Path, ext_set: set[str],
+) -> list[Path]:
     """Catalog names + globs at ``root`` (always); plus, when ``ext_set`` is
-    non-empty (the net is open), every root-level file with a matching extension."""
-    cat = load_catalog()
-    for name in sorted(cat.project_files):
-        yield root / name
-    for pattern in cat.project_globs:
-        yield from sorted(root.glob(pattern))
-    if ext_set:
-        try:
-            for p in sorted(root.iterdir()):
-                if p.is_file() and p.suffix.lower() in ext_set:
-                    yield p
-        except OSError:
-            pass
+    non-empty (the net is open), every root-level file with a matching
+    extension. Ingested, then read back."""
+    return _ingest_and_read(
+        store,
+        agent_config.scan_instruction_files(
+            roots=[root], include_global=False, extra_exts=ext_set,
+            catalog=load_catalog(),
+        ),
+        scope=agent_config.SCOPE_PROJECT, root=str(root),
+    )
+
+
+def _ingest_walked(
+    store: "AgentConfigStore", root: Path, paths: list[Path],
+) -> list[Path]:
+    """A ``--recursive`` walk's own output, ingested on the same terms.
+
+    A widened walk finds files the catalog does not name, and they go into the
+    store too: the point of the table is that it holds the config surface that
+    was actually looked at, not a re-derivation of what the catalog would have
+    predicted.
+    """
+    return _ingest_and_read(
+        store,
+        agent_config.scan_instruction_files(
+            include_global=False,
+            extra_paths=[(p, agent_config.SCOPE_PROJECT, root) for p in paths],
+        ),
+        scope=agent_config.SCOPE_PROJECT, root=str(root),
+    )
 
 
 def _walk_targets(root: Path, ext_set: set[str]) -> tuple[list[Path], bool]:
@@ -388,11 +481,12 @@ def list_candidates(
     repo: bool = False,
     include_global: bool = True,
     min_prose_words: int = MIN_PROSE_WORDS,
-    ratio: float = DEFAULT_TARGET_RATIO,
+    ratio: float = UNMEASURED_PRIOR_RATIO,
     extra_exts: Iterable[str] = (),
     home: "Path | None" = None,
     project_root: "Path | None" = None,
     project_roots: "Sequence[str | os.PathLike[str]] | None" = None,
+    store: "AgentConfigStore | None" = None,
 ) -> ScanResult:
     """Find summarize candidates per DEC-020/021. Advisory: reads only, never writes.
 
@@ -423,8 +517,15 @@ def list_candidates(
     ``project_root`` and ``project_roots`` never both apply: a caller supplying
     an explicit root list has already decided the population, and
     ``project_root`` is the fallback starting point for when it has not.
+
+    ``store`` is where the enumerated population is INGESTED (``core/
+    agent_config``) and then read back from. It defaults to a fresh in-memory
+    store, so a caller with no database gets exactly the enumeration the walk
+    produced and nothing is persisted; the optimize analyzer passes a
+    DuckDB-backed one so the config surface this scan looked at outlives the run.
     """
     mode = _pricing_mode(config)
+    store = store if store is not None else agent_config.InMemoryAgentConfigStore()
     extra = {e for e in (_norm_ext(x) for x in extra_exts) if e}
     # The net opens to all-md (+ extras) the moment ANY widening input is given.
     widened = (path is not None) or recursive or repo or bool(extra)
@@ -449,10 +550,9 @@ def list_candidates(
     # 1) Globals (the floor) — always catalog prompts, unless suppressed.
     globals_checked = 0
     if include_global:
-        for gp in _global_targets(home):
-            if gp.exists():
-                globals_checked += 1
-                _add(gp, "global")
+        for gp in _global_targets(store, home):
+            globals_checked += 1
+            _add(gp, "global")
 
     # 2) Project scope.
     explicit = path is not None
@@ -486,7 +586,7 @@ def list_candidates(
             root_used = walk_root
             roots_scanned = 1
             paths, walk_capped = _walk_targets(walk_root, ext_set)
-            for p in paths:
+            for p in _ingest_walked(store, walk_root, paths):
                 _add(p, "path" if explicit else "repo", walk_root)
     elif project_roots is not None:
         # Corpus-wide project scope: the same catalog-default net, once per root.
@@ -495,7 +595,7 @@ def list_candidates(
             if not scan_root.is_dir():
                 continue
             roots_scanned += 1
-            for p in _project_targets(scan_root, ext_set):
+            for p in _project_targets(store, scan_root, ext_set):
                 _add(p, "project", scan_root)
         root_used = None
     else:
@@ -511,7 +611,7 @@ def list_candidates(
             scope = "path" if explicit else "project"
         root_used = scope_root
         roots_scanned = 1
-        for p in _project_targets(scope_root, ext_set):
+        for p in _project_targets(store, scope_root, ext_set):
             _add(p, scope, scope_root)
 
     # Sectioned sort (DEC-021, refined): what the user asked for first — the scanned

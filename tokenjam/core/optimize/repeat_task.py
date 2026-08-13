@@ -85,6 +85,31 @@ def normalize_task_statement(prompt: str) -> str:
     return _PATH_RE.sub("<path>", text)
 
 
+def hash_task_statement(prompt: str | None) -> str | None:
+    """One-way fingerprint of a session's first user prompt, safe to persist
+    on the `sessions` row (`SessionRecord.task_statement_hash`) unlike the raw
+    prompt or even `normalize_task_statement`'s masked-but-still-readable
+    output — the masking above leaves enough of the sentence intact to be
+    legible (only ids/paths/numbers are replaced), so it is not itself safe
+    for a column every read path can see.
+
+    Hashes the NORMALIZED statement, not the raw one: two invocations of the
+    same templated task should collide (the entire point of clustering),
+    which only holds if the ids/paths/numbers are masked out FIRST. Not
+    project-scoped — callers needing `task_cluster_key`'s project-scoping
+    combine this with the session's own already-stored project field rather
+    than duplicating that logic into the hash.
+
+    Returns None for an empty/missing prompt so "no prompt captured" and "hash
+    of an empty string" are never confused.
+    """
+    normalized = normalize_task_statement(prompt or "")
+    if not normalized:
+        return None
+    import hashlib
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+
+
 #: A per-ticket / per-task worktree is the same project as its parent repo, and
 #: splitting on it would shatter every cluster the harness generates.
 _WORKTREE_SUFFIX_RE = re.compile(r"(-wt|\.wt)?-ticket-\d+$")

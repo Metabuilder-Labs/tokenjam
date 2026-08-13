@@ -87,7 +87,7 @@ class TestAddProjectRequiresExistingConfig:
         )
         monkeypatch.delenv("TJ_CONFIG", raising=False)
 
-        res = _run(repo, ["--add-project", "--project", "myproj"])
+        res = _run(repo, ["--add-project"])
 
         assert res.exit_code != 0
         assert "tj onboard" in res.output
@@ -104,13 +104,15 @@ class TestAddProjectRegistersAgent:
         )
         monkeypatch.delenv("TJ_CONFIG", raising=False)
 
-        res = _run(repo, ["--add-project", "--project", "widgets"])
+        res = _run(repo, ["--add-project"])
 
         assert res.exit_code == 0, res.output
         cfg = load_config(str(global_config))
         assert "claude-code-widgets-api" in cfg.agents
-        assert cfg.agents["claude-code-widgets-api"].project == "widgets"
-        assert "widgets" in res.output
+        # No override exists anymore — the project name is always the
+        # derived one for a brand-new agent.
+        assert cfg.agents["claude-code-widgets-api"].project == "widgets-api"
+        assert "widgets-api" in res.output
         assert "claude-code-widgets-api" in _strip_ws(res.output)
 
     def test_no_plan_budget_or_backfill_prompt(self, tmp_path, monkeypatch):
@@ -124,7 +126,7 @@ class TestAddProjectRegistersAgent:
         )
         monkeypatch.delenv("TJ_CONFIG", raising=False)
 
-        res = _run(repo, ["--add-project", "--project", "widgets"])
+        res = _run(repo, ["--add-project"])
 
         assert res.exit_code == 0, res.output
         normalized_output = _normalize_output(res.output)
@@ -153,7 +155,7 @@ class TestAddProjectRegistersAgent:
             "tokenjam.cli.cmd_onboard._resolve_backfill_scope", _boom, raising=False,
         )
         monkeypatch.setattr(
-            "tokenjam.cli.cmd_onboard._print_review_inbox_pointer", _boom, raising=False,
+            "tokenjam.cli.cmd_onboard._print_next_steps_nudge", _boom, raising=False,
         )
         monkeypatch.setattr(
             "tokenjam.cli.cmd_onboard._install_claude_wrapper", _boom, raising=False,
@@ -162,12 +164,18 @@ class TestAddProjectRegistersAgent:
             "tokenjam.cli.cmd_onboard._install_daemon", _boom, raising=False,
         )
 
-        res = _run(repo, ["--add-project", "--project", "widgets"])
+        res = _run(repo, ["--add-project"])
         assert res.exit_code == 0, res.output
 
 
 class TestAddProjectIdempotent:
-    def test_rerun_updates_namespace_in_place(self, tmp_path, monkeypatch):
+    def test_rerun_respects_an_existing_hand_entered_namespace(self, tmp_path, monkeypatch):
+        """--project (and the interactive prompt it fed) are gone — an
+        existing agent may carry a namespace from before that removal that
+        differs from the folder-derived one. Re-running --add-project must
+        NOT silently rewrite it: doing so would orphan the agent's dashboard
+        history under a new identity, a data-loss-shaped bug even though no
+        rows are deleted."""
         repo = tmp_path / "repo"
         repo.mkdir(parents=True)
         global_config = _write_config(
@@ -182,13 +190,35 @@ class TestAddProjectIdempotent:
         )
         monkeypatch.delenv("TJ_CONFIG", raising=False)
 
-        res = _run(repo, ["--add-project", "--project", "new-namespace"])
+        res = _run(repo, ["--add-project"])
 
         assert res.exit_code == 0, res.output
         cfg = load_config(str(global_config))
-        assert cfg.agents["claude-code-widgets-api"].project == "new-namespace"
+        assert cfg.agents["claude-code-widgets-api"].project == "old-namespace"
         # Only one agent entry — re-registering doesn't duplicate it.
         assert len(cfg.agents) == 1
+
+    def test_rerun_fills_a_namespace_for_a_new_agent_with_none_yet(self, tmp_path, monkeypatch):
+        """Distinguishes "respect existing" from "never write" — an agent
+        entry that exists but has no project set yet (e.g. hand-edited, or
+        created by another surface) still gets the derived name filled in."""
+        repo = tmp_path / "repo"
+        repo.mkdir(parents=True)
+        global_config = _write_config(
+            tmp_path / "home" / ".config" / "tj" / "config.toml",
+            agents={"claude-code-widgets-api": AgentConfig()},
+        )
+        _patch_search_paths(monkeypatch, global_config)
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard._derive_project_name", lambda: "widgets-api",
+        )
+        monkeypatch.delenv("TJ_CONFIG", raising=False)
+
+        res = _run(repo, ["--add-project"])
+
+        assert res.exit_code == 0, res.output
+        cfg = load_config(str(global_config))
+        assert cfg.agents["claude-code-widgets-api"].project == "widgets-api"
 
     def test_rerun_preserves_other_agent_fields(self, tmp_path, monkeypatch):
         """Re-registering must not clobber budget/description already set on
@@ -213,18 +243,20 @@ class TestAddProjectIdempotent:
         )
         monkeypatch.delenv("TJ_CONFIG", raising=False)
 
-        res = _run(repo, ["--add-project", "--project", "new-namespace"])
+        res = _run(repo, ["--add-project"])
 
         assert res.exit_code == 0, res.output
         cfg = load_config(str(global_config))
         agent = cfg.agents["claude-code-widgets-api"]
-        assert agent.project == "new-namespace"
+        assert agent.project == "old-namespace"
         assert agent.description == "existing agent"
         assert agent.budget.daily_usd == 5.0
 
 
-class TestAddProjectPromptsOnlyForNamespace:
-    def test_project_flag_skips_interactive_prompt(self, tmp_path, monkeypatch):
+class TestAddProjectNeverPrompts:
+    def test_never_calls_click_prompt(self, tmp_path, monkeypatch):
+        """The project name is derived unconditionally now — no interactive
+        prompt exists to skip."""
         repo = tmp_path / "repo"
         repo.mkdir(parents=True)
         global_config = _write_config(tmp_path / "home" / ".config" / "tj" / "config.toml")
@@ -235,11 +267,11 @@ class TestAddProjectPromptsOnlyForNamespace:
         monkeypatch.delenv("TJ_CONFIG", raising=False)
 
         def _boom_prompt(*a, **k):
-            raise AssertionError("click.prompt should not be called with --project set")
+            raise AssertionError("click.prompt should never be called by --add-project")
 
         monkeypatch.setattr("click.prompt", _boom_prompt)
 
-        res = _run(repo, ["--add-project", "--project", "widgets"])
+        res = _run(repo, ["--add-project"])
         assert res.exit_code == 0, res.output
 
 
@@ -261,13 +293,13 @@ class TestAddProjectHonorsTjConfig:
         )
 
         res = _run(
-            repo, ["--add-project", "--project", "widgets"],
+            repo, ["--add-project"],
             env={"TJ_CONFIG": str(custom_config)},
         )
 
         assert res.exit_code == 0, res.output
         cfg = load_config(str(custom_config))
-        assert cfg.agents["claude-code-widgets-api"].project == "widgets"
+        assert cfg.agents["claude-code-widgets-api"].project == "widgets-api"
         # Rich may line-wrap the path, so normalize output to make matching
         # wrap-independent rather than relying on lucky console width.
         assert "tj-config.toml" in _strip_ws(res.output)
@@ -284,7 +316,7 @@ class TestAddProjectHonorsTjConfig:
         missing = tmp_path / "does-not-exist.toml"
 
         res = _run(
-            repo, ["--add-project", "--project", "widgets"],
+            repo, ["--add-project"],
             env={"TJ_CONFIG": str(missing)},
         )
 
@@ -316,12 +348,12 @@ class TestAddProjectUsesProjectLocalConfigWhenPresent:
                 global_config,
             ])
             res = runner.invoke(
-                cmd_onboard, ["--add-project", "--project", "widgets"], obj={},
+                cmd_onboard, ["--add-project"], obj={},
             )
 
             assert res.exit_code == 0, res.output
             local_cfg = load_config(str(local_config_path))
-            assert local_cfg.agents["claude-code-widgets-api"].project == "widgets"
+            assert local_cfg.agents["claude-code-widgets-api"].project == "widgets-api"
             # The global file must be untouched.
             global_cfg = load_config(str(global_config))
             assert "claude-code-widgets-api" not in global_cfg.agents

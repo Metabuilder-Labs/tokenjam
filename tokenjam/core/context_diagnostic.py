@@ -78,6 +78,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Honesty caveat surfaced verbatim next to the headline (CLAUDE.md Rule 14).
 CONTEXT_HONESTY_CAVEAT = (
@@ -534,6 +535,7 @@ def compute_context_diagnostic(
     until: datetime,
     *,
     agent_id: str | None = None,
+    persona_scope: str | None = None,
     tool_inputs_captured: bool = False,
     prompts_captured: bool = False,
     tool_outputs_captured: bool = False,
@@ -564,7 +566,9 @@ def compute_context_diagnostic(
         tool_outputs_captured=tool_outputs_captured,
     )
 
-    turns = load_turn_compositions(conn, since, until, agent_id)
+    turns = load_turn_compositions(
+        conn, since, until, agent_id, persona_scope=persona_scope,
+    )
     if not turns:
         return result
 
@@ -616,6 +620,7 @@ def load_turn_compositions(
     until: datetime,
     agent_id: str | None,
     *,
+    persona_scope: str | None = None,
     ordered: bool = False,
     with_tool_activity: bool = False,
 ) -> list[TurnComposition]:
@@ -633,6 +638,14 @@ def load_turn_compositions(
     ``delegates`` flag — attributing each tool span to the nearest preceding turn
     in its session (the same span data ``tj context`` already reads, keyed
     finer). Both are opt-in so the diagnostic path pays for neither.
+
+    ``persona_scope`` narrows the rows to one side of the dashboard's persona
+    picker — see ``core/persona_scope.py``. It is threaded here rather than
+    applied by each caller because two analyzers (``downsize`` and ``resend``)
+    and the quota audit all price these same turns: a scope applied at three
+    call sites is three chances to publish a whole-corpus figure under a
+    persona label. ``None``, the default, is the whole corpus, which is what
+    the persona-blind ``tj context`` diagnostic wants.
     """
     clauses = [
         "name = $1",
@@ -644,6 +657,7 @@ def load_turn_compositions(
     if agent_id:
         clauses.append("agent_id = $" + str(len(params) + 1))
         params.append(agent_id)
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     # Select the real `sub_agent_id` column — NOT `agent_id`. This row's
     # `TurnComposition.sub_agent_id` is the Task-subagent attribution the #60
@@ -680,7 +694,9 @@ def load_turn_compositions(
         )
 
     if with_tool_activity:
-        _attach_tool_activity(conn, since, until, agent_id, turns)
+        _attach_tool_activity(
+            conn, since, until, agent_id, turns, persona_scope=persona_scope,
+        )
     if ordered:
         turns.sort(key=lambda t: (t.session_id, _turn_sort_key(t.start_time)))
     return turns
@@ -701,6 +717,8 @@ def _attach_tool_activity(
     until: datetime,
     agent_id: str | None,
     turns: list[TurnComposition],
+    *,
+    persona_scope: str | None = None,
 ) -> None:
     """Interleave tool spans onto the turn timeline (design §2.4 Option B).
 
@@ -720,6 +738,11 @@ def _attach_tool_activity(
     if agent_id:
         clauses.append("agent_id = $" + str(len(params) + 1))
         params.append(agent_id)
+    # SAME scope as the turns these spans are attributed to. A tool span from a
+    # session outside the scope has no turn here to attach to anyway, but
+    # leaving it unscoped would make the fan-out counts depend on rows the
+    # caller was told are excluded.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     tool_rows = conn.execute(
         "SELECT session_id, tool_name, start_time FROM spans WHERE " + where

@@ -373,7 +373,7 @@ def test_agent_persona_mix_classifies_by_claude_code_prefix():
         ("claude-code-my-project",), ("claude-code-other",), ("sdk-agent-x",),
     ]
     result = agent_persona_mix(conn, agent_id="agent-x")
-    assert result == {"claude_code": 2, "other": 1}
+    assert result == {"claude-code": 2, "other": 1}
     sql, params = conn.execute.call_args[0]
     assert "agent_id = $" in sql
     assert params == ["agent-x"]
@@ -392,7 +392,7 @@ def test_agent_persona_mix_margin_cases_match_is_interactive_coding_agent():
         ("claude-code",), ("codex",), ("codex-cli-session",), ("sdk-agent-x",),
     ]
     result = agent_persona_mix(conn)
-    assert result == {"claude_code": 3, "other": 1}
+    assert result == {"claude-code": 3, "other": 1}
 
 
 def test_agent_persona_mix_empty_when_no_sessions():
@@ -402,22 +402,22 @@ def test_agent_persona_mix_empty_when_no_sessions():
 
     conn = MagicMock()
     conn.execute.return_value.fetchall.return_value = []
-    assert agent_persona_mix(conn) == {"claude_code": 0, "other": 0}
+    assert agent_persona_mix(conn) == {"claude-code": 0, "other": 0}
 
 
 @pytest.mark.parametrize("mix,expected", [
-    ({"claude_code": 9, "other": 1}, "claude-code"),
-    ({"claude_code": 1, "other": 9}, "sdk"),
-    ({"claude_code": 5, "other": 5}, "mixed"),
+    ({"claude-code": 9, "other": 1}, "claude-code"),
+    ({"claude-code": 1, "other": 9}, "sdk"),
+    ({"claude-code": 5, "other": 5}, "mixed"),
 ])
 def test_dominant_persona_from_agent_mix(mix, expected):
     assert dominant_persona(mix) == expected
 
 
 def test_dominant_persona_falls_back_to_declared_plan_when_mix_empty():
-    assert dominant_persona({"claude_code": 0, "other": 0}, declared_plan="max_5x") == "claude-code"
-    assert dominant_persona({"claude_code": 0, "other": 0}, declared_plan="api") == "sdk"
-    assert dominant_persona({"claude_code": 0, "other": 0}, declared_plan=None) == "unknown"
+    assert dominant_persona({"claude-code": 0, "other": 0}, declared_plan="max_5x") == "claude-code"
+    assert dominant_persona({"claude-code": 0, "other": 0}, declared_plan="api") == "sdk"
+    assert dominant_persona({"claude-code": 0, "other": 0}, declared_plan=None) == "unknown"
     assert dominant_persona({}, declared_plan="pro") == "claude-code"
 
 

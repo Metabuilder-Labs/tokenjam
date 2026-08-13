@@ -30,6 +30,7 @@ from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.span_pricing import blended_rates
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.pricing import STANDARD_VARIANT, ModelRates, get_rates
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Minimum input volume to surface a recommendation. Below this, the
 # absolute savings are negligible regardless of efficacy.
@@ -162,7 +163,8 @@ def estimate_cache_recoverable(
 
 def _compute_rows(
     conn, since, until, agent_id: str | None,
-    *, min_input_tokens: int = MIN_INPUT_TOKENS,
+    *, persona_scope: str | None = None,
+    min_input_tokens: int = MIN_INPUT_TOKENS,
     efficacy_threshold: float = EFFICACY_THRESHOLD,
 ) -> list[CacheEfficacyRow]:
     """Aggregate input_tokens and cache_tokens per (provider, model) in window."""
@@ -174,6 +176,10 @@ def _compute_rows(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT provider, model, "
@@ -253,10 +259,10 @@ MIN_LOOKBACK_MISS_RECURRENCE = 3
 # The A2 "instability" card checklist — a diagnostic the user runs on their
 # own prompt-assembly code, not a tokenjam-side detection.
 SILENT_INVALIDATOR_CHECKLIST = (
-    "Likely silent cache-invalidators to check in your prompt-assembly code: "
-    "a timestamp or UUID placed early in the prompt; non-deterministic JSON "
-    "key ordering; a tool set that varies per request; switching models "
-    "mid-conversation."
+    "Check your prompt-assembly code for these likely silent cache-invalidators: "
+    "a timestamp or UUID placed early in the prompt, non-deterministic JSON "
+    "key ordering, or a tool set that varies per request. Switching models "
+    "mid-conversation also breaks the cache."
 )
 
 
@@ -329,7 +335,7 @@ class _AgentCallRow:
 
 
 def _fetch_agent_calls(
-    conn, since, until, agent_id: str | None,
+    conn, since, until, agent_id: str | None, persona_scope: str | None = None,
 ) -> dict[str, list[_AgentCallRow]]:
     """The shared data pass: LLM spans in the window, grouped by agent_id,
     ordered by session then start_time. A1/A2/A3 all classify off this."""
@@ -341,6 +347,10 @@ def _fetch_agent_calls(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT agent_id, session_id, start_time, provider, model, "
@@ -369,7 +379,7 @@ def _fetch_agent_calls(
 
 
 def _fetch_agent_tool_starts(
-    conn, since, until, agent_id: str | None,
+    conn, since, until, agent_id: str | None, persona_scope: str | None = None,
 ) -> dict[tuple[str, str], list[Any]]:
     """Tool-call span start times per (agent_id, session_id) — the A3 block-
     count proxy input."""
@@ -381,6 +391,10 @@ def _fetch_agent_tool_starts(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT agent_id, session_id, start_time FROM spans WHERE {where}",
@@ -532,10 +546,10 @@ def _classify_a1(
         cache_control_snippet=_uncached_snippet(model, prefix),
         past_overspend_usd=usd, past_overspend_tokens=tokens,
         estimate_basis=(
-            "assumed stable prefix = this agent's own p25 per-call input "
-            "tokens; recoverable = calls x prefix x (input rate - cache-read "
-            "rate), minus one 5-minute-TTL cache write per session "
-            "(conservative single-write-per-burst assumption)"
+            "assumed stable prefix = this agent's own p25 per-call input tokens. "
+            "recoverable = calls x prefix x (input rate - cache-read rate), "
+            "minus one 5-minute-TTL cache write per session. this is a "
+            "conservative single-write-per-burst assumption"
         ),
     )
 
@@ -618,11 +632,11 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
         cache_control_snippet=snippet,
         past_overspend_usd=recoverable_usd,
         estimate_basis=(
-            "wasted = cache-write tokens x (write rate - cache-read rate); "
-            "what was paid to write the prefix versus what the same tokens "
-            "would have cost read from a stable cache. Excluded (None) when "
-            "the TTL variant's break-even is negative, since the card's own "
-            "recommended fix (switching TTL) would not recover it."
+            "wasted = cache-write tokens x (write rate - cache-read rate). "
+            "this is what was paid to write the prefix versus what the same "
+            "tokens would have cost read from a stable cache. excluded (None) "
+            "when the TTL variant's break-even is negative. in that case, the "
+            "card's own recommended fix (switching TTL) would not recover it."
         ),
     )
 
@@ -689,13 +703,13 @@ def _classify_a3(
         past_overspend_usd=usd, past_overspend_tokens=tokens,
         estimate_basis=(
             f"cache breakpoints look back at most {LOOKBACK_BLOCK_LIMIT} "
-            "content blocks; a proxy block count (tool-call spans between two "
+            "content blocks. a proxy block count (tool-call spans between two "
             f"LLM calls x {BLOCKS_PER_TOOL_CALL}, for the tool_use + "
             "tool_result blocks each contributes) flags turns that likely "
-            "pushed the prior breakpoint out of range. Recoverable = "
+            "pushed the prior breakpoint out of range. recoverable = "
             "rewritten prefix tokens x (write rate - cache-read rate) per "
             "miss, priced only over misses that actually paid a cache-write "
-            "cost (cache_write_tokens > 0) — a miss with zero cache-write "
+            "cost (cache_write_tokens > 0). a miss with zero cache-write "
             "tokens contributes to miss_count but not to the dollar estimate"
         ),
     )
@@ -703,15 +717,16 @@ def _classify_a3(
 
 def _compute_root_cause_candidates(
     conn, since, until, agent_id: str | None,
-    *, min_calls: int = MIN_CALLS_FOR_ROOT_CAUSE,
+    *, persona_scope: str | None = None,
+    min_calls: int = MIN_CALLS_FOR_ROOT_CAUSE,
 ) -> tuple[
     list[UncachedAgentCandidate], list[ThrashAgentCandidate], list[LookbackMissCandidate],
 ]:
     """One shared pass, classified in priority order per agent: A1 (uncached)
     beats A2 (thrash) beats A3 (lookback miss) — one underlying waste source
     never produces two cards."""
-    by_agent = _fetch_agent_calls(conn, since, until, agent_id)
-    tool_starts = _fetch_agent_tool_starts(conn, since, until, agent_id)
+    by_agent = _fetch_agent_calls(conn, since, until, agent_id, persona_scope)
+    tool_starts = _fetch_agent_tool_starts(conn, since, until, agent_id, persona_scope)
 
     uncached: list[UncachedAgentCandidate] = []
     thrash: list[ThrashAgentCandidate] = []
@@ -747,10 +762,12 @@ def run(ctx: AnalyzerContext) -> None:
 
     rows = _compute_rows(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        persona_scope=ctx.persona_scope,
         min_input_tokens=min_input_tokens, efficacy_threshold=efficacy_threshold,
     )
     uncached, thrash, lookback = _compute_root_cause_candidates(
-        ctx.conn, ctx.since, ctx.until, ctx.agent_id, min_calls=min_calls,
+        ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        persona_scope=ctx.persona_scope, min_calls=min_calls,
     )
     if not rows and not uncached and not thrash and not lookback:
         return

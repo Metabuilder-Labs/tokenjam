@@ -17,6 +17,7 @@ from pathlib import Path
 import click
 import duckdb
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.config import load_config, resolve_config_path
 
 
@@ -57,10 +58,13 @@ def _start_and_wait(host: str, port: int, timeout: float = 10.0) -> bool:
     return False
 
 
-@click.command("mcp")
+#: Structural opt-out: mcp speaks stdio JSON-RPC, and ANY stray write to
+#: stdout (a spinner line included) corrupts the protocol stream — this file
+#: has no print statement at all, deliberately. Never wire a status here.
+@click.command("mcp", cls=TjCommand, no_status=True)
 @click.pass_context
 def cmd_mcp(ctx: click.Context) -> None:
-    """Start the TokenJam MCP server (stdio transport, for SDK / API users).
+    """Start the MCP server for SDK/API integrations.
 
     The MCP puts tj in the request path — the right surface for SDK / API
     integrations. Claude Code / Codex subscription users get tj out-of-band via
@@ -84,9 +88,22 @@ def cmd_mcp(ctx: click.Context) -> None:
         else:
             # Could not reach or start tj serve — fall back to read-only DuckDB
             # so MCP read tools still work, though live ingest won't be available.
+            #
+            # A read-only connection bypasses `DuckDBBackend.__init__` and its
+            # `run_migrations`/schema-self-heal call entirely (this file never
+            # calls either), so a store last written by an older `tj` build —
+            # missing a column or table a newer analyzer/tool depends on —
+            # would otherwise surface as a raw duckdb BinderError/
+            # CatalogException the first time a tool touches it. Detect the
+            # gap up front (both checks are pure SELECTs against
+            # information_schema, safe on a read-only connection) and hand it
+            # to `init()` so every tool degrades to one clear message instead.
+            from tokenjam.core.db import missing_expected_columns, missing_expected_tables
+
             db_path = str(Path(config.storage.path).expanduser())
             ro_conn = duckdb.connect(db_path, read_only=True)
-            init(ro_conn=ro_conn, config=config, serve_url=None)
+            schema_gap = missing_expected_tables(ro_conn) + missing_expected_columns(ro_conn)
+            init(ro_conn=ro_conn, config=config, serve_url=None, schema_gap=schema_gap)
     # If no config: init is not called; tools return the no-config sentinel.
 
     mcp.run()

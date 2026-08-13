@@ -33,6 +33,7 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.framing import Framing
 from tokenjam.core.model_tiers import PREMIUM_TIER_LABEL
 from tokenjam.core.optimize.types import (
@@ -44,7 +45,7 @@ from tokenjam.utils.formatting import console, format_cost, format_tokens
 from tokenjam.utils.time_parse import parse_since
 
 
-@click.command("quota-audit")
+@click.command("quota-audit", cls=TjCommand, status_message="Auditing premium sessions…")
 @click.option("--agent", default=None, help="Filter to a specific agent_id.")
 @click.option("--since", default="30d",
               help="Window for the audit (e.g. 7d, 30d, 2026-03-01). Default 30d.")
@@ -57,7 +58,7 @@ from tokenjam.utils.time_parse import parse_since
 @click.pass_context
 def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
                     export_target: str | None, output_json_flag: bool) -> None:
-    """Audit your Opus quota: which past Opus sessions were Sonnet-shaped?"""
+    """Flag premium sessions that could run cheaper."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")

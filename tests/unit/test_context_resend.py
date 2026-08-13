@@ -125,7 +125,12 @@ def test_too_few_sessions_notes_reason(db):
     _seed_session(db, "s2", [100, 200, 300])
     finding = _run(db, _config())
     assert finding.repeat_share is None
-    assert any("too few sessions" in n for n in finding.notes)
+    # Guard: the note names the actual session count AND the threshold it
+    # falls short of, not just a generic "too few" complaint.
+    assert any(
+        "2" in n and str(MIN_SESSIONS_FOR_SIGNAL) in n and "session" in n.lower()
+        for n in finding.notes
+    )
 
 
 def test_too_few_turns_notes_reason(db):
@@ -138,7 +143,12 @@ def test_too_few_turns_notes_reason(db):
     _seed_session(db, "s3", [500])
     finding = _run(db, _config())
     assert finding.repeat_share is None
-    assert any("too few turns" in n for n in finding.notes)
+    # Guard: the note names the actual turn count AND the threshold it falls
+    # short of, not just a generic "too few" complaint.
+    assert any(
+        "3" in n and str(MIN_TURNS_FOR_SIGNAL) in n and "turn" in n.lower()
+        for n in finding.notes
+    )
 
 
 # --------------------------------------------------------------------------
@@ -577,8 +587,14 @@ def test_offloadable_share_discloses_its_behavioural_basis_and_sample_size(db):
     assert "BEHAVIOURAL BASIS AND SAMPLE SIZE" in basis
     assert f"{finding.offloadable_share_sessions:,} of " in basis
     assert "dispatch a subagent at all" in basis
-    # It must NOT be presented as a structural property of the work.
-    assert "not how much of this window's in-thread work was structurally offloadable" in basis
+    # It must NOT be presented as a structural property of the work. The
+    # sentence now stands on its own ("It is not a measure of how much...")
+    # rather than continuing a prior clause, so match case-insensitively on
+    # the distinctive tail rather than pinning the old lowercase lead-in.
+    assert (
+        "not a measure of how much of this window's in-thread work was "
+        "structurally offloadable"
+    ) in basis.lower()
 
 
 # --------------------------------------------------------------------------

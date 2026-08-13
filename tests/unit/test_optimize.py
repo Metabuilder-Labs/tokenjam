@@ -1,7 +1,7 @@
 """Unit tests for the tj optimize analyzers."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -78,6 +78,29 @@ def test_summarize_window_counts_and_costs(db):
     assert s.sessions == 2
     assert s.total_tokens == 1000 + 200 + 50_000 + 2_000
     assert abs(s.total_cost_usd - (0.030 + 1.500)) < 1e-6
+
+
+@pytest.mark.parametrize("db_timezone", ["UTC", "Asia/Kolkata", "America/Los_Angeles"])
+def test_summarize_window_active_days_buckets_on_the_utc_date(db, db_timezone):
+    """``active_days`` feeds every per-day extrapolation in the optimize
+    report, so it must count distinct UTC dates, not local ones.
+
+    A bare ``CAST(start_time AS DATE)`` resolves a TIMESTAMPTZ through the
+    connection's local timezone before truncating. Two spans that straddle
+    UTC midnight (one at 23:30 UTC, one 1h later at 00:30 UTC the next day —
+    genuinely 2 distinct UTC dates) both land on the SAME local date once
+    shifted by a several-hour offset in either direction, so a buggy bucket
+    collapses them to one day and understates ``active_days``.
+    """
+    db.conn.execute(f"SET TimeZone='{db_timezone}'")
+    day1_2330 = datetime(2026, 3, 14, 23, 30, tzinfo=timezone.utc)
+    day2_0030 = datetime(2026, 3, 15, 0, 30, tzinfo=timezone.utc)
+    _insert_small_opus_session(db, start_time=day1_2330, session_id="a")
+    _insert_small_opus_session(db, start_time=day2_0030, session_id="b")
+    since = day1_2330 - timedelta(hours=2)
+    until = day2_0030 + timedelta(hours=2)
+    s = summarize_window(db.conn, since, until)
+    assert s.active_days == 2
 
 
 def test_summarize_window_total_includes_cache_read_tokens(db):

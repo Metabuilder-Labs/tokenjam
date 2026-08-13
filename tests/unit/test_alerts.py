@@ -71,3 +71,53 @@ def test_cooldown_handles_none_agent_id():
     tracker.record(None, AlertType.FAILURE_RATE)
     assert tracker.is_suppressed(None, AlertType.FAILURE_RATE)
     assert not tracker.is_suppressed("agent-a", AlertType.FAILURE_RATE)
+
+
+# --------------------------------------------------------------------------- #
+# agent_display_name — the project, without the tool prefix. Display only.
+# --------------------------------------------------------------------------- #
+def test_agent_display_name_strips_the_tool_prefix():
+    from tokenjam.core.alerts import agent_display_name
+
+    assert agent_display_name("claude-code-tokenjam") == "tokenjam"
+    assert agent_display_name("claude-code-splito") == "splito"
+    assert agent_display_name("codex-app-server") == "app-server"
+
+
+def test_agent_display_name_never_returns_an_empty_name():
+    """The degenerate ids this corpus actually contains. A blank cell reads as
+    missing data, so every one of these keeps something to show."""
+    from tokenjam.core.alerts import agent_display_name
+
+    # A bare tool id has no project to show; the honest answer is the tool.
+    assert agent_display_name("claude-code") == "claude-code"
+    assert agent_display_name("codex") == "codex"
+    # A trailing separator would strip to nothing, so it keeps the whole id.
+    assert agent_display_name("claude-code-") == "claude-code-"
+    # Untouched: an SDK id is its own declared name, and there is nothing to
+    # strip from it.
+    assert agent_display_name("billing-service") == "billing-service"
+    assert agent_display_name("sdk-workload-oversized-model") == "sdk-workload-oversized-model"
+    # Absent stays absent rather than becoming a string.
+    assert agent_display_name(None) is None
+    assert agent_display_name("") == ""
+
+
+def test_agent_display_name_reads_the_same_prefixes_as_the_classifier():
+    """Derived from `_INTERACTIVE_AGENT_PREFIXES`, not from its own literals, so
+    a new coding tool becomes strippable the moment it is classifiable."""
+    from tokenjam.core import alerts
+
+    for prefix in alerts._INTERACTIVE_AGENT_PREFIXES:
+        assert alerts.agent_display_name(f"{prefix}-myproject") == "myproject"
+        assert alerts.agent_display_name(prefix) == prefix
+        assert alerts.is_interactive_coding_agent(f"{prefix}-myproject")
+
+
+def test_agent_display_name_is_display_only_and_never_an_identity():
+    """Two different ids may shorten to the same name (`claude-code-api` and
+    `codex-api`). That is why this is a DISPLAY helper and callers keep
+    `agent_id` beside it; the UI resolves such collisions per rendered list."""
+    from tokenjam.core.alerts import agent_display_name
+
+    assert agent_display_name("claude-code-api") == agent_display_name("codex-api") == "api"

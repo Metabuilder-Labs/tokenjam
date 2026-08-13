@@ -246,3 +246,52 @@ def test_post_daily_only_preserves_an_existing_session_usd(tmp_path, db):
     sdk = resp.json()["sdk"]["agents"]["legacy-agent"]
     assert sdk["configured"]["daily_usd"] == 8.0
     assert sdk["configured"]["session_usd"] == 1.5
+
+
+# --------------------------------------------------------------------------- #
+# Budgets are an SDK-workflow feature (founder decision).
+#
+# The surface lives in the Sessions screen's SDK-services zone, so a
+# coding-agent cap has nowhere honest to render. Scoped in the ROUTE rather
+# than the view, so a client that forgets the filter still cannot show one.
+# --------------------------------------------------------------------------- #
+def test_sdk_scope_drops_every_coding_agent_budget(tmp_path):
+    from tokenjam.api.routes.budget import _budget_payload
+    from tokenjam.core.config import StorageConfig, TjConfig
+
+    cfg = TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")))
+    agent_ids = [
+        "claude-code-tokenjam", "claude-code-splito", "claude-code",
+        "codex-app-server", "billing-service", "sdk-workload-oversized-model",
+    ]
+
+    scoped = _budget_payload(cfg, agent_ids, persona="sdk")
+
+    # No coding groups, and none of the flat map's keys is a coding agent.
+    assert scoped["coding"]["groups"] == {}
+    assert set(scoped["agents"]) == {"billing-service", "sdk-workload-oversized-model"}
+    # `codex-app-server` is the case the two classifiers disagree on: SDK under
+    # `agent_kind` (codex matches only the exact id `codex_exec` there), coding
+    # under the persona predicate. This scope excludes it, because showing a
+    # coding agent breaks the decision and hiding an SDK one does not.
+    assert "codex-app-server" not in scoped["agents"]
+    assert set(scoped["sdk"]["agents"]) == set(scoped["agents"])
+    # THE pin, stated as the property rather than as a key list: nothing a
+    # reader could render as an agent row may be an interactive coding agent.
+    from tokenjam.core.alerts import is_interactive_coding_agent
+
+    for key in (*scoped["agents"], *scoped["sdk"]["agents"], *scoped["coding"]["groups"]):
+        assert not is_interactive_coding_agent(key), key
+
+    # Unscoped keeps the full payload — the CLI and any pre-scope caller still
+    # read it, so the narrowing must be opt-in rather than a silent change.
+    full = _budget_payload(cfg, agent_ids, persona=None)
+    assert any(is_interactive_coding_agent(k) for k in full["agents"])
+    assert full["coding"]["groups"], "the unscoped payload still carries coding groups"
+
+
+def test_budget_route_rejects_an_unknown_persona(tmp_path, db):
+    config = _config(tmp_path)
+    with _client(config, db) as client:
+        assert client.get("/api/v1/budget?persona=sdkk").status_code == 400
+        assert client.get("/api/v1/budget?persona=sdk").status_code == 200

@@ -13,12 +13,19 @@ Per-provider scope: Anthropic only. Other providers' caching mechanics
 (or lack thereof) differ enough that a v1 recommendation engine would
 mislead. Multi-provider support is a future research project.
 
-The candidate prefix comes from `TjAttributes.SYSTEM_PREFIX_CONTENT` when a
-span carries it, falling back to `GenAIAttributes.PROMPT_CONTENT` otherwise
-(#272). Claude-Code-sourced spans carry the former (the project's CLAUDE.md,
-read straight off disk by the backfill parser) because the latter is the
-human's per-turn message on those spans — a different string every turn,
-so it never repeats verbatim and the prefix-hash below always came up empty.
+The candidate prefix comes from the compact `TjAttributes.SYSTEM_PREFIX_*`
+attributes when a span carries them, from the legacy `SYSTEM_PREFIX_CONTENT` on
+older spans, and from `GenAIAttributes.PROMPT_CONTENT` otherwise (#272).
+Claude-Code-sourced spans carry a system prefix (the project's CLAUDE.md, read
+off disk by the backfill parser) because `PROMPT_CONTENT` is the human's
+per-turn message on those spans — a different string every turn, so it never
+repeats verbatim and the prefix-hash always came up empty.
+
+The prefix is no longer stored as text. It was identical across every span of a
+project, so keeping it whole cost (size x span count) — 4.06 GB of one real
+database to carry 1.84 MB of distinct text. What this analyzer needs from it is
+an identity, a 120-character sample and a length; `core.system_prefix` derives
+all three at capture time.
 
 This analyzer is disabled outright for the `claude-code` persona
 (`runner.PERSONA_DISABLED_ANALYZERS`) — not because this prefix detection
@@ -32,7 +39,6 @@ per-window; see `core.framing.dominant_persona`).
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -41,12 +47,16 @@ from typing import Any
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.optimize.span_pricing import blended_rates
+from tokenjam.core import system_prefix
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # The first N characters of the prompt are hashed to identify a "prefix
 # signature." Long enough to discriminate, short enough to avoid hashing
 # every call's full payload.
-PREFIX_HASH_BYTES = 2000
+# Re-exported from `core.system_prefix`, which owns the window. Kept as a
+# module name because tests and `estimated_cacheable` below read it.
+PREFIX_HASH_BYTES = system_prefix.HASH_CHARS
 
 # Minimum occurrences of the same prefix before it's worth recommending
 # a cache_control placement. Three calls share a prefix => likely a stable
@@ -134,9 +144,15 @@ def _stringify_prompt(value: Any) -> str:
 
 
 def _prefix_hash(text: str) -> str:
-    """SHA-256 of the first PREFIX_HASH_BYTES chars (UTF-8) of the prompt."""
-    head = text[:PREFIX_HASH_BYTES].encode("utf-8", errors="replace")
-    return hashlib.sha256(head).hexdigest()[:16]
+    """SHA-256 of the first PREFIX_HASH_BYTES chars (UTF-8) of the prompt.
+
+    Delegates to `core.system_prefix` so the hash this analyzer computes for a
+    legacy span and the hash the parser stamped onto a new one are the same
+    function. They used to be two copies of the same three lines; if they ever
+    diverged, one project's spans would split across two candidates and the
+    occurrence counts on both would be wrong with nothing failing.
+    """
+    return system_prefix.prefix_hash(text)
 
 
 def _prefix_cache_control_snippet(
@@ -216,8 +232,8 @@ def run(ctx: AnalyzerContext) -> None:
             enabled=False,
             min_prefix_occurrences=min_prefix_occurrences,
             hint=(
-                "Enable `[capture] prompts = true` in tj.toml and let the "
-                "daemon collect a window of data before re-running this "
+                "Enable `[capture] prompts = true` in tj.toml. Let the "
+                "daemon collect a window of data, then re-run this "
                 "analyzer. Without captured prompt content there's no way "
                 "to identify stable prefixes."
             ),
@@ -232,6 +248,10 @@ def run(ctx: AnalyzerContext) -> None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     rows = ctx.conn.execute(
         f"SELECT provider, model, attributes, input_tokens, start_time "
@@ -263,18 +283,34 @@ def run(ctx: AnalyzerContext) -> None:
         # repeats verbatim, so hashing it never found a shared prefix.
         # Raw-API-instrumented spans (no backfill involved) carry no such
         # attribute and fall through to `PROMPT_CONTENT` unchanged.
-        content = attrs.get(TjAttributes.SYSTEM_PREFIX_CONTENT) or attrs.get(
-            GenAIAttributes.PROMPT_CONTENT
-        )
-        if not content:
-            continue
-        text = _stringify_prompt(content)
-        if len(text) < 200:
-            # Skip tiny prompts — no caching opportunity.
-            continue
-        h = _prefix_hash(text)
+        # Three shapes reach this loop, and all three must keep working:
+        #   1. the compact form (hash/sample/length) written since the prefix
+        #      stopped being stored whole,
+        #   2. `SYSTEM_PREFIX_CONTENT`, on every span backfilled before that —
+        #      dropping this branch would make years of history invisible to
+        #      this analyzer the day the change shipped,
+        #   3. no prefix attribute at all -> `PROMPT_CONTENT`.
+        prefix_hash_attr = attrs.get(TjAttributes.SYSTEM_PREFIX_HASH)
+        if prefix_hash_attr:
+            if int(attrs.get(TjAttributes.SYSTEM_PREFIX_LENGTH) or 0) < \
+                    system_prefix.MIN_CACHEABLE_CHARS:
+                continue
+            h = str(prefix_hash_attr)
+            sample = str(attrs.get(TjAttributes.SYSTEM_PREFIX_SAMPLE) or "")
+        else:
+            content = attrs.get(TjAttributes.SYSTEM_PREFIX_CONTENT) or attrs.get(
+                GenAIAttributes.PROMPT_CONTENT
+            )
+            if not content:
+                continue
+            text = _stringify_prompt(content)
+            if len(text) < system_prefix.MIN_CACHEABLE_CHARS:
+                # Skip tiny prompts — no caching opportunity.
+                continue
+            h = _prefix_hash(text)
+            sample = text[:system_prefix.SAMPLE_CHARS]
         entry = prefix_counts.setdefault(h, {
-            "sample": text[:120],
+            "sample": sample,
             "count": 0,
             "tokens_sum": 0,
             "model_counts": {},
@@ -336,8 +372,8 @@ def run(ctx: AnalyzerContext) -> None:
     finding_tokens = sum(priced_tokens) if priced_tokens else None
     basis = (
         "reads after the first occurrence at (input - cache-read) rate, minus "
-        "one cache write per prefix at the write rate, priced off each "
-        "prefix's most-called model; candidates with no priced rate observed "
+        "one cache write per prefix at the write rate. priced off each "
+        "prefix's most-called model. candidates with no priced rate observed "
         "for their model contribute no dollar figure"
     ) if priced_usd else ""
 

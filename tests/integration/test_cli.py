@@ -12,7 +12,7 @@ from click.testing import CliRunner
 
 from tokenjam.cli.main import cli
 from tokenjam.core.config import AgentConfig, BudgetConfig, TjConfig
-from tokenjam.core.db import InMemoryBackend
+from tokenjam.core.db import SPANS_INDEX_SQL, InMemoryBackend
 from tokenjam.core.models import (
     AgentRecord,
     Alert,
@@ -108,6 +108,36 @@ def _seed_agent_and_session(db, agent_id="test-agent"):
     return session
 
 
+def _force_terminal_status_consoles(monkeypatch):
+    """Force `tj_status`'s stdout/stderr consoles into terminal mode.
+
+    CliRunner's captured streams are never a tty, so without this the
+    `Progress` spinner in `TjCommand`/`tj_status` never activates at all and
+    a byte-clean-stdout test would pass trivially regardless of whether the
+    redirect-stdout fix (`backfill_progress._spinner`'s
+    `redirect_stdout=False`) is actually in place. Returns
+    ``(stdout_buf, stderr_buf)`` — inspect ``stderr_buf`` after invoking to
+    confirm the spinner really ran, which is what makes the "stdout stayed
+    clean" assertion meaningful rather than vacuous.
+    """
+    import io
+
+    from rich.console import Console
+
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    monkeypatch.setattr(
+        "tokenjam.cli.tj_status._stdout_console",
+        Console(file=stdout_buf, force_terminal=True, highlight=False, width=100),
+    )
+    monkeypatch.setattr(
+        "tokenjam.cli.tj_status._stderr_console",
+        Console(file=stderr_buf, force_terminal=True, highlight=False,
+                width=100, stderr=True),
+    )
+    return stdout_buf, stderr_buf
+
+
 def _seed_alert(db, agent_id="test-agent", acknowledged=False, suppressed=False,
                  alert_type=AlertType.COST_BUDGET_DAILY, title="Daily budget exceeded"):
     """Insert an alert into the DB."""
@@ -134,6 +164,24 @@ def test_status_exits_0_when_no_alerts(runner, db, config):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["has_active_alerts"] is False
+
+
+def test_status_json_stdout_is_byte_clean_under_a_live_spinner(runner, db, config, monkeypatch):
+    """`status` declares a status_message (`cmd_status.py`), so `--json` must
+    route it to stderr and leave stdout as pure JSON -- see
+    `test_optimize_json_stdout_is_byte_clean_under_a_live_spinner` below for
+    why the consoles are forced into terminal mode."""
+    _seed_agent_and_session(db)
+    _, stderr_buf = _force_terminal_status_consoles(monkeypatch)
+
+    result = _invoke(runner, db, config, ["status", "--json"])
+    assert result.exit_code == 0, result.output
+
+    assert "\x1b[" not in result.output
+    data = json.loads(result.output)
+    assert data["has_active_alerts"] is False
+
+    assert "\x1b[" in stderr_buf.getvalue(), "spinner never activated -- test is vacuous"
 
 
 def test_status_exits_1_when_active_alerts(runner, db, config):
@@ -165,11 +213,15 @@ def test_status_dedupes_duplicate_alerts_of_same_type(runner, db, config):
     `_failure_rate_fired`) resets on process restart, so the DB can
     legitimately hold two rows for the same (type, agent) pair (#96). The
     human-readable `tj status` render must collapse repeats into one line
-    with a count rather than printing the same alert line twice."""
+    with a count rather than printing the same alert line twice.
+
+    Asserted against `-v`, the card path: bare `tj status` is now the capped
+    overview, which reports an alert COUNT per agent rather than alert
+    titles."""
     _seed_agent_and_session(db)
     _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
     _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
-    result = _invoke(runner, db, config, ["status"])
+    result = _invoke(runner, db, config, ["-v", "status"])
     assert result.exit_code == 1
     assert result.output.count("failure_rate — test-agent") == 1
     assert "×2" in result.output
@@ -177,11 +229,12 @@ def test_status_dedupes_duplicate_alerts_of_same_type(runner, db, config):
 
 def test_status_distinct_alert_types_are_not_collapsed(runner, db, config):
     """Two DIFFERENT alert types for the same agent must both still render —
-    dedup is keyed on (type, agent), not agent alone."""
+    dedup is keyed on (type, agent), not agent alone. Card path (`-v`), which
+    is where alert titles live now."""
     _seed_agent_and_session(db)
     _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
     _seed_alert(db, alert_type=AlertType.RETRY_LOOP, title="retry_loop — test-agent")
-    result = _invoke(runner, db, config, ["status"])
+    result = _invoke(runner, db, config, ["-v", "status"])
     assert "failure_rate — test-agent" in result.output
     assert "retry_loop — test-agent" in result.output
     assert "×2" not in result.output
@@ -206,7 +259,7 @@ def test_status_subscription_plan_shows_raw_dollar_line_like_api(runner, db):
     db.upsert_session(session)
     sub_config = TjConfig(version="1", budgets={"anthropic": ProviderBudget(plan="max_5x")})
 
-    result = _invoke(runner, db, sub_config, ["status"])
+    result = _invoke(runner, db, sub_config, ["-v", "status"])
     assert result.exit_code == 0
     assert "Cost today:     $0.00" in result.output
     assert "% of cycle" not in result.output
@@ -215,9 +268,10 @@ def test_status_subscription_plan_shows_raw_dollar_line_like_api(runner, db):
 
 
 def test_status_api_plan_keeps_raw_dollar_line(runner, db, config):
-    """API-billed users keep the historical raw-dollar Cost today line."""
+    """API-billed users keep the historical raw-dollar Cost today line (card
+    path, `-v`)."""
     _seed_agent_and_session(db)
-    result = _invoke(runner, db, config, ["status"])
+    result = _invoke(runner, db, config, ["-v", "status"])
     assert result.exit_code == 0
     assert "Cost today:     $0.00" in result.output
     assert "Subscription plan" not in result.output
@@ -243,10 +297,80 @@ def test_status_subscription_plan_with_daily_limit_shows_literal_dollar_cap(runn
         agents={"test-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0))},
     )
 
-    result = _invoke(runner, db, sub_config, ["status"])
+    result = _invoke(runner, db, sub_config, ["-v", "status"])
     assert result.exit_code == 0
     assert "Cost today:     $0.00 / $5.00/day limit" in result.output
     assert "% of cycle" not in result.output
+
+
+def test_status_caps_the_agent_list_and_names_the_way_past_the_cap(runner, db, config):
+    """Bare `tj status` printed one ~9-line card per tracked agent_id, and the
+    agent_id set grows monotonically (roughly one per project directory tj has
+    ever seen), so the screen got longer the longer you used tj. The default
+    view is now a capped table, and the cap must name the LITERAL command that
+    reaches what it cut — a cap with no way past it is just missing data."""
+    for i in range(25):
+        _seed_agent_and_session(db, agent_id=f"agent-{i:02d}")
+
+    result = _invoke(runner, db, config, ["status"])
+    assert result.exit_code == 0
+    flat = " ".join(result.output.split())
+
+    assert "25 agents" in flat
+    assert "AGENT" in flat and "COST TODAY" in flat and "LAST ACTIVE" in flat
+    assert "+15 more agents" in flat
+    assert "tj status --agent <id>" in flat
+    assert "tj status -v" in flat
+    # The whole point: bounded by the terminal, not by how long tj has run.
+    assert len(result.output.splitlines()) < 30
+
+
+def test_status_puts_the_totals_above_the_rows(runner, db, config):
+    """The headline used to land after every card, i.e. after the reader had
+    already scrolled past everything it summarises."""
+    for i in range(25):
+        _seed_agent_and_session(db, agent_id=f"agent-{i:02d}")
+
+    result = _invoke(runner, db, config, ["status"])
+    lines = result.output.splitlines()
+    totals = next(i for i, ln in enumerate(lines) if "25 agents" in " ".join(ln.split()))
+    header = next(i for i, ln in enumerate(lines) if "AGENT" in ln)
+    assert totals < header
+
+
+def test_status_verbose_keeps_every_card(runner, db, config):
+    """`-v` is the unbounded view: one card per agent, byte-for-byte what a
+    bare run printed before."""
+    for i in range(25):
+        _seed_agent_and_session(db, agent_id=f"agent-{i:02d}")
+
+    result = _invoke(runner, db, config, ["-v", "status"])
+    assert result.output.count("Cost today:") == 25
+    assert "+15 more agents" not in result.output
+
+
+def test_status_agent_filter_renders_that_agents_card(runner, db, config):
+    """The command the trailer names has to actually be the drill-down, or the
+    trailer is a dead end."""
+    for i in range(25):
+        _seed_agent_and_session(db, agent_id=f"agent-{i:02d}")
+
+    result = _invoke(runner, db, config, ["status", "--agent", "agent-07"])
+    assert "agent-07" in result.output
+    assert "Cost today:" in result.output
+    assert result.output.count("Cost today:") == 1
+    assert "agent-08" not in result.output
+
+
+def test_status_overview_never_prints_a_bare_zero_for_no_alerts(runner, db, config):
+    """`0` in an ALERTS column reads as a measured zero the same way a `$0`
+    savings figure reads as "no waste"; an agent with no alerts gets the null
+    marker instead."""
+    _seed_agent_and_session(db, agent_id="quiet-agent")
+    result = _invoke(runner, db, config, ["status"])
+    row = next(ln for ln in result.output.splitlines() if "quiet-agent" in ln)
+    assert " 0 " not in row
+    assert "-" in row
 
 
 # -- traces tests --
@@ -473,6 +597,12 @@ def _duckdb_with_dropped_migration_7(tmp_path):
         backend.conn.execute(f"DROP INDEX IF EXISTS {idx}")
     backend.conn.execute("ALTER TABLE spans DROP COLUMN request_params")
     backend.conn.execute("ALTER TABLE spans DROP COLUMN request_tools")
+    # DuckDB refuses to drop a column while the table carries ART indexes, so
+    # the indexes above come off first — and have to go straight back on. Left
+    # off, this fixture would additionally reproduce the SEPARATE fault doctor's
+    # index-integrity check exists for, and these tests would be asserting an
+    # exit code that has nothing to do with the missing column they are about.
+    backend.conn.execute(SPANS_INDEX_SQL)
     return backend
 
 
@@ -814,7 +944,7 @@ def test_onboard_claude_code_writes_settings(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     assert result.exit_code == 0
     assert settings_path.exists()
@@ -838,7 +968,7 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     data = json.loads(settings_path.read_text())
     # Original top-level key preserved
@@ -858,7 +988,7 @@ def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     # write_config should have been called with an TjConfig containing a claude-code-* agent
     assert mock_write.called
@@ -881,7 +1011,7 @@ def test_onboard_claude_code_prompts_for_budget(runner, tmp_path):
         # --plan api skips both the plan-tier prompt and the API-spend-ceiling
         # prompt (that one only fires without --plan); "7.0\n" answers the
         # daily-budget prompt.
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "api", "--project", "aquanode"], input="7.0\n")
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "api"], input="7.0\n")
 
     assert result.exit_code == 0
     assert mock_write.called
@@ -901,7 +1031,7 @@ def test_onboard_claude_code_skips_budget_prompt_for_subscription_plan(runner, t
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x", "--project", "aquanode"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x"])
 
     assert result.exit_code == 0, result.output
     assert "Daily budget in USD" not in result.output
@@ -911,9 +1041,11 @@ def test_onboard_claude_code_skips_budget_prompt_for_subscription_plan(runner, t
     assert saved_config.agents[agent_id].budget.daily_usd is None
 
 
-def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):
-    """--project sets [agents.<id>].project in config and does NOT write
-    OTEL_RESOURCE_ATTRIBUTES into project settings (the claude wrapper owns it)."""
+def test_onboard_claude_code_derives_config_project_from_repo_name(runner, tmp_path):
+    """--project was removed: the project name is now ALWAYS derived from the
+    repo (git remote) or folder name — never prompted for, never passed as a
+    flag — and does NOT write OTEL_RESOURCE_ATTRIBUTES into project settings
+    (the claude wrapper owns it)."""
     from tokenjam.core.config import load_config
 
     fake_home = tmp_path / "home"
@@ -922,12 +1054,13 @@ def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):
     with runner.isolated_filesystem() as cwd, \
          patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
+         patch("tokenjam.cli.cmd_onboard._derive_project_name", return_value="aquanode"):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         env = json.loads(
             (Path(cwd) / ".claude" / "settings.json").read_text()
         ).get("env", {})
@@ -938,9 +1071,9 @@ def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):
     assert cfg.agents[agent_id].project == "aquanode"
 
 
-def test_onboard_claude_code_prompts_for_project_name(runner, tmp_path):
-    """Without --project, onboard prompts for a project name and stores it as
-    the agent's configured project (not in project settings.json)."""
+def test_onboard_claude_code_never_prompts_for_project_name(runner, tmp_path):
+    """No interactive project-name question exists anymore — onboard must
+    complete with no stdin needed for it at all."""
     from tokenjam.core.config import load_config
 
     fake_home = tmp_path / "home"
@@ -949,13 +1082,14 @@ def test_onboard_claude_code_prompts_for_project_name(runner, tmp_path):
     with runner.isolated_filesystem() as cwd, \
          patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        # First prompt is the project name; budget is supplied via flag.
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
+         patch("tokenjam.cli.cmd_onboard._derive_project_name", return_value="myproject"):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
             "--plan", "max_20x",
-        ], input="myproject\n")
-        assert result.exit_code == 0
+        ])
+        assert result.exit_code == 0, result.output
+        assert "Project name" not in result.output
         env = json.loads(
             (Path(cwd) / ".claude" / "settings.json").read_text()
         ).get("env", {})
@@ -984,7 +1118,7 @@ def test_onboard_claude_code_removes_existing_resource_attrs(runner, tmp_path):
 
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
         assert result.exit_code == 0
         env = json.loads(proj_settings.read_text())["env"]
@@ -1033,7 +1167,7 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
@@ -1079,7 +1213,7 @@ def test_onboard_claude_code_preserves_custom_otlp_headers(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
@@ -1246,7 +1380,9 @@ def test_optimize_flags_downgrade_candidate(runner, db, config):
     )
     db.insert_span(span)
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     assert "Downsize" in result.output
     # Mandatory caveat must appear in human output
@@ -1270,6 +1406,42 @@ def test_optimize_json_output_includes_caveat(runner, db, config):
     data = json.loads(result.output)
     assert data["downgrade"] is not None
     assert "Candidate-flagging heuristic" in data["downgrade"]["caveat"]
+
+
+def test_optimize_json_stdout_is_byte_clean_under_a_live_spinner(runner, db, config, monkeypatch):
+    """`tj optimize` wraps its report fetch/build in a manual `tj_status`
+    call (see `cmd_optimize.py`). Rich's `Progress`/`Live` defaults to
+    redirecting `sys.stdout` through whichever console it renders to -- which,
+    under `--json`, is the stderr console. `click.echo()` turns out not to be
+    at risk of that in practice (it resolves the real underlying binary
+    buffer and bypasses the redirect), but `_spinner`'s
+    `redirect_stdout=False` removes the class of risk outright rather than
+    relying on that being true forever. This forces the spinner to actually
+    activate during a `--json` run and asserts stdout is still exactly the
+    JSON, nothing else.
+    """
+    from datetime import timedelta
+
+    span = make_llm_span(
+        agent_id="test-agent", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1000, output_tokens=200, cost_usd=0.030,
+        session_id="s", start_time=utcnow() - timedelta(days=1),
+    )
+    db.insert_span(span)
+    _, stderr_buf = _force_terminal_status_consoles(monkeypatch)
+
+    result = _invoke(runner, db, config, ["optimize", "--json"])
+    assert result.exit_code == 0, result.output
+
+    # stdout is exactly one parseable JSON document -- no escape codes, no
+    # status text leaked in front of or after it.
+    assert "\x1b[" not in result.output
+    data = json.loads(result.output)
+    assert data["downgrade"] is not None
+
+    # The spinner DID activate (proves the assertion above isn't vacuous):
+    # its escape codes landed on the forced-terminal status console instead.
+    assert "\x1b[" in stderr_buf.getvalue(), "spinner never activated -- test is vacuous"
 
 
 def _seed_low_cache_efficacy_window(db, agent_id="test-agent"):
@@ -1312,6 +1484,94 @@ def test_optimize_recomputes_cost_proposals_and_points_at_them(runner, db, confi
     # (unlike a copy-pasteable snippet, wrapping here is fine) -- collapse all
     # whitespace before checking for the pointer phrase.
     assert "tj relearn cost-proposals" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize(
+    "finding_args",
+    [(), ("relearn",)],
+    ids=["full-optimize", "relearn-only"],
+)
+def test_optimize_persists_its_relearn_finding_for_the_review_inbox(
+    runner, db, config, tmp_path, monkeypatch, finding_args,
+):
+    """A locally-computed relearn finding and the Review inbox are one result.
+
+    Before this regression guard, both a full ``tj optimize`` and ``tj
+    optimize relearn`` rendered the fresh in-process finding but left the
+    file-backed inbox on its previous cluster set.  The cost-proposal refresh
+    even changed that shared file's mtime while preserving the stale
+    ``finding`` key, which made the divergence especially hard to spot.
+    """
+    from datetime import timedelta
+
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+    from tokenjam.core.optimize import relearn_store
+    from tokenjam.core.optimize.analyzers.relearn import RelearnCluster, RelearnFinding
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+    from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
+    config.storage.path = str(tmp_path / "optimize-relearn.duckdb")
+    now = utcnow()
+    db.insert_span(make_llm_span(
+        agent_id="test-agent",
+        model="claude-sonnet-5",
+        provider="anthropic",
+        session_id="fresh-session",
+        start_time=now - timedelta(days=1),
+    ))
+
+    def cluster(signature: str) -> RelearnCluster:
+        return RelearnCluster(
+            signature=signature,
+            family_key=signature,
+            title=signature,
+            sessions=3,
+            occurrences=4,
+            repos=["tokenjam"],
+            delivery=DELIVERY_CLAUDE_MD_RULE,
+            scope="project",
+            proposed_fix="Review the repeated failure.",
+            past_overspend_tokens=1_500,
+            past_overspend_usd=0.01,
+        )
+
+    relearn_store.write_cache(
+        RelearnFinding(clusters=[cluster("stale-cluster")], sessions_scanned=47),
+        config=config,
+    )
+    fresh_finding = RelearnFinding(
+        clusters=[cluster("fresh-a"), cluster("fresh-b")],
+        sessions_scanned=55,
+    )
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=now - timedelta(days=30),
+            until=now,
+            days=30.0,
+            sessions=1,
+            spans=1,
+            total_tokens=1_000,
+            total_cost_usd=0.01,
+            thin_data=True,
+        ),
+        findings={"relearn": fresh_finding},
+    )
+    monkeypatch.setattr("tokenjam.cli.cmd_optimize.build_report", lambda **_kwargs: report)
+    # Keep this test on the relearn cache contract; cost-proposal recomputation
+    # has its own end-to-end guard immediately above.
+    monkeypatch.setattr(
+        cost_proposals_mod, "recompute_cost_proposals", lambda *_args, **_kwargs: [],
+    )
+
+    result = _invoke(runner, db, config, ["optimize", *finding_args, "--json"])
+    assert result.exit_code == 0, result.output
+
+    cached = relearn_store.read_cache(config=config)
+    assert cached is not None
+    assert cached["finding"]["sessions_scanned"] == 55
+    assert [c["signature"] for c in cached["finding"]["clusters"]] == [
+        "fresh-a", "fresh-b",
+    ]
 
 
 def test_optimize_json_reports_cost_proposals_available(runner, db, config):
@@ -1406,7 +1666,9 @@ def test_optimize_subscription_renders_implied_api_value(runner, db, config):
     """Subscription users see implied-API-value framing, never dollar 'spend'."""
     _seed_optimize_window(db, plan_tier="max_20x")
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     out = result.output
     # Subscription header: plan label + implied API value
@@ -1443,6 +1705,71 @@ def test_optimize_api_mode_unchanged(runner, db, config):
     out = result.output
     assert "spend (last" in out  # historical header
     assert "Implied API value" not in out
+
+
+def test_optimize_default_is_the_scoreboard_and_dash_v_is_the_cards(runner, db, config):
+    """The three views over one renderer set: bare `tj optimize` summarises,
+    `-v` prints the cards it used to print by default, and `tj optimize <area>`
+    prints that one card in full."""
+    _seed_optimize_window(db, plan_tier="api")
+
+    scoreboard = _invoke(runner, db, config, ["optimize"])
+    verbose = _invoke(runner, db, config, ["-v", "optimize"])
+    area = _invoke(runner, db, config, ["optimize", "downsize"])
+    assert scoreboard.exit_code == 0, scoreboard.output
+    assert verbose.exit_code == 0, verbose.output
+    assert area.exit_code == 0, area.output
+
+    board = " ".join(scoreboard.output.split())
+    cards = " ".join(verbose.output.split())
+    one_card = " ".join(area.output.split())
+
+    # Scoreboard: the table and the Next block, and none of the card prose.
+    assert "ANALYZERS" in board and "RECOVERABLE" in board
+    assert "Next:" in board
+    assert "Candidate-flagging heuristic" not in board
+    assert "Examples:" not in board
+
+    # -v and <area>: the verbatim caveat renders, exactly as it always has.
+    assert "Candidate-flagging heuristic" in cards
+    assert "Candidate-flagging heuristic" in one_card
+    assert "ANALYZERS" not in cards and "ANALYZERS" not in one_card
+    assert len(board) < len(cards)
+
+
+def test_optimize_json_is_unchanged_by_the_scoreboard(runner, db, config):
+    """--json is a machine surface and the scoreboard is a human one. The
+    verbosity flag must not reach the payload, and no scoreboard string may
+    leak into it."""
+    _seed_optimize_window(db, plan_tier="api")
+
+    plain = _invoke(runner, db, config, ["optimize", "--json"])
+    verbose = _invoke(runner, db, config, ["-v", "optimize", "--json"])
+    assert plain.exit_code == 0, plain.output
+    assert verbose.exit_code == 0, verbose.output
+
+    # Same payload either way. Compared on shape + every scalar, because two
+    # invocations legitimately differ on the clock (`since`/`until`/`days`)
+    # and on the order of equal-cost examples.
+    a, b = json.loads(plain.output), json.loads(verbose.output)
+    assert a.keys() == b.keys()
+    assert a["findings"].keys() == b["findings"].keys()
+    assert a["downgrade"].keys() == b["downgrade"].keys()
+    for key in ("candidate_sessions", "total_sessions", "actual_cost_usd",
+                "monthly_savings_usd", "percent_of_sessions", "caveat"):
+        assert a["downgrade"][key] == b["downgrade"][key], key
+    for key in ("plan", "pricing_mode", "plan_tier_mix", "persona",
+                "cost_proposals_available", "persona_disabled_analyzers"):
+        assert a[key] == b[key], key
+
+    payload = a
+    # The full report shape the pre-scoreboard CLI emitted, unchanged.
+    for key in ("window", "downgrade", "findings", "plan", "pricing_mode",
+                "plan_tier_mix", "persona", "cost_proposals_available",
+                "persona_disabled_analyzers"):
+        assert key in payload, key
+    assert "ANALYZERS" not in plain.output
+    assert "Next:" not in plain.output
 
 
 def test_optimize_json_includes_plan_and_pricing_mode(runner, db, config):
@@ -1509,7 +1836,9 @@ def test_optimize_ranks_findings_by_reclaimable_share_not_registry_order(runner,
         tool.start_time = now - timedelta(days=1)
         db.insert_span(tool)
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     out = result.output
 
@@ -1544,7 +1873,9 @@ def test_optimize_downsize_cta_matches_claude_code_persona(runner, db, config):
         session_id="s-small", start_time=now - timedelta(days=1),
     ))
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     out = result.output
 
@@ -1567,7 +1898,9 @@ def test_optimize_downsize_cta_unchanged_for_sdk_persona(runner, db, config):
         session_id="s-small", start_time=utcnow() - timedelta(days=1),
     ))
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     out = result.output
 
@@ -1888,7 +2221,7 @@ def test_onboard_claude_code_installs_claude_wrapper(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
 
     assert result.exit_code == 0
@@ -1922,7 +2255,7 @@ def test_onboard_claude_code_wrapper_is_idempotent(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         args = [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ]
         first = runner.invoke(cli, args)
         second = runner.invoke(cli, args)
@@ -1947,7 +2280,7 @@ def test_onboard_claude_code_wrapper_writes_bashrc_when_present(runner, tmp_path
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
 
     assert result.exit_code == 0
@@ -1988,7 +2321,7 @@ def test_onboard_claude_code_replaces_legacy_zshrc_otel_markers(runner, tmp_path
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
 
     assert result.exit_code == 0, result.output
@@ -1998,6 +2331,109 @@ def test_onboard_claude_code_replaces_legacy_zshrc_otel_markers(runner, tmp_path
     assert "stale-ocw-token" not in text
     assert "stale-tj-token" not in text
     assert "export FOO=bar" in text  # user's own content preserved
+
+
+def test_onboard_rewrites_an_unreachable_endpoint_already_in_zshrc(runner, tmp_path, monkeypatch):
+    """Re-onboarding REPAIRS a shell profile that already carries the
+    container-only endpoint, rather than only writing a good one on fresh
+    installs. That seeded state — a current-sentinel block naming
+    `host.docker.internal` on a host where it does not resolve — is what every
+    machine onboarded before this fix is sitting in, and it drops every span
+    silently at the DNS layer."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+    zshrc.write_text(
+        "# my own env\nexport FOO=bar\n\n"
+        "# >>> tokenjam OTEL (managed) >>>\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        "export OTEL_LOGS_EXPORTER=otlp\n"
+        "export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n"
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:7500\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-token"\n'
+        "# <<< tokenjam OTEL <<<\n"
+    )
+
+    monkeypatch.delenv("TJ_OTEL_HOST", raising=False)
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard._in_container", lambda: False)
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x",
+        ])
+
+    assert result.exit_code == 0, result.output
+    text = zshrc.read_text()
+    assert text.count(">>> tokenjam OTEL (managed) >>>") == 1
+    assert "host.docker.internal" not in text
+    assert ":7500" not in text
+    assert "stale-token" not in text
+    assert "export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7391" in text
+    assert "export FOO=bar" in text  # user's own content preserved
+
+
+def test_onboard_then_uninstall_leaves_zero_managed_residue(runner, tmp_path, monkeypatch):
+    """Full round trip on one shell profile seeded with BOTH legacy markers and
+    a stale bad endpoint: onboard collapses them to exactly one correct block,
+    uninstall then leaves zero tj residue and the user's own lines intact."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+    zshrc.write_text(
+        "# my own env\nexport FOO=bar\n\n"
+        "# ocw harness observability\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:7391\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-ocw-token"\n'
+        "\n"
+        "# tj harness observability\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-tj-token"\n'
+        "\n"
+        "# >>> tokenjam OTEL (managed) >>>\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:7500\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-current-token"\n'
+        "# <<< tokenjam OTEL <<<\n"
+    )
+
+    monkeypatch.delenv("TJ_OTEL_HOST", raising=False)
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard._in_container", lambda: False)
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        onboarded = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x",
+        ])
+
+    assert onboarded.exit_code == 0, onboarded.output
+    after_onboard = zshrc.read_text()
+    assert after_onboard.count(">>> tokenjam OTEL (managed) >>>") == 1
+    assert "harness observability" not in after_onboard
+    assert "host.docker.internal" not in after_onboard
+    for stale in ("stale-ocw-token", "stale-tj-token", "stale-current-token"):
+        assert stale not in after_onboard
+    assert "export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7391" in after_onboard
+
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("tokenjam.cli.cmd_stop.cmd_stop", MagicMock())
+    monkeypatch.setattr("tokenjam.cli.cmd_uninstall.shutil.which", lambda _name: None)
+    monkeypatch.delenv("PIPX_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    removed = runner.invoke(cli, ["uninstall", "--yes"])
+
+    assert removed.exit_code == 0, removed.output
+    final = zshrc.read_text()
+    assert ">>> tokenjam OTEL (managed) >>>" not in final
+    assert "harness observability" not in final
+    assert "OTEL_EXPORTER_OTLP" not in final
+    assert "CLAUDE_CODE_ENABLE_TELEMETRY" not in final
+    assert "export FOO=bar" in final  # user's own content preserved
 
 
 def test_uninstall_removes_legacy_and_current_zshrc_otel_blocks(runner, tmp_path, monkeypatch):

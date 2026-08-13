@@ -1,13 +1,14 @@
 import click
 import json
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.cost import compute_cost_diff
 from tokenjam.core.models import CostFilters
 from tokenjam.utils.formatting import console, make_table, format_cost, format_tokens
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 
-@click.command("cost")
+@click.command("cost", cls=TjCommand, status_message="Computing cost breakdown…")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("--since", default="7d", help="Time window (e.g. 1h, 7d, 2026-03-01)")
 @click.option("--group-by", "group_by",
@@ -20,7 +21,7 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 @click.pass_context
 def cmd_cost(ctx: click.Context, agent: str | None, since: str,
              group_by: str, compare: str | None, output_json_flag: bool) -> None:
-    """Show cost breakdown by agent, model, day, or tool."""
+    """Cost breakdown by agent, model, day or tool."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     try:
@@ -91,7 +92,8 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
         return _cost_cell(value)
 
     # CACHE R / CACHE W columns make cost reconcilable from the shown tokens —
-    # cache-write is often the dominant driver and was previously invisible (#17).
+    # cache-write is often the dominant driver and was previously invisible
+    # before this column existed.
     cache_r = sum(r.cache_tokens for r in rows)
     cache_w = sum(r.cache_write_tokens for r in rows)
     if group_by == "day":

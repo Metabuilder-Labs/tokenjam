@@ -41,6 +41,13 @@ def get_cost_compare(
     compare: str = Query(..., description="previous / last-week / last-month / last-7d / last-30d / YYYY-MM-DD:YYYY-MM-DD"),
     agent_id: str | None = Query(None, alias="agent_id"),
     top_n: int = Query(5, description="Top per-agent / per-model shifts."),
+    persona: str | None = Query(
+        None,
+        description="Scope both windows to one side of the 'Viewing as' "
+                    "picker (core.framing.PERSONAS). Applied to BOTH windows "
+                    "and both delta breakdowns, so no delta ever compares two "
+                    "different populations.",
+    ),
 ) -> dict[str, Any]:
     """
     Return the structured CostDiff payload that cmd_cost / cmd_optimize
@@ -49,6 +56,13 @@ def get_cost_compare(
     db = request.app.state.db
     if db is None:
         raise HTTPException(status_code=503, detail="Server db not initialised.")
+    from tokenjam.core.framing import PERSONAS
+
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
 
     # A second `tj serve` that lost the DuckDB write-lock race runs as a thin
     # proxy: its `state.db` is an ApiBackend pointing at the primary daemon, and
@@ -65,6 +79,7 @@ def get_cost_compare(
         try:
             return db.fetch_cost_compare(
                 since=since, compare=compare, agent_id=agent_id, top_n=top_n,
+                persona=persona,
             )
         except httpx.HTTPStatusError as exc:
             raise HTTPException(
@@ -87,7 +102,7 @@ def get_cost_compare(
     try:
         diff = compute_cost_diff(
             db, since_dt, until_dt, compare,
-            agent_id=agent_id, top_n=top_n,
+            agent_id=agent_id, top_n=top_n, persona=persona,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
 from tokenjam.api.app import create_app
 from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
@@ -67,6 +69,18 @@ def app(config, db):
             cache_tokens=400, session_id=f"s-{i}",
             start_time=now - timedelta(days=2, minutes=i),
         ))
+    # The corpus has to be 30 days WIDE, not merely 30 days' worth of rows. The
+    # inbox window is the analysis span bounded by how far back this store's
+    # oldest row actually sits, so a two-day corpus resolves to a two-day
+    # window — and the hand-built relearn buckets below, which are the point of
+    # these tests, are labelled `30d`. One row at the far edge makes the two
+    # sides name the same window without changing what any analyzer finds.
+    db.insert_span(make_llm_span(
+        agent_id="svc-a", provider="anthropic", model="claude-sonnet-5",
+        billing_account="anthropic", input_tokens=15_000, output_tokens=200,
+        cache_tokens=400, session_id="s-oldest",
+        start_time=now - timedelta(days=29),
+    ))
     pipeline = IngestPipeline(db=db, config=config)
     return create_app(config=config, db=db, ingest_pipeline=pipeline)
 
@@ -103,7 +117,7 @@ def _cluster(
 ) -> RelearnCluster:
     return RelearnCluster(
         signature=signature, family_key=signature, title=f"{signature} recurs",
-        sessions=3, occurrences=9, repos=["demo"], rung=1, scope="project",
+        sessions=3, occurrences=9, repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Do the thing that stops this.",
         past_overspend_usd=unbounded_usd, past_overspend_tokens=unbounded_tokens,
         past_reread_usd=round(unbounded_usd * 0.1, 6),

@@ -49,8 +49,9 @@ def default_claude_home() -> Path:
     Never a module-level constant: `Path.home()` baked at import time survives
     a later `HOME` repoint, which is how a test that carefully isolates itself
     still ends up scanning the developer's real transcript tree (the same trap
-    `deadweight._global_config_path` documents, and the reason
-    `tests/conftest.py` has to patch `config.SEARCH_PATHS` by hand).
+    `core/agent_config._settings_paths` documents for the global MCP/settings
+    read, and the reason `tests/conftest.py` has to patch `config.SEARCH_PATHS`
+    by hand).
     """
     return Path.home() / ".claude"
 

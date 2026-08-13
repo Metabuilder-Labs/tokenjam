@@ -213,24 +213,25 @@ def test_optimize_key_bracket_survives_rich_markup(render_fn_name, finding, caps
 
 
 def test_render_deadweight_notes_are_escaped(capsys):
-    """Regression guard for the analyzer-supplied note text itself: the
-    deadweight analyzer's own empty-state note names `[optimize]
-    min_sessions_deadweight` in bracket form, which the renderer must escape
-    before printing or Rich silently drops it."""
+    """Regression guard for the analyzer-supplied note text itself: an
+    analyzer note can legitimately name a config key in bracket form (e.g.
+    `[optimize] scan_window_days`), which the renderer must escape before
+    printing or Rich silently drops it. The bracket-form key here is
+    synthetic (the escaping mechanics are what this test pins, not any one
+    note's live wording, which changes independently of this guard)."""
     from tokenjam.cli.cmd_optimize import _render_deadweight
     from tokenjam.core.optimize.analyzers.deadweight import DeadweightFinding
 
     finding = DeadweightFinding(
-        sessions_scanned=5, configured_servers=1, servers=[], dead_servers=[],
+        sessions_scanned=5, configured_servers=1, servers=[], unused_servers=[],
         notes=[
-            "No configured MCP server cleared the dead-weight bar "
-            "(>= 10 sessions present, 0 invocations). Lower "
-            "[optimize] min_sessions_deadweight in tj.toml to see servers "
-            "present in fewer sessions.",
+            "No configured MCP server had nothing attributable fire in the "
+            "recency window. Lower [optimize] scan_window_days in tj.toml "
+            "to see a narrower window.",
         ],
     )
 
     _render_deadweight(finding, pricing_mode="api", marker="①")
     out = _flat(capsys.readouterr().out)
 
-    assert "[optimize] min_sessions_deadweight" in out
+    assert "[optimize] scan_window_days" in out

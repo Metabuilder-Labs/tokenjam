@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.framing import PERSONAS
 from tokenjam.core.models import AlertFilters, AlertType, Severity
 from tokenjam.utils.time_parse import parse_since
 
@@ -19,8 +20,22 @@ async def get_alerts(
     severity: str | None = None,
     type: str | None = None,
     unread: bool = False,
+    persona: str | None = None,
 ) -> dict:
+    """Alert history.
+
+    ``persona`` scopes to one side of the "Viewing as" picker. The alert engine
+    already gates several of its checks on the same
+    ``alerts.is_interactive_coding_agent`` predicate, so this narrows the
+    HISTORY to match what the reader is looking at rather than introducing a
+    new rule.
+    """
     db = request.app.state.db
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
     try:
         sev = Severity(severity) if severity else None
     except ValueError:
@@ -38,6 +53,7 @@ async def get_alerts(
         since=since_dt,
         severity=sev,
         type=typ,
+        persona=persona,
         unread=unread,
     )
     alerts = db.get_alerts(filters)

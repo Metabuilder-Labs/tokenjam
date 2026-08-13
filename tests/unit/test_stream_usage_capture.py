@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tokenjam.otel.semconv import TjAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 
 
 class _FakeSpan:
@@ -101,6 +101,37 @@ def test_openai_stream_abandoned_midway_still_records_the_gap():
     assert span.attributes[TjAttributes.STREAM_CONTENT_CHUNKS] == 1
 
 
+def test_openai_bare_next_consumption_still_survives_and_reports_tokens():
+    """Before the fix, `__next__` bare-delegated straight to the underlying
+    stream (`return self._stream.__next__()`), bypassing `__iter__`'s
+    `finally` entirely — a caller driving the wrapper by hand with `next()`
+    in a loop (never `for`/`list()`) left the span open forever, unexported,
+    no matter how the stream actually finished. Drains fully via bare
+    `next()` until `StopIteration` — the standard manual-iteration idiom —
+    and asserts the span still ends with the trailing usage."""
+    from tokenjam.sdk.integrations.openai import _StreamWrapper
+
+    span = _FakeSpan()
+    usage = SimpleNamespace(prompt_tokens=120, completion_tokens=40)
+    chunks = [_openai_chunk(content="Hi"), _openai_chunk(content="there"),
+              _openai_chunk(usage=usage)]
+    wrapper = _StreamWrapper(iter(chunks), span)
+
+    collected = []
+    while True:
+        try:
+            collected.append(next(wrapper))
+        except StopIteration:
+            break
+
+    assert len(collected) == 3
+    assert span.ended
+    assert span.attributes[GenAIAttributes.INPUT_TOKENS] == 120
+    assert span.attributes[GenAIAttributes.OUTPUT_TOKENS] == 40
+    assert span.attributes[TjAttributes.STREAM_USAGE_REPORTED] is True
+    assert span.attributes[TjAttributes.STREAM_CONTENT_CHUNKS] == 2
+
+
 # ---------------------------------------------------------------------------
 # Anthropic provider patch
 # ---------------------------------------------------------------------------
@@ -124,6 +155,17 @@ class _FakeAnthropicStream:
         for event in self._events:
             self._consumed += 1
             yield event
+
+    def __next__(self):
+        # The real anthropic `MessageStream` supports direct `next()`
+        # consumption (not just `for`), which is exactly what
+        # `_StreamWrapper.__next__` bare-delegates to — needed to exercise
+        # that path without going through `__iter__`'s generator at all.
+        if self._consumed >= len(self._events):
+            raise StopIteration
+        event = self._events[self._consumed]
+        self._consumed += 1
+        return event
 
     def get_final_message(self):
         if self._drained_required and self._consumed < len(self._events):
@@ -188,6 +230,251 @@ def test_anthropic_get_final_message_raise_never_escapes_the_wrapper():
         list(wrapped)
 
     assert span.attributes[TjAttributes.STREAM_USAGE_REPORTED] is False
+
+
+def test_anthropic_bare_next_consumption_still_survives_and_reports_tokens():
+    """Before the fix, `.stream()`'s `_StreamWrapper.__next__` bare-delegated
+    (`return next(self._stream)`), bypassing every finalize path — only
+    `__exit__` (i.e. the `with` block) ever ended the span. `get_final_message`
+    only needs the underlying stream fully drained, not `__exit__` called
+    first, so draining by hand via bare `next()` until `StopIteration` — with
+    no `with` block at all — must still report the real usage."""
+    from tokenjam.sdk.integrations.anthropic import _StreamWrapper
+
+    span = _FakeSpan()
+    stream = _FakeAnthropicStream(
+        [_anthropic_text_event("Hi"), _anthropic_text_event(" there")],
+        final_usage=SimpleNamespace(input_tokens=90, output_tokens=12),
+    )
+    wrapper = _StreamWrapper(stream, span)
+
+    collected = []
+    while True:
+        try:
+            collected.append(next(wrapper))
+        except StopIteration:
+            break
+
+    assert len(collected) == 2
+    assert span.ended
+    assert span.attributes[GenAIAttributes.INPUT_TOKENS] == 90
+    assert span.attributes[GenAIAttributes.OUTPUT_TOKENS] == 12
+    assert span.attributes[TjAttributes.STREAM_USAGE_REPORTED] is True
+
+
+# ---------------------------------------------------------------------------
+# Anthropic `create(stream=True)` — the raw SSE event stream, distinct from
+# `.stream()`'s `MessageStream`. Before `_RawStreamWrapper` existed, this path
+# fell through `patched_create`'s `hasattr(response, "usage")` check (a raw
+# stream object never has one) and produced a ZERO-TOKEN span for every
+# streamed `create()` call, however much was actually generated.
+# ---------------------------------------------------------------------------
+
+def _message_start_event(input_tokens, cache_read=None, cache_create=None, response_id="msg_01"):
+    usage = SimpleNamespace(
+        input_tokens=input_tokens,
+        cache_read_input_tokens=cache_read,
+        cache_creation_input_tokens=cache_create,
+    )
+    message = SimpleNamespace(id=response_id, usage=usage)
+    return SimpleNamespace(type="message_start", message=message, delta=None)
+
+
+def _message_delta_event(output_tokens):
+    usage = SimpleNamespace(output_tokens=output_tokens)
+    return SimpleNamespace(type="message_delta", usage=usage, delta=None)
+
+
+def test_anthropic_raw_create_stream_carries_real_tokens_via_for_loop():
+    from tokenjam.sdk.integrations.anthropic import _RawStreamWrapper
+
+    span = _FakeSpan()
+    events = [
+        _message_start_event(input_tokens=200, cache_read=50, cache_create=10),
+        _anthropic_text_event("Hel"),
+        _anthropic_text_event("lo"),
+        _message_delta_event(output_tokens=42),
+    ]
+    wrapper = _RawStreamWrapper(iter(events), span)
+
+    collected = list(wrapper)
+
+    assert len(collected) == 4
+    assert span.ended
+    assert span.attributes[GenAIAttributes.RESPONSE_ID] == "msg_01"
+    assert span.attributes[GenAIAttributes.INPUT_TOKENS] == 200
+    assert span.attributes[GenAIAttributes.OUTPUT_TOKENS] == 42
+    assert span.attributes[GenAIAttributes.CACHE_READ_TOKENS] == 50
+    assert span.attributes[GenAIAttributes.CACHE_CREATE_TOKENS] == 10
+    assert span.attributes[TjAttributes.STREAM_USAGE_REPORTED] is True
+    assert span.attributes[TjAttributes.STREAM_CONTENT_CHUNKS] == 2
+
+
+def test_anthropic_raw_create_stream_survives_bare_next_consumption():
+    """The same linkage bare `create(stream=True)` needs: manual `next()`
+    drives it (its context-manager protocol is optional, unlike `.stream()`'s
+    `MessageStreamManager`), so this must ALSO finalize on exhaustion."""
+    from tokenjam.sdk.integrations.anthropic import _RawStreamWrapper
+
+    span = _FakeSpan()
+    events = [
+        _message_start_event(input_tokens=150),
+        _message_delta_event(output_tokens=30),
+    ]
+    wrapper = _RawStreamWrapper(iter(events), span)
+
+    collected = []
+    while True:
+        try:
+            collected.append(next(wrapper))
+        except StopIteration:
+            break
+
+    assert len(collected) == 2
+    assert span.ended
+    assert span.attributes[GenAIAttributes.INPUT_TOKENS] == 150
+    assert span.attributes[GenAIAttributes.OUTPUT_TOKENS] == 30
+    assert span.attributes[TjAttributes.STREAM_USAGE_REPORTED] is True
+
+
+def test_anthropic_raw_create_stream_without_usage_events_reports_the_gap():
+    """A stream that never emits message_start/message_delta (or is abandoned
+    before them) must say so, not silently claim a free call."""
+    from tokenjam.sdk.integrations.anthropic import _RawStreamWrapper
+
+    span = _FakeSpan()
+    wrapper = _RawStreamWrapper(iter([_anthropic_text_event("Hi")]), span)
+    list(wrapper)
+
+    assert span.attributes[TjAttributes.STREAM_USAGE_REPORTED] is False
+    assert GenAIAttributes.INPUT_TOKENS not in span.attributes
+    assert GenAIAttributes.OUTPUT_TOKENS not in span.attributes
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM sync stream — same bare-`next()` gap as the OpenAI/Anthropic
+# patches (litellm.py's `_SyncStreamWrapper.__next__` used to bare-delegate).
+# Cache-token extraction (`_set_usage_attributes`/`_extract_cache_tokens`) is
+# NOT touched here — it already worked correctly via `__iter__` before this
+# fix and continues to, exercised by test_litellm_integration.py.
+# ---------------------------------------------------------------------------
+
+def test_litellm_sync_stream_survives_bare_next_consumption():
+    from tokenjam.sdk.integrations.litellm import _SyncStreamWrapper
+
+    span = _FakeSpan()
+    usage = SimpleNamespace(
+        prompt_tokens=80, completion_tokens=20,
+        cache_read_input_tokens=None, prompt_tokens_details=None,
+        cache_creation_input_tokens=None,
+    )
+    chunk1 = SimpleNamespace(usage=None, choices=[SimpleNamespace(delta=SimpleNamespace(content="Hi"))])
+    chunk2 = SimpleNamespace(usage=usage, choices=[])
+
+    from tokenjam.sdk.integrations import litellm as litellm_mod
+    real_token = litellm_mod._tj_litellm_active.set(True)
+
+    wrapper = _SyncStreamWrapper(iter([chunk1, chunk2]), span, "claude-haiku-4-5", real_token)
+
+    collected = []
+    while True:
+        try:
+            collected.append(next(wrapper))
+        except StopIteration:
+            break
+
+    assert len(collected) == 2
+    assert span.ended
+    assert span.attributes[GenAIAttributes.INPUT_TOKENS] == 80
+    assert span.attributes[GenAIAttributes.OUTPUT_TOKENS] == 20
+    # The contextvar token must be released exactly once — a double-reset
+    # raises, which would otherwise crash the NEXT litellm call on this
+    # thread rather than merely being redundant work.
+    assert litellm_mod._tj_litellm_active.get(False) is False
+
+
+def test_litellm_async_stream_survives_bare_anext_consumption():
+    """Before this fix, `_AsyncStreamWrapper` had no `__anext__` at all — a
+    manual `await wrapper.__anext__()` raised `AttributeError` immediately
+    (Python's `async for` only ever drove `__aiter__()`'s separate generator,
+    never this object's own `__anext__`). Drains by hand via real
+    `await __anext__()` calls to a genuine `StopAsyncIteration` — the async
+    parallel to the sync bare-`next()` idiom — and asserts the span
+    finalizes exactly once with usage present."""
+    import asyncio
+
+    from tokenjam.sdk.integrations.litellm import _AsyncStreamWrapper
+
+    async def _run():
+        span = _FakeSpan()
+        usage = SimpleNamespace(
+            prompt_tokens=90, completion_tokens=30,
+            cache_read_input_tokens=None, prompt_tokens_details=None,
+            cache_creation_input_tokens=None,
+        )
+        chunk1 = SimpleNamespace(usage=None, choices=[SimpleNamespace(delta=SimpleNamespace(content="Hi"))])
+        chunk2 = SimpleNamespace(usage=usage, choices=[])
+
+        async def _source():
+            yield chunk1
+            yield chunk2
+
+        from tokenjam.sdk.integrations import litellm as litellm_mod
+        real_token = litellm_mod._tj_litellm_active.set(True)
+
+        wrapper = _AsyncStreamWrapper(_source(), span, "claude-haiku-4-5", real_token)
+
+        collected = []
+        while True:
+            try:
+                collected.append(await wrapper.__anext__())
+            except StopAsyncIteration:
+                break
+
+        assert len(collected) == 2
+        assert span.ended
+        assert span.attributes[GenAIAttributes.INPUT_TOKENS] == 90
+        assert span.attributes[GenAIAttributes.OUTPUT_TOKENS] == 30
+        # Finalized exactly once — a second finalize would double-reset the
+        # contextvar token, which raises (and would crash the next litellm
+        # call on this task rather than merely repeat work).
+        assert litellm_mod._tj_litellm_active.get(False) is False
+
+    asyncio.run(_run())
+
+
+def test_litellm_async_stream_finalizes_only_once_across_anext_and_aiter():
+    """A caller could plausibly drain via bare __anext__() to exhaustion and
+    THEN also exercise __aiter__ (unusual, but the guard must hold): the
+    second path must be a genuine no-op, not a double-`span.end()` or a
+    double contextvar reset."""
+    import asyncio
+
+    from tokenjam.sdk.integrations.litellm import _AsyncStreamWrapper
+
+    async def _run():
+        span = _FakeSpan()
+        chunk = SimpleNamespace(usage=None, choices=[])
+
+        async def _source():
+            yield chunk
+
+        from tokenjam.sdk.integrations import litellm as litellm_mod
+        real_token = litellm_mod._tj_litellm_active.set(True)
+        wrapper = _AsyncStreamWrapper(_source(), span, "claude-haiku-4-5", real_token)
+
+        await wrapper.__anext__()
+        with pytest.raises(StopAsyncIteration):
+            await wrapper.__anext__()
+        assert span.ended
+
+        # __aiter__()'s generator is a SEPARATE object over the SAME
+        # already-exhausted stream, so it immediately hits StopAsyncIteration
+        # too — its own finally calls _finalize again, which must no-op.
+        async for _ in wrapper:
+            pass  # pragma: no cover - stream is exhausted, never yields
+
+    asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------

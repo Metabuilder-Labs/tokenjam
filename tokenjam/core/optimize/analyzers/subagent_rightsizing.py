@@ -51,6 +51,7 @@ from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.span_pricing import price_span, rates_at, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
+from tokenjam.core.persona_scope import add_persona_clause
 
 # "Produced little": total output tokens below this look like a small task.
 # Used by over_provisioned only — over_powered dropped this clause (see module
@@ -97,13 +98,13 @@ SUBAGENT_HONESTY_CAVEAT = (
 # pricing data, or no cohort baseline (fewer than min_cohort_sessions
 # like-shaped peers) contributes nothing to that component.
 SUBAGENT_ESTIMATE_BASIS = (
-    "over_powered subagents (any premium-tier subagent above the noise floor) "
-    "priced at claude-sonnet-5 (one tier down, not model_downgrade's "
-    "two-tier opus-to-haiku jump) over the same tokens, a model-swap delta, "
-    "structural fit only, plus over_provisioned subagents priced on their "
-    "context excess over their dispatch cohort's own median (same calling "
-    "agent + model), at the cache-read rate; no quality validation, review "
-    "before re-dispatching. No guaranteed saving."
+    "over_powered subagents (any premium-tier subagent above the noise floor) are priced at "
+    "claude-sonnet-5, one tier down. That is not model_downgrade's two-tier opus-to-haiku "
+    "jump. The price uses the same tokens: a model-swap delta, structural fit only.\n\n"
+    "over_provisioned subagents are priced on their context excess over their dispatch "
+    "cohort's own median (same calling agent + model). That excess is priced at the "
+    "cache-read rate. There is no quality validation: review before re-dispatching. "
+    "No guaranteed saving."
 )
 
 
@@ -197,7 +198,8 @@ def _flags_for(
 
 def _compute_rows(
     conn, since, until, agent_id: str | None,
-    *, min_flag_cost_usd: float = MIN_FLAG_COST_USD,
+    *, persona_scope: str | None = None,
+    min_flag_cost_usd: float = MIN_FLAG_COST_USD,
 ) -> list[SubagentRow]:
     """Aggregate per (session_id, sub_agent_id) for real subagents in window."""
     clauses = [
@@ -208,6 +210,10 @@ def _compute_rows(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT session_id, sub_agent_id, "
@@ -458,6 +464,7 @@ def run(ctx: AnalyzerContext) -> None:
     )
     rows = _compute_rows(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        persona_scope=ctx.persona_scope,
         min_flag_cost_usd=min_flag_cost_usd,
     )
     if not rows:

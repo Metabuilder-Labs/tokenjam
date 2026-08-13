@@ -262,9 +262,15 @@ def test_a_failed_rescan_never_discards_the_last_good_report(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_overlapping_recomputes_no_op_rather_than_stacking(tmp_path, monkeypatch):
-    """Two concurrent recomputes must produce ONE full-corpus pass. The second
-    returns `None` immediately; it never blocks waiting on the first, which
-    would just move the cost rather than avoid it."""
+    """Two concurrent recomputes must produce ONE recompute. The second returns
+    `None` immediately; it never blocks waiting on the first, which would just
+    move the cost rather than avoid it.
+
+    Patches `build_persona_reports`, which is what `recompute_now` calls — it
+    runs `build_report` once per scoping persona internally, so the unit of
+    "one pass" is this function, not the single corpus sweep it used to be.
+    Patching `build_report` instead would no longer intercept the recompute at
+    all, and the test would hang rather than fail with a useful message."""
     path = tmp_path / "report.json"
     db = InMemoryBackend()
     cfg = TjConfig(version="1")
@@ -273,7 +279,7 @@ def test_overlapping_recomputes_no_op_rather_than_stacking(tmp_path, monkeypatch
     first_inside = threading.Event()
     release_first = threading.Event()
 
-    def _slow_build_report(**kwargs):
+    def _slow_build_persona_reports(*args, **kwargs):
         passes.append(1)
         first_inside.set()
         release_first.wait(timeout=5)
@@ -284,7 +290,9 @@ def test_overlapping_recomputes_no_op_rather_than_stacking(tmp_path, monkeypatch
             sessions=0, spans=0, total_tokens=0, total_cost_usd=0.0,
         ))
 
-    monkeypatch.setattr("tokenjam.core.optimize.build_report", _slow_build_report)
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.build_persona_reports", _slow_build_persona_reports,
+    )
 
     result: dict[str, object] = {}
 

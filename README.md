@@ -2,7 +2,7 @@
 
 <img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="830">
 
-TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, what to script, and what plans you've already paid to figure out. It then shows it all in a local browser dashboard. Runs entirely on your machine.
+Reduce token use by up to 40%. TokenJam reads your agent's telemetry, finds overspending, and suggests fixes. Works with Claude Code, Codex, and your own SDK or API agents. Shows it all in a local browser dashboard. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -14,11 +14,15 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 **No cloud · No signup · No vendor lock-in**
 
+</div>
 
-<div align="center"><img src="docs/assets/tokenjam-flow-band.svg" alt="Your agents (Claude Code, Codex, Cursor) feed TokenJam, which breaks into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench)." width="830"></div>
-<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
+---
 
+TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for.
 
+<div align="center">
+
+<img src="docs/assets/tokenjam-dashboard.png" alt="TokenJam Lens dashboard: past overspend by category, spend and token totals, and sessions by model over the last 30 days." width="900">
 
 </div>
 
@@ -26,198 +30,105 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 ## Get started
 
-TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for.
-
-One command sets up live capture, all thirteen analyzers, Lens (the local dashboard), and the zero-token statusline:
+One command sets up live capture:
 
 ```bash
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 ```
 
-`tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path; under npx it first offers to make itself a permanent install. For Claude Code and Codex that means backfilling your recent history plus the statusline and hooks; restart and you're live. Then run:
+`tj onboard` asks how you use AI agents and wires that path: live capture, the analyzers your setup can act on, and Lens. Coding-agent users (Claude Code, Codex) also get their recent history backfilled and a zero-token status line wired in; restart the agent and you're live. SDK and API users add `@watch()` to their own code, or point an OTLP exporter at `tj serve`.
+
+Then open the dashboard:
 
 ```bash
-tj optimize          # cost-saving candidates from your actual usage
-tj serve             # open the dashboard at http://127.0.0.1:7391/
+tj serve   # Lens, at http://127.0.0.1:7391/
 ```
 
-The statusline is **zero-token**; `tj statusline` runs out-of-band each turn (no model quota) and shows this session's re-read share with a `/compact` nudge: `◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota`. It does **not** add an in-loop MCP server (that's an SDK / API surface; an MCP would tax every turn).
+It opens on your spend so far: which models, which sessions, where it went and proposed fixes. Prefer the terminal?
 
-Run bare `tj` any time and it points you to the next best action (`tj status`, `tj tokenmaxx`, `tj optimize`, or `tj serve`).
+```bash
+tj optimize          # what your usage is costing, and where it is recoverable
+tj rules list        # the fixes that came out of it, and the files they'd land in
+```
 
-**Just looking?** `npx tokenjam` prints a 15-second read-only report over the logs you already have: no install, nothing kept.
+`tj rules list` reads the last analysis, so run it after `tj optimize` or after the daemon's first cycle. Not sure what to do next? Bare `tj` always points at the next useful command.
 
-Building your own agent with the SDK: install *in your project* (`pip install tokenjam` + `tj onboard`); see the table below.
+**Just looking?** `npx tokenjam` prints a read-only report over the logs you already have. No install, nothing kept.
 
-<sub>`npx tokenjam` and `uvx tokenjam` launch the Python CLI via `uvx`/`pipx` under the hood; see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
+<div align="center"><img src="docs/assets/tokenjam-2d.png" alt="Same output, fewer tokens: measured spend from Claude Code, Codex, Google (Gemini, ADK), AWS (Bedrock, Strands), the Python and TypeScript SDKs, LangChain/CrewAI, and OTLP/Langfuse flows into tokenjam, which analyzes it and shows how much you are overspending: today's spend against the same work with tokenjam applied, 34% fewer tokens per month, from 14 checks each with a concrete fix" width="830"></div>
 
-<div align="center"><img src="docs/assets/tokenjam-token-flow.png" alt="Token flow: telemetry from Claude Code, Codex, Google, AWS, the Python and TypeScript SDKs, LangChain/CrewAI, and OTLP/Langfuse flows into tokenjam, which decomposes where every token goes: 94% re-reads of history and context, 5.1% tool output, 0.9% net-new work, measured over a 61-session history" width="830"></div>
+---
+
+### Claude Code plugin
+
+TokenJam also ships as a Claude Code plugin — see [`plugin/`](plugin/) for the plugin source (`plugin/.claude-plugin/plugin.json`) and install instructions. It adds slash commands that wrap the `tj` CLI; it does not install anything on its own, so `tj` still needs to be on your `PATH` (`npx tokenjam@latest` or `pipx install tokenjam`).
+
+```
+/plugin install tokenjam
+/onboard    # wires the statusline, resume-brief hook, and local telemetry ingest — same as `tj onboard --claude-code`
+/status     # tj status
+/optimize   # tj optimize
+/doctor     # tj doctor
+/uninstall  # tj uninstall --yes
+```
+
+The plugin deliberately does not ship its own hooks or an `.mcp.json`: the statusline and hooks are wired by `/onboard` calling the existing, idempotent `tj onboard --claude-code`, so there's exactly one writer of `~/.claude/settings.json`. TokenJam's MCP server (`tj mcp`) also stays opt-in and out of this plugin's default install — it's built for SDK/API integrations that already sit in the request path, not for Claude Code, where an in-loop MCP measurably taxes every turn.
 
 ---
 
 ## Which path are you?
 
-`pipx install tokenjam && tj onboard` is the entry point for everyone: it's an interactive wizard
-that asks how you use AI agents and wires the right path for you. `--claude-code` / `--codex` just
-pre-answer the wizard's first question (skip it in scripts/CI); they're shortcuts, not separate setups.
+`tj onboard` is the entry point for everyone; the table is what it wires for each answer. Your answer
+also picks your analyzer set, since a coding agent and your own SDK code can change different things.
+Most analyzers run for both: [the full split](#the-analyzers) is below.
 
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `tj onboard` (or `tj onboard --claude-code` to skip the first question) | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all thirteen analyzers + Lens |
-| **Codex CLI user** | `tj onboard` (or `tj onboard --codex`) | Same onboarding flow, wired for Codex's session logs |
-| **Python SDK / API agent dev** | `tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
-| **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
-| **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone`, same flags) | One-time import of your existing traces into the local DB |
-| **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion: no SDK, no patch |
+| **Claude Code user** | `tj onboard` | Backfills your recent history, wires a zero-token status line, unlocks the coding-agent analyzers and Lens |
+| **Codex CLI user** | `tj onboard` | Same flow, wired for Codex's session logs |
+| **Python SDK / API dev** | `tj onboard`, then `@watch()` in your code ([docs](docs/python-sdk.md)) | Live capture from your own process; no CLI backfill |
+| **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` and one `patch_*()` call | Framework-level spans, no manual instrumentation |
+| **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>` (or `helicone`) | One-time import of your existing traces |
+| **Any OTel-emitting agent** | Point your OTLP exporter at `http://127.0.0.1:7391/v1/traces` | Zero-code ingestion: no SDK, no patch |
 
-**Working across multiple projects?** Run `tj onboard` once inside each one — sessions and cost
-proposals group per project in Lens, keyed on the project name each onboard run captures. Already
-onboarded elsewhere? `tj onboard --add-project` registers just the current repo's namespace against
-your existing setup, skipping the plan/budget prompts and backfill.
+`--claude-code` and `--codex` pre-answer the wizard's first question for scripts and CI; they are
+shortcuts, not separate setups. Run `tj onboard` once inside each project you work in, since sessions
+and proposals group per project in Lens, or `tj onboard --add-project` to register another repo
+against a setup you already have.
 
-LlamaIndex and the OpenAI Agents SDK ship their own native OTel support; point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
-
-A single page walks every path, each ending with a verify step: see
-[docs/getting-started.md](docs/getting-started.md).
-
----
-
-## Thirteen analyzers + Lens. One install.
-
-TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools and surfaces cost-savings advisories across thirteen areas, then brings them together in a local browser dashboard.
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-### Downsize
-
-`tj optimize downsize`
-
-Flags sessions where a cheaper same-family model is a downsize candidate. Never claims quality equivalence.
-
-[Details →](docs/optimize/downsize.md)
-
-</td>
-<td width="50%" valign="top">
-
-### Cache
-
-`tj optimize cache`
-
-Your caching ratio per (provider, model), plus suggested Anthropic prompt-cache breakpoints from your real usage.
-
-[Details →](docs/optimize/cache.md)
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### Script
-
-`tj optimize script`
-
-Deterministic `(tool_name, arg_shape)` sequences that match work a plain script could replace.
-
-[Details →](docs/optimize/script.md)
-
-</td>
-<td width="50%" valign="top">
-
-### Trim
-
-`tj optimize trim`
-
-Prompt regions the model gives little weight to. Surfaces what's safe to cut.
-
-[Details →](docs/optimize/trim.md)
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### Reuse
-
-`tj optimize reuse`
-
-Sessions where your agent re-plans the same work, exported as reviewable skeleton templates.
-
-[Details →](docs/optimize/reuse.md)
-
-</td>
-<td width="50%" valign="top">
-
-### Subagent right-sizing
-
-`tj optimize subagent`
-
-Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls hidden in the parent total.
-
-[Details →](docs/optimize/subagent.md)
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### Verbosity
-
-`tj optimize verbosity`
-
-Flags sessions whose output runs long against a per-(tool, task-shape) baseline. Predicted high-verbosity output — review before constraining a response.
-
-[Details →](docs/optimize/verbosity.md)
-
-</td>
-<td width="50%" valign="top">
-</td>
-</tr>
-</table>
-
-`tj optimize` (no args) runs all thirteen analyzers: the seven above, plus `relearn` (a blocker your agent keeps silently re-hitting across sessions), `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen), `cache-recommend` (the Cache card's breakpoint-suggestion half, above), `resend` (token-weighted repeat-context share across turns, independent of whether caching is enabled), `summarize` (prompt files worth summarizing, scanned from disk), and `deadweight` (MCP servers whose schemas load into every session and are never called). Run a subset with `tj optimize downsize cache reuse`. Lens brings it all together: see the dashboard below.
+LlamaIndex and the OpenAI Agents SDK ship native OTel support; point their exporter at `tj serve`
+instead of installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
+Every path, each ending with a verify step: [docs/getting-started.md](docs/getting-started.md).
 
 ---
 
-## Lens: the local dashboard
+## The analyzers
 
-`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and current health, with an embedded explorer to slice your usage any way (metric × dimension × chart); plus Status, Traces, Cost, Analytics, Alerts, Drift, Optimize, and Budget screens. Plan-tier-aware, fully offline, no signup.
+TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools,
+then runs a suite of analyzers over it. They are persona-scoped: Coding agent (Claude Code,
+Codex), and SDK/API code. `tj optimize` runs everything your persona can act on; name a
+subset with `tj optimize downsize resend relearn`.
 
-<table>
-<tr>
-<td width="50%"><img src="docs/screenshots/tj-dashboard.png" alt="Dashboard: recoverable waste, current health, and the embedded pivot explorer" /></td>
-<td width="50%"><img src="docs/screenshots/tj-cost.png" alt="Cost: spend over time + cache savings" /></td>
-</tr>
-<tr>
-<td width="50%"><img src="docs/screenshots/tj-traces.png" alt="Trace waterfall: session-level spans with cost annotations" /></td>
-<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Status: per-agent cards" /></td>
-</tr>
-<tr>
-<td width="50%"><img src="docs/screenshots/tj-dashboard-tools.png" alt="Analytics explorer: tool-usage leaderboard" /></td>
-<td width="50%"><img src="docs/screenshots/tj-dashboard-leaderboard.png" alt="Analytics explorer: cost-by-model leaderboard" /></td>
-</tr>
-</table>
+<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
 
-→ [tokenjam.dev/products/lens](https://tokenjam.dev/products/lens) for the visual walkthrough.
+| Analyzer | CC | SDK | Description |
+|---|:--:|:--:|---|
+| `relearn` | ✅ | ✅ | Blockers your agent keeps re-hitting across sessions, and what the repeated recovery costs |
+| `resend` | ✅ | ✅ | How much of each turn's prompt is context you already sent, whether or not caching is on |
+| `downsize` | ✅ | ✅ | Sessions where a cheaper same-family model is a candidate. Never claims quality equivalence |
+| `subagent` | ✅ | — | Per-subagent cost hidden inside the parent session's total, and which dispatches ran over-powered |
+| `summarize` | ✅ | — | Agent instruction files (`CLAUDE.md`, `AGENTS.md`, rules, skills, commands) large enough to tax every session, scanned from disk |
+| `deadweight` | ✅ | — | MCP servers whose schemas load into every session and are never called |
+| `cache` | — | ✅ | Your caching ratio per (provider, model), and where it is worst |
+| `cache-recommend` | — | ✅ | Where to place prompt-cache breakpoints, from the prefixes you actually repeat |
+| `trim` | — | ✅ | Prompt regions the model gives little weight to |
+| `verbosity` | — | ✅ | Sessions whose output runs long against a per-(tool, task-shape) baseline |
+| `script` | — | ✅ | Deterministic tool sequences a plain script could replace |
+| `reuse` | — | ✅ | Sessions where your agent re-plans work it has already planned |
 
----
+They find where your agents are overspending. They also tell you where they are not, so you don't spend a week optimizing something that was never costing you anything.
 
-## Beyond optimization
-
-TokenJam is also a full observability stack. The thirteen analyzers and Lens ride on top.
-
-- **Real-time cost tracking**: every LLM call priced as it happens
-- **Safety alerts**: 13 alert types, 6 channels (ntfy, Discord, Telegram, webhook, file, stdout)
-- **Behavioral drift detection**: Z-score baselines, no LLM required
-- **Schema validation**: declare or infer JSON Schema for tool outputs
-- **Context & quota audits**: `tj context` (re-read vs. net-new split) and `tj quota-audit` (retroactive Opus usage check) over your Claude Code sessions
-- **Close the loop**: `tj loop` annotates a run with a verdict, promotes a bad run into a stored expectation, and tracks whether later runs pass or regress against it
-- **Prompt summarization (advisory)**: `tj summarize` finds prompt files worth condensing and estimates the per-call saving
-- **Enforcement-plane proxy (suggest mode)**: `tj proxy` surfaces routing suggestions locally, without rewriting requests
-- **OTel-native**: point any OTLP exporter at `tj serve` and you're done
-- **Statusline**: a zero-token Claude Code status line (`tj statusline`, wired by `tj onboard --claude-code`) showing this session's re-read share + a `/compact` nudge
-- **MCP server**: in-request-path tools for **SDK / API** users (not Claude Code / Codex subscription users, since an in-loop MCP would be a per-turn quota burden there; they get the out-of-band statusline instead)
+That balance is why some checks stay dark for you: when the lever that would recover a category of spend belongs to your harness rather than to you, quoting the figure only makes you feel worse. A check also stays dark when its evidence does not exist on your setup; `summarize` reads agent instruction files off disk, which an SDK or API workload does not have, so it is not offered there. It is also why a quiet result is an answer rather than a failed scan. Optimizing has a price of its own, paid in your attention and sometimes in the agent's output, and a bill lowered by making your agent terser or dumber was never a saving.
 
 ---
 
@@ -260,23 +171,6 @@ Bench reports measured pass-rate on a suite, never "certified" or "quality prese
 | Export to Grafana / Datadog / NDJSON | [docs/export.md](docs/export.md) |
 | NemoClaw sandbox observer | [docs/nemoclaw-integration.md](docs/nemoclaw-integration.md) |
 | Release notes | [GitHub Releases](https://github.com/Metabuilder-Labs/tokenjam/releases) |
-
----
-
-## Roadmap
-
-**Shipped:** Downsize · Cache · Script · Trim · Reuse · Subagent right-sizing · Claude Code + Codex onboarding · MCP server · Lens web UI · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview · Context & quota audits · Close-the-loop annotations/expectations · Prompt summarization (advisory) · Enforcement-plane proxy (suggest mode)
-
-**Up next** (roughly):
-- [ ] Continued Lens polish + per-product visual branding
-- [ ] `tj policy add | edit | apply`: unified rule surface (today: `tj policy list` / `tj policy decisions`)
-- [ ] `tj replay`: replay captured sessions against new model versions
-- [ ] TypeScript framework patches (LangChain JS, OpenAI Agents SDK)
-- [ ] Vercel AI SDK & Mastra integrations
-- [ ] Published Docker image
-- [ ] GitHub Actions for CI drift/cost checks
-
-Full version-by-version history: [GitHub Releases](https://github.com/Metabuilder-Labs/tokenjam/releases).
 
 ---
 

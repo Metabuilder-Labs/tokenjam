@@ -61,6 +61,27 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 #: nearest of these and the response says which was applied.
 RELEARN_WINDOW_LABELS: tuple[str, ...] = ("1h", "24h", "7d", "30d", "90d")
 
+
+def window_labels_including(label: str | None) -> tuple[str, ...]:
+    """The fixed vocabulary plus the resolved analysis span, deduplicated.
+
+    The Review inbox publishes ONE window label across both feeds, and the cost
+    side's window is the resolved analysis span (`core/analysis_span
+    .window_days_for`) rather than a member of the fixed vocabulary above. A
+    span that had no precomputed bucket here could never contribute a relearn
+    row to that headline — the exact-match lookup would find nothing and every
+    cluster would fall into the `excluded` channel — so the span joins the
+    vocabulary and the two sides meet.
+
+    Both sides derive the label from the same seam, but not in the same pass:
+    the detector runs on its own schedule, so a span that moves between runs
+    leaves the cache one recompute behind. That degrades honestly through the
+    existing `excluded` channel rather than mislabelling, and self-heals.
+    """
+    if not label or label in RELEARN_WINDOW_LABELS:
+        return RELEARN_WINDOW_LABELS
+    return RELEARN_WINDOW_LABELS + (label,)
+
 _LABEL_RE = re.compile(r"^(\d+)([mhd])$")
 _UNIT_DAYS = {"m": 1.0 / 1440.0, "h": 1.0 / 24.0, "d": 1.0}
 

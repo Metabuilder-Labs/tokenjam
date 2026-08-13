@@ -11,7 +11,7 @@ contends with the live request connection's write lock.
 Phase 1 (detect + surface) was read-only. Phase 2 (this module's ``/apply``,
 ``/{id}/enable``, ``/{id}/disable``, ``/{id}/revert``, ``/applied``) adds the
 Approve stage: writes route through ``core.optimize.relearn_apply`` for every
-rung-routing / backup / git-commit / fail-open guarantee — this route only
+delivery-routing / backup / git-commit / fail-open guarantee — this route only
 translates HTTP <-> that module's ``RelearnApplyRefused`` (-> 409) contract,
 it never hand-rolls a parallel write path. ``/apply`` names a STORED proposal
 (``core.optimize.relearn_proposals``) and never accepts cluster content from
@@ -47,6 +47,8 @@ from tokenjam.core.optimize import (
     relearn_proposals,
     relearn_store,
 )
+from tokenjam.core.rulewrite.kinds import DEFAULT_DELIVERY
+from tokenjam.core.rulewrite.legacy import delivery_from_legacy_record
 from tokenjam.core.optimize.relearn_window import resolve_window_label, window_report
 
 router = APIRouter()
@@ -146,20 +148,37 @@ def _conn(request: Request) -> Any | None:
 
 
 def _persona(request: Request) -> str:
-    """Dominant user persona, full-corpus (relearn is the unbounded-history
-    detector — see its module docstring — so its own empty-state copy needs
-    the same unbounded classification, not a windowed one that could
-    disagree with what the daemon actually gated relearn's write levers on
-    in ``relearn_store.recompute_now``). Mirrors that same computation;
-    degrades to ``"unknown"`` on any error so a persona-classification
-    failure never breaks the inbox itself.
+    """Dominant user persona, over the SAME window every published figure is.
+
+    This classified over the full corpus, and said so for a reason: it mirrored
+    ``relearn_store.recompute_now``, which also classified full-corpus, so that
+    this surface's empty-state copy could not disagree with what the daemon had
+    actually gated relearn's write levers on. The mirroring was right; the thing
+    being mirrored was not. Persona decides which analyzers run at all
+    (``PERSONA_DISABLED_ANALYZERS``), and resolving it over all history here
+    while ``runner.build_report`` resolved it over the window meant the
+    Dashboard and this surface could disagree about which findings exist.
+
+    Both now resolve it over the report window
+    (``core/optimize/report_window.py``), so the mirroring still holds and there
+    is one answer rather than two. Degrades to ``"unknown"`` on any error, so a
+    persona-classification failure never breaks the inbox itself.
     """
     try:
         conn = _conn(request)
         if conn is None:
             return "unknown"
+        from datetime import timedelta
+
+        from tokenjam.core.optimize.report_window import report_window_days
+        from tokenjam.utils.time_parse import utcnow
+
+        config = _config(request)
+        until = utcnow()
+        since = until - timedelta(days=report_window_days(config, conn))
         return dominant_persona(
-            agent_persona_mix(conn), declared_plan=config_declared_plan(_config(request)),
+            agent_persona_mix(conn, since, until),
+            declared_plan=config_declared_plan(config),
         )
     except Exception:
         return "unknown"
@@ -178,6 +197,29 @@ def _resolvable_session_ids(conn: Any | None, session_ids: list[str]) -> set[str
     except Exception:
         return set()
     return {str(r[0]) for r in rows}
+
+
+def _scan_provenance(
+    stored: dict[str, Any] | None, *, prefix: str = "",
+) -> dict[str, Any]:
+    """The provenance keys every analyzer-fed payload carries.
+
+    A thin alias for ``cycle_provenance.provenance_block`` — which
+    ``report_store.stored_report_block`` also calls, so the three feeds one
+    ``ScanBar`` reads cannot spell a key differently or resolve staleness
+    differently. This function used to build the keys BY HAND from a
+    caller-supplied build string, mirroring the report envelope's list "on
+    purpose"; two hand-maintained copies of one key set is the same
+    two-derivations-of-one-truth defect, one layer up in the payload.
+
+    ``stored`` is the artifact this payload is built from — the relearn cache,
+    or the cost block (``prefix="cost_"``, since the cost proposals namespace
+    their keys inside the relearn cache file). ``None`` is a cold store: every
+    key still travels, with nothing claimed about a result that does not exist.
+    """
+    from tokenjam.core.optimize.cycle_provenance import provenance_block
+
+    return provenance_block(stored, prefix=prefix)
 
 
 def _with_example_resolvability(finding: Any, conn: Any | None) -> Any:
@@ -311,8 +353,23 @@ def get_relearn_proposals(
                     "and the dollar figures to occurrences inside the window. "
                     "Omit for the full unbounded observation.",
     ),
+    persona: str | None = None,
 ) -> dict[str, Any]:
     """Cached relearn-detector proposals for the Review inbox.
+
+    ``persona`` scopes the clusters to one side of the "Viewing as" picker.
+    relearn's three lanes are ALREADY partitioned by persona — the OTel lane
+    reads only non-coding-agent spans, the transcript and archive lanes read
+    only Claude Code sessions — so the scan cycle stores each persona's own
+    lane-partitioned finding and this route selects among them. Without that,
+    an SDK reader saw recurring-failure clusters mined out of Claude Code
+    transcripts, and the Dashboard's "recurring mistakes" count sat beside
+    persona-scoped dollar tiles describing a different population.
+
+    A cache with no per-persona findings (one written before they existed)
+    reports ``persona_scoped: false`` and ``finding: null`` rather than the
+    whole-corpus finding under a persona's label. That is NOT-YET-KNOWN and a
+    surface must render it as such.
 
     Returns ``{"status": "ready"|"computing"|"never_run", "computed_at":
     iso|null, "finding": <RelearnFinding dict>|null, "framing": dict}``. A
@@ -372,14 +429,50 @@ def get_relearn_proposals(
     if since_error is not None:
         raise HTTPException(status_code=400, detail=f"Invalid since: {since_error}")
 
-    cached = relearn_store.read_cache(config=_config(request))
+    from tokenjam.core.framing import PERSONAS
+    from tokenjam.core.persona_scope import persona_scopes_population
+
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
+    config = _config(request)
+    cached = relearn_store.read_cache(config=config)
     computing = relearn_store.is_computing()
+    # THE PERSONA-PARTITIONED FINDING, when one is being asked for. It lives in
+    # the cost store beside that persona's proposals because both come out of
+    # the same scan cycle's scoped pass, and keeping them in one artifact is
+    # what stops the inbox's two feeds describing two populations.
+    persona_scoped = True
+    if persona_scopes_population(persona):
+        cost_block = relearn_store.read_cost_proposals(config=config) or {}
+        by_persona = cost_block.get("cost_relearn_by_persona") or {}
+        if persona in by_persona:
+            cached = {**(cached or {}), "finding": by_persona[persona]}
+        else:
+            # No scoped finding. Refusing is the only honest answer: the
+            # whole-corpus finding is not this persona's, and an empty one
+            # would read as "no recurring mistakes", which is a measurement
+            # nobody took.
+            persona_scoped = False
+            cached = None
     conn = _conn(request)
     data_span = available_data_span(conn).to_dict()
     if cached is None:
         return {
-            "status": "computing" if computing else "never_run",
+            # A ledger that cannot answer for this persona is its own state,
+            # not "never run": the detector HAS run, just not in a form this
+            # persona can be served from. A rescan resolves it; a client must
+            # render both as unknown and neither as "no recurring mistakes".
+            "status": (
+                "persona_unscoped" if not persona_scoped
+                else "computing" if computing else "never_run"
+            ),
+            "persona_requested": persona,
+            "persona_scoped": persona_scoped,
             "computed_at": None,
+            **_scan_provenance(None),
             "finding": None,
             "framing": _framing(request),
             "persona": _persona(request),
@@ -416,7 +509,10 @@ def get_relearn_proposals(
     finding, window, windowed_total = _apply_window(finding, since)
     return {
         "status": "computing" if computing else "ready",
+        "persona_requested": persona,
+        "persona_scoped": persona_scoped,
         "computed_at": cached.get("computed_at"),
+        **_scan_provenance(cached),
         "finding": _with_example_resolvability(finding, conn),
         "framing": _framing(request),
         "persona": _persona(request),
@@ -444,7 +540,7 @@ def refresh_relearn_proposals(request: Request) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- #
 # Apply stage (Phase 2) — every write routes through `core.optimize.
-# relearn_apply`, which owns the rung-routing / backup / git-commit /
+# relearn_apply`, which owns the delivery-routing / backup / git-commit /
 # fail-open / active-session-guard guarantees. Default is a DRY-RUN
 # (go=False): the UI's card shows the diff before the user commits to it.
 # --------------------------------------------------------------------------- #
@@ -481,15 +577,15 @@ class ApplyRelearnRequest(BaseModel):
 
 @router.post("/relearn/apply", dependencies=_WRITE_AUTH)
 def post_relearn_apply(request: Request, body: ApplyRelearnRequest) -> dict[str, Any]:
-    """Dry-run (default) or write (``go=true``) an approved fix at its rung.
+    """Dry-run (default) or write (``go=true``) an approved fix by its delivery.
 
     Takes a ``proposal_id`` from ``GET /relearn/proposals``. 404s when no
     stored proposal carries that ID: a client-constructed cluster has no way
     into the write machinery, which is what makes "human-gated" a property of
     the server rather than of the UI flow.
 
-    409s (via ``RelearnApplyRefused``) on: an unknown rung, a family with no
-    matcher at an enforcement rung, a create-only target (skill/hook) that
+    409s (via ``RelearnApplyRefused``) on: an unresolvable delivery, a family
+    with no matcher for a hook, a create-only target (skill/hook) that
     already holds a non-TokenJam file, or (unless ``force=true``) a live
     session just seen in the target repo (§7: never apply mid-session). The
     UI's re-send-with-force is the explicit "apply anyway" the spec calls for.
@@ -585,7 +681,7 @@ class EnableEnforcementRequest(BaseModel):
 
 @router.post("/relearn/{fix_id}/enable", dependencies=_WRITE_AUTH)
 def post_relearn_enable(request: Request, fix_id: str, body: EnableEnforcementRequest) -> dict[str, Any]:
-    """Wire a generated rung 3-5 hook into settings.json. Requires an explicit
+    """Wire a generated hook into settings.json. Requires an explicit
     ``confirm: true`` — the UI's "this intercepts your tools" warning."""
     try:
         return relearn_apply.enable_enforcement(_config(request), fix_id, confirm=body.confirm)
@@ -654,10 +750,32 @@ def post_relearn_revert(request: Request, fix_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 @router.get("/relearn/cost-proposals", dependencies=[Depends(require_api_key)])
-def get_cost_proposals(request: Request) -> dict[str, Any]:
+def get_cost_proposals(
+    request: Request, persona: str | None = None,
+) -> dict[str, Any]:
     """Cost proposals for the Review inbox, listed beside relearn proposals.
 
-    Returns ``{"status": "ready"|"computing"|"never_run"|"error",
+    ``persona`` scopes the figures to one side of the dashboard's "Viewing as"
+    picker. This endpoint feeds the Dashboard hero band, the Total-opportunity
+    tile AND every Optimize sub-page's inline fix cards, so before it took this
+    parameter those three surfaces published whole-corpus dollars under
+    whichever persona the reader had selected — the picker changed the label and
+    nothing else.
+
+    The narrowing happens at COMPUTE time, not here. ``/optimize`` can accept a
+    persona and slice on read because it is slicing a set of analyzer NAMES; a
+    dollar total summed over a mixed corpus has no such seam. So the scan cycle
+    stores one proposal list per persona and this route selects among them. A
+    ledger that predates that — or one written by a lone ``tj optimize``
+    refresh, which has no per-persona reports to adapt — cannot answer, and
+    returns ``status: "persona_unscoped"`` with ``persona_scoped: false``, an
+    empty ``proposals`` and a rollup summed over nothing. **A client must render
+    that as not-yet-known and offer a rescan.** It is the third state (root
+    anti-pattern 22): rendering it as ``$0`` or "no waste found" asserts a
+    measurement that was never taken, and does it in the reassuring direction.
+
+    Returns ``{"status": "ready"|"computing"|"never_run"|"error"|
+    "persona_unscoped",
     "computed_at": iso|null, "proposals": [dict, ...], "rollup": dict,
     "degraded": bool, "last_error": str|null, "last_error_at": iso|null}``.
 
@@ -733,23 +851,38 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     it. For a cost proposal the contribution IS ``past_overspend_usd`` unchanged;
     relearn's differs from its row's unbounded figure, which is why the field
     exists rather than each surface picking a number per row kind."""
+    from tokenjam.core.framing import PERSONAS
+    from tokenjam.core.persona_scope import persona_scopes_population
+
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
     computing = cost_proposals_mod.is_computing_cost_proposals()
     # Listed WITH their proposal_ids: a model-routing card's Approve names an
     # ID and nothing else, so the ID has to travel with the card it belongs to.
-    proposals: list[dict[str, Any]] = (
-        relearn_proposals.list_cost_proposals(config)
-        if block is not None and block.get("cost_computed_at") else []
+    #
+    # `persona_resolved` is load-bearing and is published below. A ledger that
+    # predates per-persona proposals holds ONE whole-corpus list, and this
+    # endpoint is what the Dashboard hero band, the Total-opportunity tile and
+    # every Optimize sub-page's inline fix cards read — so serving that list
+    # under a persona label is the single biggest way a mixed-corpus figure
+    # reaches a persona-scoped surface. There is no read-time narrowing that
+    # can rescue it, so the answer is "not yet known" and a rescan.
+    proposals, persona_resolved = (
+        relearn_proposals.cost_proposals_scoped_to_persona(config, persona=persona)
+        if block is not None and block.get("cost_computed_at") else ([], True)
     )
-    applied_sigs = {
-        str(rec.get("signature") or "") for rec in cost_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
-    open_proposals = [
-        p for p in proposals
-        if not cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
-    ]
+    # Stamped BEFORE anything reads them, so the applied state a row carries and
+    # the population the rollup sums are one resolution of the ledger rather than
+    # two. This route used to filter for the rollup and return the UNFILTERED
+    # list, so an already-applied proposal went out advertising `apply_capable`
+    # with no applied field on it at all — see `cost_apply.stamp_applied_state`.
+    proposals = cost_apply.stamp_applied_state(proposals, config=config)
+    open_proposals = [p for p in proposals if not p.get("applied")]
     # The window this batch of proposals was actually computed over — stored
     # alongside them at recompute time, never re-derived here, so the window the
     # headline names is the window the figures were observed over. Deliberately
@@ -761,42 +894,38 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     # is one list fed by two endpoints; a headline summed over one of them left
     # the other's rows outside it, which made the collapsed tail's combined
     # figure and the below-floor "still counted in the total above" note false
-    # for the money they described. Each open cluster arrives here as an
-    # ORDINARY row on the one canonical field — no parameter on the rollup, no
-    # second aggregate, no second key — carrying the detector's own bounded
-    # figure for THIS window, net of the re-read share the resend proposal
-    # already prices in full. `core/optimize/inbox_contribution.py` owns that
-    # design and why it is neither of the two mechanisms this repo retired.
-    relearn_cache = relearn_store.read_cache(config=config)
-    relearn_finding = (relearn_cache or {}).get("finding")
-    relearn_label = inbox_contribution.contribution_window_label(
-        relearn_finding, window_days,
-    )
-    relearn_applied_sigs = {
-        str(rec.get("signature") or "")
-        for rec in relearn_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
-    relearn_rows = inbox_contribution.relearn_contribution_rows(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
-    )
-    # Clusters whose money could NOT be put on this window's basis (a cache
-    # written before bounded figures, or occurrences with no parseable
-    # timestamp). Absent is never zero: stated through the rollup's `excluded`
-    # channel, summed into nothing.
-    unrepresented = inbox_contribution.unrepresented_relearn(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
-    )
-    excluded = {
-        **((block.get("cost_excluded") or {}) if block else {}),
-        **inbox_contribution.relearn_excluded_entry(
-            unrepresented, reason=inbox_contribution.NO_BOUNDED_WINDOW_REASON,
-        ),
-    }
-    past_overspend = cost_proposals_mod.past_overspend_rollup(
-        open_proposals + relearn_rows, window_days=window_days, excluded=excluded,
+    # for the money they described. `gather_rollup_population` is the ONE
+    # function allowed to reach `past_overspend_rollup` (see its docstring):
+    # it always folds in relearn's clusters as ordinary rows on the one
+    # canonical field — no parameter on the rollup, no second aggregate, no
+    # second key — carrying the detector's own bounded figure for THIS
+    # window, net of the re-read share the resend proposal already prices in
+    # full, and discloses any cluster it could not place through `excluded`.
+    # `core/optimize/inbox_contribution.py` owns that design and why it is
+    # neither of the two mechanisms this repo retired.
+    #
+    # UNDER A PERSONA NARROWING, relearn's own finding has to be that persona's
+    # too. The relearn cache is a whole-corpus artifact, so folding it into a
+    # scoped rollup would put the corpus's failure-recovery money on top of one
+    # persona's cost proposals — two populations, one total, which is exactly
+    # what the rest of this change removes. The scan cycle stores each persona's
+    # lane-partitioned relearn finding beside its proposals for this reason.
+    # `persona_scopes_population` and not a bare `persona is not None`: `mixed`
+    # and `unknown` narrow nothing, so the whole-corpus relearn cache IS their
+    # answer — reading a per-persona key for them would find nothing and
+    # silently drop relearn's money out of a total that should contain it.
+    if persona_scopes_population(persona) and persona_resolved and (block or {}).get(
+        "cost_relearn_by_persona"
+    ):
+        relearn_finding = (block or {}).get("cost_relearn_by_persona", {}).get(persona)
+    else:
+        relearn_cache = relearn_store.read_cache(config=config)
+        relearn_finding = (relearn_cache or {}).get("finding")
+    relearn_applied_sigs = relearn_apply.applied_signatures(config)
+    past_overspend = inbox_contribution.gather_rollup_population(
+        open_proposals, relearn_finding, window_days=window_days,
+        relearn_applied_signatures=relearn_applied_sigs,
+        cost_excluded=(block.get("cost_excluded") or {}) if block else None,
     )
     # Every row a reader sees carries what it contributed, cost and relearn
     # alike, so the noise floor and the tail's combined figure read the SAME
@@ -819,12 +948,26 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         status = "error"
     else:
         status = "never_run"
+    if not persona_resolved:
+        # The THIRD state, published rather than collapsed into either of the
+        # other two. `proposals` is empty and `past_overspend` was summed over
+        # nothing, so returning `status: ready` here would assert "this persona
+        # has no recoverable waste" — a claim nothing measured. A surface must
+        # render this as unknown and offer a rescan, never as $0.
+        status = "persona_unscoped"
     return {
         "status": status,
         "computed_at": block.get("cost_computed_at") if block else None,
+        **_scan_provenance(block, prefix="cost_"),
         "proposals": proposals,
         "past_overspend": past_overspend,
         "framing": framing,
+        # WHAT POPULATION THESE FIGURES COVER. `persona` echoes what was asked
+        # for; `persona_scoped` says whether the ledger could actually answer
+        # it. A client must not publish a number from this payload when
+        # `persona_scoped` is false and a persona was requested.
+        "persona": persona,
+        "persona_scoped": bool(persona_resolved),
         "degraded": bool(last_error),
         "last_error": last_error,
         "last_error_at": last_error_at,
@@ -837,18 +980,53 @@ def refresh_cost_proposals(request: Request) -> dict[str, Any]:
     thread (unchanged, synchronous contract — the client awaits this before
     reading the refreshed list). Degrades to ``{"status": "unavailable"}``
     when the daemon has no direct DB connection (e.g. a proxy) rather than
-    erroring. Locked against the scheduled background job (``tj serve``'s
-    cost-proposals job, behavioral requirement #5) via ``cost_proposals.
-    recompute_cost_proposals``'s own lock — this request either runs the
-    recompute or, if the scheduled job already holds the lock, returns the
-    unchanged last-good proposals rather than the two racing each other's
-    cache write."""
+    erroring. Serialized against the scheduled background job (``tj serve``'s
+    cost-proposals job, behavioral requirement #5) inside
+    ``cost_proposals.recompute_cost_proposals`` — both by its own lock and by
+    the scan-cycle-in-flight check that covers the gap the lock cannot (the
+    cycle writes the report store and the relearn cache before its cost leg
+    ever takes that lock).
+
+    ``status`` IS THE POINT OF THIS PAYLOAD, and it is one of:
+
+    ``ready``
+        this request built a fresh set; ``proposals`` is its size.
+    ``declined``
+        something else is already measuring this window (a scan cycle mid-pass,
+        or another recompute holding the lock), so nothing was rebuilt. The
+        store is untouched and ``proposals`` is the size of the LAST-GOOD set
+        still up, with ``fresh: false`` and ``computed_at`` naming when it was
+        built. A decline is normal, not an error.
+    ``failed``
+        the build raised. Same last-good reporting as ``declined``, but this
+        one is abnormal and the tab renders degraded.
+    ``unavailable``
+        no direct database connection to recompute through.
+
+    It used to return ``{"status": "ready", "proposals": len(...)}``
+    unconditionally, and all four of the callee's ``[]`` outcomes therefore read
+    as "a refresh completed and found nothing" — while the store still held a
+    full, good set. The docstring even claimed it "returns the unchanged
+    last-good proposals"; it never re-read the store. The signal now comes back
+    FROM the call rather than from a pre-call ``is_cycle_computing()`` probe,
+    which would be racy in exactly the window it claims to cover.
+    """
     config = _config(request)
     db = getattr(request.app.state, "db", None)
     if db is None or getattr(db, "conn", None) is None:
         return {"status": "unavailable", "reason": "no direct database connection"}
-    proposals = cost_proposals_mod.recompute_cost_proposals(db, config)
-    return {"status": "ready", "proposals": len(proposals)}
+    result = cost_proposals_mod.recompute_cost_proposals(db, config)
+    return {
+        "status": result.status,
+        # Kept as a COUNT, the shape this key always had — an older client
+        # reading only `status`/`proposals` now sees a truthful status and the
+        # store's real size instead of a fabricated zero.
+        "proposals": result.served_count,
+        "fresh": result.fresh,
+        "computed_at": result.served_computed_at,
+        "reason": result.reason,
+        "detail": result.detail,
+    }
 
 
 def _stored_cost_proposal(request: Request, proposal_id: str) -> dict[str, Any]:
@@ -907,7 +1085,7 @@ class ApplyWorkspaceCostRequest(BaseModel):
     """A named STORED cost proposal plus the human's confirmed write target.
 
     Same split as ``ApplyRelearnRequest``: the proposal's content and its apply
-    plumbing (``proposed_fix``, ``rung``) come off the store, because the card
+    plumbing (``proposed_fix``, ``delivery``) come off the store, because the card
     the human approved was rendered FROM that stored proposal; only the write
     target and the go/force confirmations are the caller's to choose.
     """
@@ -926,9 +1104,9 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
 
     Covers every analyzer whose fix is a workspace surface an orchestrating
     agent (or the model itself) reads before acting, rather than a file this
-    proposal can edit outright: ``subagent`` (rung-1 sizing rubric),
-    ``script`` (rung-2 deterministic-workflow skill), ``reuse`` (rung-1
-    planning-skeleton note), ``verbosity`` (rung-1 output-brevity note). This
+    proposal can edit outright: ``subagent`` (a sizing-rubric rule),
+    ``script`` (a deterministic-workflow skill), ``reuse`` (a planning-skeleton
+    rule), ``verbosity`` (an output-brevity rule). This
     routes the actual write through the EXISTING relearn apply path
     (``relearn_apply.apply_relearn_fix``) — same reversible, git-committed,
     human-gated (dry-run first) discipline — then records the cost marker so
@@ -944,7 +1122,7 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
     signature = str(stored.get("signature") or "")
     analyzer = str(stored.get("analyzer") or "")
     baseline = dict(stored.get("baseline") or {})
-    # The cluster shape relearn_apply renders a rung-1/2 note/skill from,
+    # The cluster shape relearn_apply renders a rule or skill from,
     # projected from the STORE: a caller-supplied proposed_fix would be
     # arbitrary text written into the user's workspace under a reviewed
     # proposal's name. `apply_sessions` falls back to the subagent analyzer's
@@ -955,7 +1133,11 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
         "family_key": f"cost_{analyzer}" if analyzer else "cost_proposal",
         "title": str(stored.get("title") or "") or signature,
         "proposed_fix": str(stored.get("proposed_fix") or ""),
-        "rung": int(stored.get("rung") or 1),
+        # A stored proposal names its own mechanism; a cache written by an
+        # older build named a ladder number, mapped on read. Never defaulted
+        # blindly: what this resolves to decides which artifact is written to
+        # a real path.
+        "delivery": delivery_from_legacy_record(stored) or DEFAULT_DELIVERY,
         "sessions": int(
             baseline.get("apply_sessions", baseline.get("flagged_subagents", 0)) or 0
         ),
@@ -1084,7 +1266,6 @@ def post_register_source_path(
             "current_model": current_model,
             "proposed_model": proposed_model,
             "source_path": resolved,
-            "rung": int(stored.get("rung") or 1),
             "sessions": 0,
             "repos": [],
             "examples": [],

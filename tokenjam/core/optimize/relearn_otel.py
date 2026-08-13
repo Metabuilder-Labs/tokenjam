@@ -148,7 +148,8 @@ def extract_archived_coding_failures(
             continue  # its transcript is still on disk; the transcript lane has it
 
         error_text = (status_message or "").strip()[:MAX_SPAN_ERROR_CHARS]
-        if not error_text:
+        is_name_fallback = not error_text
+        if is_name_fallback:
             error_text = (name or "").strip()
         if not error_text:
             continue
@@ -167,6 +168,7 @@ def extract_archived_coding_failures(
             kind="act",
             is_retry=False,
             depth=0,
+            error_text_is_name_fallback=is_name_fallback,
         ))
     return failures
 
@@ -204,9 +206,13 @@ def extract_span_failures(
 
         # status_message is the real error text. Fall back to the span name so a
         # failure with no message still carries a stable signature; skip only
-        # when neither says anything at all.
+        # when neither says anything at all. The fallback carries no real
+        # diagnosis though — `error_text_is_name_fallback` marks that so
+        # downstream clustering/distill never treat it as if it did (see
+        # `FailureEpisode`).
         error_text = (status_message or "").strip()[:MAX_SPAN_ERROR_CHARS]
-        if not error_text:
+        is_name_fallback = not error_text
+        if is_name_fallback:
             error_text = (name or "").strip()
         if not error_text:
             continue
@@ -225,6 +231,7 @@ def extract_span_failures(
             kind="act",        # no method spine off a span; every failure is an act
             is_retry=False,
             depth=0,
+            error_text_is_name_fallback=is_name_fallback,
         ))
     return failures
 

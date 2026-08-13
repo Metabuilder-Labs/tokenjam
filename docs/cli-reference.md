@@ -29,7 +29,7 @@ tj onboard --verify         # poll for the first span after setup and report con
 tj onboard --verify-only    # skip setup; just re-poll an existing install (post-restart re-check)
 ```
 
-Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` (plus `--project` for `--claude-code`) skip every prompt; use these to run onboarding unattended (CI, Docker, a script). `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
+Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` skip every prompt; use these to run onboarding unattended (CI, Docker, a script). The project/dashboard-namespace name is never prompted for — it's always derived from the repo (git remote) or folder name. `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
 
 **`--verify-only`** is the lightweight post-restart re-check: it skips the whole wizard (no config rewrite, no summary, no restart banner) and only polls an already-configured install for its first *live* span. Use it after you've restarted Claude Code / Codex; `tj onboard --claude-code --verify-only` (or `--codex`, or bare for an SDK install) reads that persona's existing config and reports confirmed / not-confirmed. Backfilled history doesn't count here; the poll waits for a new live span.
 

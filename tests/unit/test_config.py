@@ -214,7 +214,6 @@ class TestParse:
         # Every field this test doesn't set falls back to the OptimizeConfig
         # default (not a hardcoded literal in _parse) — same discipline as
         # test_capture_parsed's untouched fields above.
-        assert config.optimize.min_sessions_deadweight == OptimizeConfig.min_sessions_deadweight
         assert config.optimize.min_cache_input_tokens == OptimizeConfig.min_cache_input_tokens
         assert config.optimize.min_calls_for_root_cause == OptimizeConfig.min_calls_for_root_cause
         assert config.optimize.min_cohort_sessions == OptimizeConfig.min_cohort_sessions
@@ -319,7 +318,7 @@ class TestSerialise:
         assert restored.optimize.min_cluster_instances == 5
         assert restored.optimize.cache_efficacy_threshold == 0.1
         # Untouched fields still round-trip at their defaults.
-        assert restored.optimize.min_sessions_deadweight == OptimizeConfig.min_sessions_deadweight
+        assert restored.optimize.min_calls_for_root_cause == OptimizeConfig.min_calls_for_root_cause
         # Defaults when [optimize] is absent.
         assert _parse({"version": "1"}).optimize == OptimizeConfig()
 

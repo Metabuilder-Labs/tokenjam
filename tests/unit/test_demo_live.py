@@ -7,7 +7,6 @@ from tokenjam.core.models import NormalizedSpan, SpanKind, SpanStatus
 from tokenjam.demo.live import (
     LiveReplayError,
     LiveSink,
-    _build_payload,
     _span_to_otlp,
     build_sink,
     check_serve_alive,
@@ -76,14 +75,6 @@ def test_span_to_otlp_preserves_tool_input_and_error():
     assert parsed.attributes.get(GenAIAttributes.TOOL_INPUT) == json.dumps({"query": "x"})
 
 
-def test_build_payload_shape():
-    payload = _build_payload([_span_to_otlp(_llm_span())])
-    assert "resourceSpans" in payload
-    spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
-    assert len(spans) == 1
-    assert spans[0]["name"] == "gen_ai.llm.call"
-
-
 def test_live_sink_attaches_bearer_only_with_secret():
     with_secret = LiveSink("http://x/api/v1/spans", "s3cret")
     assert with_secret._headers.get("Authorization") == "Bearer s3cret"
@@ -119,7 +110,10 @@ def test_live_sink_buffers_and_flushes(monkeypatch):
     assert result.ingested == 2
     assert sink.pending == 0  # buffer cleared after flush
     assert captured["url"] == "http://serve/api/v1/spans"
-    assert len(captured["payload"]["resourceSpans"][0]["scopeSpans"][0]["spans"]) == 2
+    sent_spans = captured["payload"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    assert len(sent_spans) == 2
+    # The wire payload carries each span's real name through _build_payload.
+    assert {s["name"] for s in sent_spans} == {"gen_ai.llm.call", "gen_ai.tool.call"}
 
 
 def test_live_sink_flush_raises_on_401(monkeypatch):

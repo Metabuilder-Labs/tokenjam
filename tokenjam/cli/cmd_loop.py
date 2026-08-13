@@ -16,6 +16,7 @@ import json
 
 import click
 
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core import loop
 from tokenjam.utils.formatting import console, make_table
 
@@ -45,9 +46,9 @@ def _outcome_style(outcome: str) -> str:
     return {"pass": "green", "regress": "red", "unknown": "dim"}.get(outcome, "dim")
 
 
-@click.group("loop")
+@click.group("loop", cls=TjGroup)
 def cmd_loop() -> None:
-    """Close the loop: annotate runs, promote expectations, track fix-history."""
+    """Annotate runs and track fix outcomes."""
 
 
 @cmd_loop.command("annotate")

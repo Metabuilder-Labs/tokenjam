@@ -33,7 +33,8 @@ Pipeline (validated 2026-07-12 against the full local corpus):
      dropped — the already-documented check.
   5. PROPOSE  — surviving, recurring (>=3 distinct sessions) clusters get a
      conservative token estimate (occurrences x grounded per-turn cost, never
-     the inflated afflicted-session footprint), a target rung (§6 of the
+     the inflated afflicted-session footprint), a delivery mechanism (see
+     ``core/rulewrite/delivery``,
      intervention ladder) and a scope (project vs user-global, by how many
      distinct repos the cluster's sessions span).
 
@@ -47,17 +48,13 @@ disjoint by session id, so no failure is extracted twice.
 
 ONE KIND OF NUMBER. A relearn cluster reports only ``past_overspend_*`` — a
 BACKWARD observation of what the recurrence already cost, for every cluster
-including the ones no fix template matches and the ones whose rule is
-uneconomic. There is no forward "you could recover $X" claim anywhere on the
-cluster or the finding: a relearn card shows its past figure only, same as
-every other analyzer's card, per the repo `CLAUDE.md`'s per-analyzer
-dollar-field contract. "We have no action for this" is not "this was
-unavoidable", and no future maintenance cost is ever netted out of money
-already spent. The net-of-standing-cost arithmetic in
-``core/optimize/write_budget.py`` still runs — it decides whether a
-PERMANENT artifact is worth OFFERING at all (``write_offered`` /
-``advise_only`` / ``write_blocked_reason`` / ``payback_ratio``) — but its
-output is never rendered as a savings figure.
+including the ones no fix template matches. There is no forward "you could
+recover $X" claim anywhere on the cluster or the finding: a relearn card shows
+its past figure only, same as every other analyzer's card, per the repo
+`CLAUDE.md`'s per-analyzer dollar-field contract. "We have no action for this"
+is not "this was unavoidable". A permanent write is offered whenever the
+cluster has a resolved target and a workspace to write into (``advise_only``)
+— there is no budget/ceiling/payback gate on top of that any more.
 
 Never raises: a single unreadable transcript, a distill failure, or a missing
 CLAUDE.md is skipped, not fatal — this runs unattended on a schedule.
@@ -70,12 +67,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from tokenjam.core.analysis_span import retention_days_for
 from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
-from tokenjam.core.optimize.projection import build_projection_basis
 from tokenjam.core.optimize.analyzers.resend_tail import RELEARN_RESEND_BOUNDARY
 from tokenjam.core.optimize.rate_profile import RateProfile, blended_rate_profile
+from tokenjam.core import fixes as _fixes
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.relearn_window import (
     RELEARN_WINDOW_LABELS,
@@ -84,8 +82,15 @@ from tokenjam.core.optimize.relearn_window import (
     RelearnWindowTotal,
     sum_windowed,
     window_days,
+    window_labels_including,
 )
 from tokenjam.core.optimize.types import AnalyzerContext
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_SKILL,
+)
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
 
 # --- Tunables ----------------------------------------------------------------
@@ -143,26 +148,28 @@ COMPACTION_PROMPT_DROP_RATIO = 0.5
 #: and the other prices a call's size — see
 #: `test_the_boundary_is_stated_once_and_quoted_by_both_analyzers`.
 PAST_OVERSPEND_BASIS = (
-    "each observed failure's MEASURED recovery arc (the assistant turns between "
-    "hitting the pothole and the same tool succeeding again, median 2 on a real "
-    "corpus rather than the 1 a flat charge assumes, with turns shared by "
-    "overlapping failures split between them) x the MEASURED cost of one "
-    "assistant turn in the sessions the cluster occurred in — "
-    + RELEARN_RESEND_BOUNDARY + " — PLUS the error "
-    "text's own measured "
-    "re-read tail, priced at the rate the contributing sessions actually "
-    "billed at. "
+    "This figure is each observed failure's MEASURED recovery arc x the "
+    "MEASURED cost of one assistant turn. That turn cost is measured in the "
+    "sessions the cluster occurred in.\n\n"
+    "The recovery arc is the assistant turns between hitting the pothole and "
+    "the same tool succeeding again. On a real corpus the median is 2, not "
+    "the 1 a flat charge assumes. Turns shared by overlapping failures are "
+    "split between them.\n\n"
+    "(" + RELEARN_RESEND_BOUNDARY + "). This figure also includes the error "
+    "text's own measured re-read tail, priced at the rate the contributing "
+    "sessions actually billed at.\n\n"
     "Accumulated over the scanned corpus and NEVER paced, projected or "
-    "extrapolated to a month. A companion figure bounded to a trailing window "
-    "may sit beside this one (past_overspend_windows); that is the same "
-    "occurrences FILTERED by date and capped at this figure, so it is always "
-    "the smaller of the two and is never this figure rescaled. Deliberately "
-    "ungated: a cluster with no fix template in our library and a cluster "
-    "whose rule is uneconomic to keep both still cost this, and no future "
-    "maintenance cost is netted out of it. The re-read share is broken out "
-    "as past_reread_* — a COMPONENT of this figure, not an addend — because "
-    "that share is re-sent context, which the context re-send analyzer prices "
-    "in full; the two overlap there and must never be added together"
+    "extrapolated to a month. A companion figure bounded to a trailing "
+    "window may sit beside this one (past_overspend_windows). That figure "
+    "is the same occurrences FILTERED by date and capped at this one. It is "
+    "always the smaller of the two and is never this figure rescaled.\n\n"
+    "Deliberately ungated: a cluster with no fix template in our library "
+    "still costs this. A cluster whose rule is uneconomic to keep also "
+    "still costs this. No future maintenance cost is netted out of it.\n\n"
+    "The re-read share is broken out as past_reread_*. It is a COMPONENT of "
+    "this figure, not an addend. That share is re-sent context, which the "
+    "context re-send analyzer prices in full. The two overlap there and "
+    "must never be added together"
 )
 
 #: Why the recurrence gate's residue is counted but never claimed.
@@ -181,9 +188,13 @@ HONESTY_CAVEAT = (
 
 # --- Known, validated relearn families ----------------------------------------
 # Each entry: (family key, human title, tool-name filter (None = any),
-# regex over the raw error text, default rung, default proposed fix).
-# Rungs follow the intervention ladder (SPEC §6): 1 CLAUDE.md note,
-# 2 skill/scoped doc, 3 hook, 4 wrapper/script, 5 config/env.
+# regex over the raw error text, DELIVERY MECHANISM, default proposed fix).
+#
+# The delivery is declared per family, in words, because it is the family that
+# knows: `sleep_chain` blocks a command and injects nothing, while the three
+# PostToolUseFailure families exist precisely to inject text. Those two cost
+# opposite amounts, and no property of the artifact tells them apart — only the
+# family's own matcher does. See `core/rulewrite/delivery`.
 _KNOWN_FAMILIES: list[dict[str, Any]] = [
     {
         "key": "cwd_confusion",
@@ -194,14 +205,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"file does not exist\.\s*note:\s*your current working directory",
             re.IGNORECASE,
         ),
-        "rung": 3,
-        "fix": (
-            "PostToolUseFailure hook (Bash/Read): react only after a "
-            "'no such file or directory' failure by injecting the real cwd + "
-            "a short directory listing as additionalContext, so the agent "
-            "recovers in one shot instead of a PreToolUse guess-and-block on "
-            "every relative path (which would misfire on normal usage)."
-        ),
+        "delivery": DELIVERY_INJECTING_HOOK,
+        "fix": _fixes.fix_text("relearn.cwd_confusion"),
     },
     {
         # BY FAR the largest family on a real coding corpus (measured
@@ -228,24 +233,22 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"exceeds? the (?:maximum )?context (?:window|length|limit)",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md note: this session hit the model's context ceiling and "
-            "the request was rejected outright — the tokens were spent and no "
-            "completion came back. The durable fix is to keep bulk content off "
-            "the main thread: delegate whole-file reads, log sweeps and "
-            "multi-file investigations to a subagent (its tool output lives in "
-            "its own context and is never re-sent on a later parent turn), and "
-            "prefer Grep plus a targeted Read offset/limit over reading a "
-            "large file end to end."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        # Lead-in names what THIS family observed; the durable instruction is
+        # the shared catalog record, not a third wording of it (see that
+        # record's note on why three copies is worse than one). BOTH halves are
+        # catalogued — the lead-in lives on the record as this analyzer's
+        # framing, because a sentence written here is prose the lint cannot see,
+        # and prose the lint cannot see is how one instruction comes to be
+        # stated twice inside one written block.
+        "fix": _fixes.fix_text_for("resend.offload_to_subagent", "relearn"),
     },
     {
         "key": "edit_before_read",
         "title": "Edit/Write before Read",
         "tools": {"Edit", "Write", "MultiEdit", "NotebookEdit"},
         "pattern": re.compile(r"has not been read yet", re.IGNORECASE),
-        # Downgraded from rung 3 (Phase 2.5): the harness already errors
+        # Downgraded from a hook (Phase 2.5): the harness already errors
         # clearly on this ("has not been read yet") and the agent virtually
         # always self-corrects on the very next turn by reading the file —
         # there's no failure-recovery gap for a reactive hook to close. A
@@ -256,13 +259,16 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         # false block on a file the harness knows was read but our own
         # tracking missed (a session resume, a compaction, a subagent read).
         # Safer to note the pattern than to guess at its state.
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: the harness already blocks an Edit/Write "
-            "before a Read with a clear error ('has not been read yet') and "
-            "agents reliably self-correct by reading next turn — no hook "
-            "needed, this is advisory awareness only."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        # ADVISORY ONLY, and the flag is what makes that mechanical. This
+        # family's own fix text says there is nothing to do — the harness
+        # already errors clearly and agents self-correct next turn — so the
+        # card must not occupy an apply slot offering it. The recurrence still
+        # COST something and that figure stands untouched (Critical Rule 32):
+        # a gate on whether we have an action available never reaches back and
+        # edits what a behaviour already cost.
+        "advisory_only": True,
+        "fix": _fixes.fix_text("relearn.edit_before_read"),
     },
     {
         "key": "sleep_chain",
@@ -280,23 +286,16 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "label_pattern": re.compile(r"^\s*sleep\b", re.IGNORECASE),
-        "rung": 3,
-        "fix": (
-            "PreToolUse hook: block a `sleep N && <check>` Bash chain and point the "
-            "agent at the Monitor tool instead of a busy-wait."
-        ),
+        "delivery": DELIVERY_EXECUTING_HOOK,
+        "fix": _fixes.fix_text("relearn.sleep_chain"),
     },
     {
         "key": "stale_read_race",
         "title": "file modified since read (linter/hook race)",
         "tools": {"Edit", "Write", "MultiEdit"},
         "pattern": re.compile(r"modified since (it was last read|read)", re.IGNORECASE),
-        "rung": 3,
-        "fix": (
-            "PostToolUseFailure hook (Edit/Write/MultiEdit): react only after "
-            "a 'modified since read' failure by injecting a re-Read reminder "
-            "as additionalContext — never touches a successful edit."
-        ),
+        "delivery": DELIVERY_INJECTING_HOOK,
+        "fix": _fixes.fix_text("relearn.reread_before_retrying_edit"),
     },
     {
         "key": "edit_string_not_found",
@@ -306,12 +305,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"string to replace not found|old_string not found|not found in file",
             re.IGNORECASE,
         ),
-        "rung": 3,
-        "fix": (
-            "PostToolUseFailure hook (Edit/MultiEdit): react only after a "
-            "string-not-found failure by injecting a re-Read reminder as "
-            "additionalContext — never touches a successful edit."
-        ),
+        "delivery": DELIVERY_INJECTING_HOOK,
+        "fix": _fixes.fix_text("relearn.reread_before_retrying_edit"),
     },
     {
         # MUST stay ordered before "edit_string_not_found" above would have
@@ -326,13 +321,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"replace_all is false",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: when an Edit's `old_string` appears more "
-            "than once, include enough surrounding lines to make it unique "
-            "rather than retrying the same short string — or pass "
-            "`replace_all: true` when every occurrence really should change."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.edit_ambiguous_match"),
     },
     {
         "key": "read_too_large",
@@ -343,13 +333,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"file content \(\d+ tokens\) exceeds",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: this file is too large to read whole. Grep "
-            "for the symbol first and Read only the region around the hit "
-            "(`offset`/`limit`), or delegate the sweep to a subagent so the "
-            "bulk never lands in this thread's context."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.read_too_large"),
     },
     {
         "key": "read_directory",
@@ -358,12 +343,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "pattern": re.compile(
             r"eisdir|illegal operation on a directory", re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: Read takes a file path. To see what is in a "
-            "directory use Glob (or `ls` via Bash), then Read the file you "
-            "actually want."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.read_directory"),
     },
     {
         # MUST stay ordered before "deferred_tool_cold" below: that family's
@@ -384,8 +365,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "title": "Read malformed offset (array, not scalar)",
         "tools": {"Read"},
         "pattern": re.compile(r"offset.{0,20}(must be|invalid|expected)|invalid.{0,20}offset", re.IGNORECASE),
-        "rung": 1,
-        "fix": "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not arrays.",
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.read_offset_malformed"),
     },
     {
         "key": "deferred_tool_cold",
@@ -399,19 +380,16 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"no such tool available|is not enabled in this context",
             re.IGNORECASE,
         ),
-        "rung": 2,
-        "fix": (
-            "Skill/scoped note: deferred tools need a ToolSearch lookup for their "
-            "schema before the first call; optionally a PreToolUse intercept hook."
-        ),
+        "delivery": DELIVERY_SKILL,
+        "fix": _fixes.fix_text("relearn.deferred_tool_cold"),
     },
     {
-        # Downgraded from rung 5 (Phase 2.5, 2026-07-14): rung 5 promises a
-        # "config/env fix", but there is no safe automatic config/env writer
-        # in this codebase -- Apply used to render an inert stub hook for
-        # this family (`_render_stub_hook`, never wired to block/inject
-        # anything), advertising a fix that did nothing. A rung-1 CLAUDE.md
-        # note is honest about what's actually deliverable and still useful.
+        # Downgraded from a config/env fix (Phase 2.5, 2026-07-14): there is
+        # no safe automatic config/env writer in this codebase -- Apply used to
+        # render an inert stub hook for this family (`_render_stub_hook`, never
+        # wired to block/inject anything), advertising a fix that did nothing.
+        # A CLAUDE.md rule is honest about what's actually deliverable and
+        # still useful.
         "key": "command_not_found",
         "title": "command not found (bashisms under zsh, bare interpreter)",
         "tools": {"Bash"},
@@ -426,14 +404,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"command not found|^\s*[\w.\-/]+:? not found\s*$",
             re.IGNORECASE | re.MULTILINE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
-            "PATH. Common causes here: using bare `python` instead of `python3`, "
-            "or a bash-only builtin (`mapfile`, `shopt`, `[[ ... ]]` extensions) "
-            "that doesn't exist under this shell (e.g. zsh, sh) or POSIX mode. "
-            "Prefer the portable/explicit form."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.command_not_found"),
     },
     {
         "key": "bash_timeout",
@@ -449,14 +421,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"exit code 143\b.{0,80}tim(?:ed )?out",
             re.IGNORECASE | re.DOTALL,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: this command outlived the tool's timeout "
-            "and was killed, so its work was lost and the tokens spent "
-            "waiting bought nothing. Run long jobs in the background "
-            "(`run_in_background`) and poll for completion, or raise the "
-            "call's own timeout when the wait is genuinely expected."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.bash_timeout"),
     },
     {
         "key": "bash_chained_approval",
@@ -469,13 +435,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "pattern": re.compile(
             r"bash command contains multiple operations", re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: a chained Bash command (`cd X && cmd`, "
-            "`a; b`) is approved as a whole, so one un-allowlisted part blocks "
-            "the entire chain. Issue the parts as separate Bash calls, and "
-            "prefer an absolute path over a leading `cd`."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.bash_chained_approval"),
     },
     {
         "key": "git_branch_exists",
@@ -486,13 +447,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"already exists and is not a valid branch name",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: check out the existing branch "
-            "(`git checkout <name>`) instead of re-creating it, or pick a "
-            "fresh name — `git checkout -b` on an existing branch always "
-            "fails."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.git_branch_exists"),
     },
     {
         "key": "webfetch_domain_blocked",
@@ -512,8 +468,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"following domains are not accessible",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": "CLAUDE.md/skill note: this domain is blocked — use a search tool or a different source instead.",
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.webfetch_domain_blocked"),
     },
 ]
 
@@ -648,6 +604,17 @@ class FailureEpisode:
     #: carry no detour and fall back to 1.0 (the conservative floor, and the
     #: value the whole analyzer assumed before this was measured).
     detour_turns: float | None = None
+    #: True when ``error_text`` is NOT the real error — the OTel/archive lanes
+    #: (``core/optimize/relearn_otel.py``) fall back to the span's own NAME
+    #: (e.g. ``gen_ai.tool.call``) when a span carries no ``status_message``.
+    #: That text carries no diagnosis of what actually went wrong, so it must
+    #: never be treated as if it did: it cannot ground an LLM-distilled title
+    #: (there is nothing to distill) and it must not collapse unrelated
+    #: failures into one shared signature just because they all fell back to
+    #: the same generic span name. See ``_failure_signature`` and
+    #: ``_evidence_too_thin_for_distill``. The transcript lane never sets
+    #: this — a transcript's raw tool error is always the real text.
+    error_text_is_name_fallback: bool = False
 
 
 #: Stop looking for the recovery turn after this many steps. Past it the agent
@@ -850,7 +817,22 @@ class _RawCluster:
 def _failure_signature(failure: FailureEpisode) -> tuple[str, str | None, str]:
     """``(signature, family_key, title)`` for one failure: a known family (sig ==
     family_key) or a generic normalized signature. The single classify point
-    ``cluster_failures`` keys on."""
+    ``cluster_failures`` keys on.
+
+    A name-fallback failure (``error_text_is_name_fallback`` — see
+    ``FailureEpisode``) gets a signature scoped to its OWN session rather than
+    the shared generic one every other failure on the same tool would land on.
+    Two genuinely unrelated failures that both happened to carry no error text
+    are not evidence of one root cause, so they must never bucket together —
+    and scoping to the session also guarantees the cluster can never clear the
+    cross-session recurrence gate (``MIN_RECURRING_SESSIONS``), which is what
+    keeps it out of the distill pass without relying on a second check there.
+    The money is still counted: an un-recurring cluster still lands in
+    ``_below_threshold_residue``, never silently dropped.
+    """
+    if failure.error_text_is_name_fallback:
+        sig = f"{failure.tool_name}:__no_error_text__:{failure.session_id}"
+        return sig, None, f"{failure.tool_name}: no error text captured"
     family_key = classify_known_family(failure.tool_name, failure.error_text, failure.label)
     if family_key is not None:
         return family_key, family_key, _FAMILY_BY_KEY[family_key]["title"]
@@ -1060,8 +1042,23 @@ def _evidence_too_thin_for_distill(cluster: _RawCluster, *, sample_cap: int = 8)
     error text — the distill confidence gate. A cluster failing this check is
     suppressed entirely rather than distilled (see ``apply_distill_to_residual``):
     showing a human a confident title + fix that traces to nothing but bare
-    exit codes / leftover stdout is worse than surfacing nothing."""
-    samples = [f.error_text for f in cluster.failures if f.error_text][:sample_cap]
+    exit codes / leftover stdout is worse than surfacing nothing.
+
+    A cluster made entirely of name-fallback failures (``error_text_is_name_fallback``
+    — see ``FailureEpisode``) is rejected outright, never even sampled: that
+    text is the span's own NAME, not a diagnosis, so there is nothing in it
+    for distill to legitimately ground a fix in. In practice
+    ``_failure_signature`` already keeps such a cluster from ever recurring
+    across enough sessions to reach this function at all; this check is the
+    second, independent line of defense so the guarantee does not rest on one
+    mechanism alone.
+    """
+    if cluster.failures and all(f.error_text_is_name_fallback for f in cluster.failures):
+        return True
+    samples = [
+        f.error_text for f in cluster.failures
+        if f.error_text and not f.error_text_is_name_fallback
+    ][:sample_cap]
     if not samples:
         return True
     return not any(_is_substantive_error_text(s) for s in samples)
@@ -1093,7 +1090,7 @@ def _distill_cached(tool_name: str, cluster: _RawCluster, cache_dir: Path) -> di
 
 
 def apply_distill_to_residual(
-    clusters: list[_RawCluster], *, cache_dir: Path | None = None, enabled: bool = True,
+    clusters: list[_RawCluster], *, cache_dir: Path, enabled: bool = True,
 ) -> list[_RawCluster]:
     """Distill the top (by session count) residual clusters and merge any that
     distill assigns the same ``family_key``. Bounded by ``MAX_DISTILL_CLUSTERS``
@@ -1102,10 +1099,14 @@ def apply_distill_to_residual(
     Clusters already matched to a known family are left untouched. When
     ``enabled`` is False (no ``claude`` CLI / caller opt-out) the residual
     clusters pass through with their generic titles, unmerged.
-    """
-    if cache_dir is None:
-        cache_dir = _distill_cache_dir()
 
+    ``cache_dir`` is REQUIRED and deliberately has no default: the natural
+    default (``_distill_cache_dir()`` with no config) resolves to the real
+    ``~/.tj``, which would write outside an isolated ``--projects-root`` /
+    ``--db`` scope with no signal to the caller. Every real call site
+    resolves it from the active config (``_distill_cache_dir(ctx.config)``)
+    before calling in — pass that scoped path, not the unscoped helper.
+    """
     known = [c for c in clusters if c.family_key is not None]
     residual = [c for c in clusters if c.family_key is None]
     if not enabled or not residual:
@@ -1134,7 +1135,8 @@ def apply_distill_to_residual(
             # can look it up like a known family (keeps one code path).
             _FAMILY_BY_KEY.setdefault(family_key, {
                 "key": family_key, "title": result["title"], "tools": None,
-                "pattern": None, "rung": 1, "fix": result.get("fix") or "",
+                "pattern": None, "delivery": DELIVERY_CLAUDE_MD_RULE,
+                "fix": result.get("fix") or "",
             })
         target.failures.extend(cluster.failures)
 
@@ -1244,14 +1246,17 @@ class RelearnCluster:
     sessions:                  int
     occurrences:                int
     repos:                      list[str]
-    rung:                       int             # 1-5, SPEC §6 intervention ladder
+    #: HOW this fix reaches the agent, and therefore what gets written and
+    #: where (``core/rulewrite/kinds``). Declared by the family, never derived
+    #: from the artifact's shape.
+    delivery:                   str
     scope:                      str              # "project" | "user-global"
     proposed_fix:                str
     examples:                    list[RelearnExample] = field(default_factory=list)
     confidence:                   str = "heuristic"
     novel:                        bool = True
     # Phase 2 (apply) — best-effort cwd of the cluster's (sole, if project-
-    # scoped) repo, and a suggested rung-1 write target derived from it. Both
+    # scoped) repo, and a suggested write target derived from it. Both
     # are just a DEFAULT for the Review inbox card's scope/target override
     # (§7's "repo-identity is noisy" — never applied blindly); "" when
     # unknown (multi-repo / user-global / no cwd could be resolved).
@@ -1272,22 +1277,6 @@ class RelearnCluster:
     #: tokens; 0 / 1.0 when no tail could be measured.
     tail_calls_median:            int = 0
     tail_multiplier:              float = 1.0
-    # Net-of-standing-cost accounting (`core/optimize/write_budget.py`). This
-    # decides whether a PERMANENT artifact is worth writing at all: a rung-1
-    # CLAUDE.md rule is re-sent on every future session forever, so its
-    # standing cost is priced against the same session pace and compared
-    # against what the cluster cost (`past_overspend_tokens` below — there is
-    # no separate pre-net figure any more; the observation IS the netting
-    # input). Rung 3+ (hook / wrapper / config) is never sent to the model as
-    # prompt text, so its standing cost is a genuine zero.
-    standing_cost_tokens_per_session: int = 0
-    standing_cost_tokens:             int = 0
-    standing_cost_basis:              str = ""
-    #: gross / standing. Below 1.0 the rule costs more to keep than it saves.
-    #: A ratio, not a break-even call count: unlike summarize's one-time
-    #: rewrite cost, this cost recurs, so the session count cancels out.
-    payback_ratio:                    float | None = None
-    net_negative:                     bool = False
     # PAST OVERSPEND — what this recurrence ALREADY COST, observed, before any
     # gate touches it. Structurally separate from every `estimated_*` field
     # above and NEVER netted, suppressed or zeroed:
@@ -1326,18 +1315,6 @@ class RelearnCluster:
     #: or not one of this cluster's occurrences carries a parseable timestamp,
     #: or the cache predates this field. See `core/optimize/relearn_window.py`.
     past_overspend_windows: dict[str, RelearnWindowedObservation] | None = None
-    # Whether a PERMANENT artifact is actually on offer for this cluster, and
-    # why not when it isn't (placeholder fix, net-negative payback, budget
-    # exhausted, or merged into the family's single block). A suppressed write
-    # also sets `advise_only`, so the Review inbox's existing no-apply-path
-    # lane renders it with this reason in place of the generic OTel one.
-    write_offered:                    bool = True
-    write_blocked_reason:             str = ""
-    #: The same verdict as a short label, for a dense list where the sentence
-    #: above would be a paragraph per row. Derived from the reason by
-    #: `write_budget.short_reason`, never phrased locally, so the CLI list and
-    #: the Review inbox row cannot name one flag two ways.
-    write_blocked_short:              str = ""
 
 
 @dataclass
@@ -1453,20 +1430,6 @@ def _corpus_window_days(failures: list[FailureEpisode]) -> float | None:
         return None
     span_days = (max(stamps) - min(stamps)).total_seconds() / 86400.0
     return span_days if span_days >= 1.0 else 1.0
-
-
-def _corpus_active_days(failures: list[FailureEpisode]) -> int:
-    """Distinct calendar days on which this run observed any occurrence.
-
-    ``D_active`` for the shared projection basis (``core/optimize/
-    projection.py``). Relearn has no session table to count active days off,
-    so it counts the days its own evidence actually landed on, which is the
-    same quantity measured from the data relearn does hold. Zero when nothing
-    carried a parseable timestamp; the basis then suppresses the projection
-    rather than inventing one.
-    """
-    stamps = [t for t in (_parse_failure_ts(f.ts) for f in failures) if t is not None]
-    return len({t.date() for t in stamps})
 
 
 def _measured_turn_tokens(
@@ -1745,22 +1708,17 @@ def build_proposals(
     conn: Any | None = None,
     window_days: float | None = None,
     persona: str = "unknown",
-    projection: Any | None = None,
-    existing_agent_file_tokens: int | None = None,
-    sessions_by_repo: dict[str, int] | None = None,
     window_labels: Sequence[str] | None = None,
     window_anchor: Any | None = None,
 ) -> tuple[list[RelearnCluster], int]:
     """Turn surviving raw clusters into ranked proposals. Returns
     ``(proposals, dropped_codified_count)``.
 
-    ``projection`` (a ``core.optimize.projection.ProjectionBasis``) and
-    ``existing_agent_file_tokens`` drive the write budget: how many permanent
-    rules may be offered at all, and what each one costs to keep. Omitting
-    ``projection`` leaves the netting inert (a zero session count charges a
-    rule nothing) while the quality floor and the write count cap still apply,
-    so a caller that only wants clustering is never silently given a budget it
-    did not ask for.
+    This pass decides what a cluster IS — its fix, its scope, its target, what
+    it cost — and whether a permanent write is offered for it at all: any
+    cluster with a resolved target and a workspace to write into is offered,
+    with no budget/ceiling/payback gate on top (an advisory family, or a
+    workspace-less/persona-gated cluster, stays ``advise_only``).
 
     ``repo_cwd_map`` (repo label -> a representative cwd) is optional,
     best-effort enrichment used only to pre-fill the Apply stage's suggested
@@ -1771,7 +1729,7 @@ def build_proposals(
     all in that set is marked ``advise_only`` and gets NO suggested target: there
     is nothing to apply into, so the card must not imply an apply path exists.
 
-    ``persona`` gates the rung-1/rung-2 CLAUDE.md/skill write exactly like
+    ``persona`` gates the CLAUDE.md/skill write exactly like
     ``cost_proposals._persona_gated_write_fields`` gates the script/reuse/
     resend cards it shares that same write surface with (``verbosity`` is NOT
     a peer here — it no longer routes through that helper and is
@@ -1786,15 +1744,9 @@ def build_proposals(
     ``window_labels`` (with ``window_anchor``, the moment the windows trail back
     from) additionally computes each cluster's BOUNDED figure for each named
     window, on new parallel fields. Omitting it is today's behaviour exactly:
-    the unbounded fields are byte-identical either way, which they must be,
-    since the write budget nets against them as its pre-net gross.
+    the unbounded fields are byte-identical either way.
     """
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
-    from tokenjam.core.optimize.write_budget import (
-        REASON_PLACEHOLDER,
-        is_placeholder_fix,
-        short_reason,
-    )
 
     repo_cwd_map = repo_cwd_map or {}
     write_offered = persona in {"claude-code", "mixed"}
@@ -1809,8 +1761,13 @@ def build_proposals(
             continue
 
         family = _FAMILY_BY_KEY.get(cluster.family_key or "")
-        rung = family["rung"] if family else 1
-        fix = family["fix"] if family else "Review examples — no known fix template matched."
+        # A cluster that matched no known family has no family to declare a
+        # mechanism, so it gets the default one. That is a real default, not a
+        # guess about the artifact: with no matcher there is no hook to write.
+        delivery = family["delivery"] if family else DELIVERY_CLAUDE_MD_RULE
+        fix = family["fix"] if family else _fixes.fix_text(
+            "relearn.no_template_matched",
+        )
 
         repos = sorted(cluster.repos)
         occurrences = len(cluster.failures)
@@ -1829,10 +1786,13 @@ def build_proposals(
         # `set[str]` inside the genexpr while keeping identical truthiness.
         # `not write_offered` folds in the persona gate above: even a
         # workspace-having cluster gets no apply path for an sdk/unknown
-        # window.
+        # window. `advisory_only` folds in the family flag below: a family
+        # whose own fix text says no action is needed is never OFFERED,
+        # however well-formed that text is — the observation still stands.
+        advisory_only = bool(family.get("advisory_only")) if family else False
         advise_only = bool(
             advise_only_repos and all(r in advise_only_repos for r in repos)
-        ) or not write_offered
+        ) or not write_offered or advisory_only
         repo_cwd = "" if advise_only else (
             repo_cwd_map.get(repos[0], "") if len(repos) == 1 else ""
         )
@@ -1841,22 +1801,16 @@ def build_proposals(
         else:
             try:
                 suggested_target = default_target_path(
-                    rung, scope, repo_cwd, slugify(cluster.title),
+                    delivery, scope, repo_cwd, slugify(cluster.title),
                     claude_home=claude_home,
                 )
             except Exception:
                 suggested_target = ""   # never let a bad path computation sink the proposal
 
-        # A cluster with no derived fix CLAIMS nothing — there is no fix to
-        # claim, and a forward "you could recover $X" off a fix the user cannot
-        # apply is the "quiet lie in the user's favour" test (CLAUDE.md
-        # anti-pattern #22) failing outright.
-        #
-        # It still COST something, and that is a different field. The absence of
-        # a fix template is a gap in OUR library, not evidence the waste was
-        # unavoidable; the observed cost is computed for every cluster below,
-        # placeholder or not, and reported on the `past_overspend_*` fields.
-        has_real_fix = not is_placeholder_fix(fix)
+        # A cluster with no derived fix still COST something, and that is
+        # reported: the absence of a fix template is a gap in OUR library, not
+        # evidence the waste was unavoidable, and the observed cost is
+        # computed for every cluster below regardless of `advise_only`.
 
         # Priced for EVERY cluster now, not only the ones with a fix: the tail
         # is part of what the recurrence actually cost, and a cluster that will
@@ -1956,7 +1910,7 @@ def build_proposals(
             sessions=len(sessions),
             occurrences=occurrences,
             repos=repos,
-            rung=rung,
+            delivery=delivery,
             scope=scope,
             proposed_fix=fix,
             examples=examples,
@@ -1966,8 +1920,8 @@ def build_proposals(
             advise_only=advise_only,
             tail_calls_median=median_tail,
             tail_multiplier=round(multiplier, 4),
-            # The one observation. `_apply_write_budget` consults it (via
-            # `WriteCandidate.gross_tokens`) to decide whether a permanent
+            # The one observation. The single write allocation consults it
+            # (via `WriteCandidate.gross_tokens`) to decide whether a permanent
             # write is offered at all — the netting disclosure only, never a
             # headline.
             past_overspend_tokens=gross_tokens,
@@ -1976,143 +1930,10 @@ def build_proposals(
             past_reread_tokens=reread_tokens,
             past_reread_usd=past_reread_usd,
             past_overspend_windows=windows,
-            write_offered=has_real_fix,
-            write_blocked_reason="" if has_real_fix else REASON_PLACEHOLDER,
-            write_blocked_short=(
-                "" if has_real_fix else short_reason(REASON_PLACEHOLDER)
-            ),
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
-    proposals = _apply_write_budget(
-        proposals, projection=projection,
-        existing_agent_file_tokens=existing_agent_file_tokens,
-        sessions_by_repo=sessions_by_repo,
-    )
     return proposals, dropped
-
-
-def _write_exposure_sessions(
-    proposal: RelearnCluster, sessions_by_repo: dict[str, int] | None, total: int,
-) -> int | None:
-    """How many of the run's sessions would actually re-send this cluster's
-    artifact.
-
-    A ``user-global`` rule lands in ``~/.claude/CLAUDE.md`` and is paid on
-    every session. A ``project`` rule lands in one repo's file and is paid only
-    on that repo's sessions. Charging a project rule against the whole corpus
-    would net a cluster-scoped saving against a corpus-scoped cost, which is
-    the same time-basis mistake this accounting exists to remove, just wearing
-    a different hat. ``None`` (no per-repo counts available) falls back to the
-    projection basis's own session count.
-    """
-    if proposal.scope != "project" or sessions_by_repo is None:
-        return None
-    scoped = sum(sessions_by_repo.get(repo, 0) for repo in proposal.repos)
-    # A repo we have no count for must not silently price the rule at zero.
-    return min(scoped, total) if scoped > 0 else None
-
-
-def _apply_write_budget(
-    proposals: list[RelearnCluster],
-    *,
-    projection: Any | None,
-    existing_agent_file_tokens: int | None,
-    sessions_by_repo: dict[str, int] | None = None,
-) -> list[RelearnCluster]:
-    """Net every proposal's saving against what its fix costs to KEEP, and cap
-    how many permanent rules are offered at all.
-
-    Three things happen here and nowhere else:
-
-    * A cluster whose fix is the generic "Review examples" placeholder never
-      becomes a permanent rule, and claims nothing. There is no fix to claim.
-    * Same-family clusters collapse onto ONE block. They share a single fix
-      template, so N clusters used to mean N identical CLAUDE.md blocks; now
-      the family's largest cluster carries the write and its siblings say so.
-    * What survives is ranked by net value and offered until the budget runs
-      out. Anything past that is deferred, not deleted: its recommendation is
-      still on the card, so its net claim stands.
-
-    A cluster with no apply path at all (the workspace-less OTel lane) is
-    skipped entirely: nothing is written for it, so it has no standing cost and
-    its figures pass through untouched.
-    """
-    from dataclasses import asdict, replace
-
-    from tokenjam.core.optimize import write_budget as wb
-    from tokenjam.core.optimize.projection import build_projection_basis
-    from tokenjam.core.optimize.relearn_apply import artifact_for_rung, slugify
-
-    basis = projection or build_projection_basis(0.0, 0, 0)
-    candidates: list[wb.WriteCandidate] = []
-    for p in proposals:
-        if p.advise_only or not p.suggested_target:
-            continue
-        try:
-            artifact = artifact_for_rung(asdict(p), p.signature, p.rung, slugify(p.title))
-        except Exception:
-            artifact = p.proposed_fix     # never let a render hiccup sink a proposal
-        candidates.append(wb.WriteCandidate(
-            key=p.signature,
-            # Family-unmatched clusters have no family_key; keying them on
-            # their own signature keeps each a family of one rather than
-            # collapsing every unrelated residual into a single bucket.
-            family=p.family_key or f"signature:{p.signature}",
-            rung=p.rung,
-            artifact_text=artifact or p.proposed_fix,
-            # `past_overspend_tokens` IS the pre-net observation — there is no
-            # separate gross field any more; the past-tense figure doubles as
-            # the netting input.
-            gross_tokens=p.past_overspend_tokens,
-            # Same quantity as `gross_tokens`, priced at the cluster's own
-            # rate (`past_overspend_usd` IS `gross_tokens x rate`), so the two
-            # divide back to a real price band (repo CLAUDE.md rule 28) and
-            # `write_budget`'s value floor has a dollar figure to compare
-            # against. Without this the budget netted tokens-only and the
-            # floor could never fire.
-            gross_usd=p.past_overspend_usd,
-            exposure_sessions=_write_exposure_sessions(
-                p, sessions_by_repo, basis.sessions,
-            ),
-        ))
-
-    budget = wb.build_write_budget(
-        lane_budget_tokens=wb.RELEARN_WRITE_BUDGET_TOKENS,
-        lane_max_writes=wb.RELEARN_MAX_OFFERED_WRITES,
-        existing_agent_file_tokens=existing_agent_file_tokens,
-    )
-    decisions = wb.allocate_writes(candidates, budget, basis)
-
-    out: list[RelearnCluster] = []
-    for p in proposals:
-        decision = decisions.get(p.signature)
-        if decision is None:
-            # Never entered the budget at all — advise-only, or no target to
-            # write into. Nothing is on offer, so say so rather than letting
-            # the dataclass default (`write_offered=True`) stand and claim a
-            # write that does not exist.
-            out.append(replace(p, write_offered=False))
-            continue
-        out.append(replace(
-            p,
-            standing_cost_tokens_per_session=decision.standing_tokens_per_session,
-            standing_cost_tokens=decision.standing_tokens,
-            standing_cost_basis=decision.basis,
-            payback_ratio=decision.payback_ratio,
-            net_negative=decision.net_negative,
-            write_offered=decision.offered,
-            write_blocked_reason=decision.reason,
-            write_blocked_short=wb.short_reason(decision.reason),
-            # A suppressed write has no apply path, which is exactly what
-            # `advise_only` already means to every surface. Reusing that flag
-            # (rather than teaching each renderer a second one) makes the
-            # Review inbox show this decision's own reason in place of the
-            # generic workspace-less one.
-            advise_only=p.advise_only or not decision.offered,
-            suggested_target=p.suggested_target if decision.offered else "",
-        ))
-    return out
 
 
 # --- Orchestration (pure, no ctx dependency — testable directly) --------------
@@ -2134,7 +1955,6 @@ def analyze_relearns(
     advise_only_repos: set[str] | None = None,
     conn: Any | None = None,
     persona: str = "unknown",
-    existing_agent_file_tokens: int | None = None,
     window_labels: Sequence[str] | None = None,
     window_anchor: Any | None = None,
 ) -> RelearnFinding:
@@ -2152,7 +1972,7 @@ def analyze_relearns(
     ``conn`` (optional DuckDB connection) is forwarded to ``build_proposals``
     for the per-cluster blended-dollar-rate lookup (Review inbox monthly-$
     basis) — ``None`` keeps every cluster tokens-only, same as today.
-    ``persona`` is forwarded to ``build_proposals`` to gate the rung-1/rung-2
+    ``persona`` is forwarded to ``build_proposals`` to gate the
     write — see its docstring.
 
     ``window_labels`` additionally computes each cluster's observed cost BOUNDED
@@ -2187,8 +2007,15 @@ def analyze_relearns(
     raw_clusters = cluster_failures(all_failures)
     recurring = _recurring(raw_clusters, min_sessions)
     residue = _below_threshold_residue(raw_clusters, recurring, conn)
+    # apply_distill_to_residual requires an explicit cache_dir (no silent
+    # unscoped default — see its docstring). A caller here with no config to
+    # scope from (standalone helpers, tests) keeps today's historical
+    # ~/.tj-backed path via the config-less resolver; a caller WITH a config
+    # threads it in through `distill_cache_dir` instead, scoped.
     distilled = apply_distill_to_residual(
-        recurring, cache_dir=distill_cache_dir, enabled=distill_enabled,
+        recurring,
+        cache_dir=distill_cache_dir if distill_cache_dir is not None else _distill_cache_dir(),
+        enabled=distill_enabled,
     )
     distilled_count = sum(1 for c in distilled if (c.family_key or "").startswith("distilled:"))
 
@@ -2200,21 +2027,6 @@ def analyze_relearns(
     # the two are different quantities — one is what the corpus happened to
     # span, the other is what a caller asked to bound a figure to.
     corpus_window_days = _corpus_window_days(all_failures)
-
-    # The SAME basis the monthly extrapolation above uses, expressed once as a
-    # ProjectionBasis so the write budget can price a permanent rule against
-    # the identical session pace the saving is projected on. Mixing the two
-    # would reintroduce exactly the time-basis error this accounting exists to
-    # remove. See `core/optimize/projection.py`.
-    projection = build_projection_basis(
-        corpus_window_days or 0.0, _corpus_active_days(all_failures), scanned,
-    )
-
-    # Per-repo session counts: what a PROJECT-scoped rule's standing cost is
-    # actually charged against (a user-global one is charged against them all).
-    sessions_by_repo: dict[str, int] = {}
-    for _session_id, repo in sessions:
-        sessions_by_repo[repo] = sessions_by_repo.get(repo, 0) + 1
 
     # The moment every bounded window trails back from. Fixed once for the whole
     # run so every cluster's "last 30 days" means the same 30 days, and carried
@@ -2231,9 +2043,6 @@ def analyze_relearns(
         claude_home=claude_home,
         repo_cwd_map=repo_cwd_map, advise_only_repos=advise_only_repos,
         conn=conn, window_days=corpus_window_days, persona=persona,
-        projection=projection,
-        existing_agent_file_tokens=existing_agent_file_tokens,
-        sessions_by_repo=sessions_by_repo,
         window_labels=window_labels, window_anchor=anchor,
     )
     # The past-tense totals sum EVERY cluster, gated or not — that is the whole
@@ -2380,7 +2189,11 @@ def _repo_cwd_map_for(
     directory name is unreliable, so this reads each session's transcript's
     first ``cwd`` field directly (cheap: short-circuits after the first hit)
     for one representative session per repo."""
-    from tokenjam.core.transcript import _locate_transcript, read_records
+    from tokenjam.core.transcript import (
+        _locate_transcript,
+        first_recorded_cwd,
+        read_records,
+    )
 
     out: dict[str, str] = {}
     for session_id, repo in sessions:
@@ -2389,11 +2202,12 @@ def _repo_cwd_map_for(
         path = _locate_transcript(session_id, projects_root)
         if path is None:
             continue
-        for record in read_records(path, cache_dir=transcript_cache_dir)[:5]:
-            cwd = record.get("cwd")
-            if isinstance(cwd, str) and cwd:
-                out[repo] = cwd
-                break
+        # `first_recorded_cwd` is the shared extractor (deadweight and rule
+        # placement read it too) — see its docstring for why this is not three
+        # copies of the same five-record loop any more.
+        cwd = first_recorded_cwd(read_records(path, cache_dir=transcript_cache_dir))
+        if cwd:
+            out[repo] = cwd
     return out
 
 
@@ -2408,7 +2222,7 @@ def compute_relearn_finding(
     min_sessions: int = MIN_RECURRING_SESSIONS,
     transcript_cache_dir: Path | None = None,
     persona: str = "unknown",
-    existing_agent_file_tokens: int | None = None,
+    persona_scope: str | None = None,
     retention_days: int | None = None,
     window_labels: Sequence[str] | None = RELEARN_WINDOW_LABELS,
 ) -> RelearnFinding:
@@ -2419,7 +2233,7 @@ def compute_relearn_finding(
     see below), which is the only thing a filesystem-only scan can offer.
 
     ``persona`` (default ``"unknown"``, the conservative no-write default —
-    see ``build_proposals``) is forwarded to gate the rung-1/rung-2 write.
+    see ``build_proposals``) is forwarded to gate the CLAUDE.md/skill write.
     ``run(ctx)`` below passes the report's own ``ctx.persona`` rather than
     re-deriving it here, so a report never carries two different persona
     classifications for the same window.
@@ -2472,7 +2286,20 @@ def compute_relearn_finding(
     profile, per-turn cost and prompt timelines the unbounded figure already
     built. Pass ``None`` to opt out. Nothing here SCOPES the scan to a window:
     the horizon stays tokenjam's retention, per the note above.
+
+    ``persona_scope`` selects WHICH LANES may contribute, which is how the
+    population narrows here: this detector's lanes are ALREADY partitioned by
+    persona, so scoping is a lane choice rather than a SQL clause. The OTel
+    lane reads only non-coding-agent spans by construction
+    (``relearn_otel.extract_span_failures``); the transcript and archive lanes
+    read Claude Code sessions and nothing else. So ``claude-code`` keeps the
+    latter two, ``sdk`` keeps the former, and ``None`` keeps all three. Without
+    this, an SDK reader is shown recurring-failure clusters mined out of Claude
+    Code transcripts. It does NOT narrow the horizon — that stays retention,
+    per the note above; population and window are different questions.
     """
+    scope_coding_lanes = persona_scope != "sdk"
+    scope_otel_lane = persona_scope != "claude-code"
     root = resolve_projects_root(projects_root)
     repo_map = _repo_map_from_db(conn) if conn is not None else {}
     archive_since = _retention_cutoff(retention_days)
@@ -2481,7 +2308,7 @@ def compute_relearn_finding(
     # working) transcript scan.
     span_failures: list[FailureEpisode] = []
     advise_only_repos: set[str] = set()
-    if conn is not None:
+    if conn is not None and scope_otel_lane:
         try:
             from tokenjam.core.optimize.relearn_otel import (
                 extract_span_failures,
@@ -2494,7 +2321,10 @@ def compute_relearn_finding(
             span_failures = []
             advise_only_repos = set()
 
-    paths = sorted(root.rglob("*.jsonl")) if root.exists() else []
+    paths = (
+        sorted(root.rglob("*.jsonl"))
+        if root.exists() and scope_coding_lanes else []
+    )
     sessions: list[tuple[str, str]] = []
     for path in paths:
         if since is not None:
@@ -2515,7 +2345,7 @@ def compute_relearn_finding(
     # Best-effort, exactly like the OTel lane above.
     on_disk = {session_id for session_id, _repo in sessions}
     archived_failures: list[FailureEpisode] = []
-    if conn is not None:
+    if conn is not None and scope_coding_lanes:
         try:
             from tokenjam.core.optimize.relearn_otel import (
                 extract_archived_coding_failures,
@@ -2546,7 +2376,6 @@ def compute_relearn_finding(
         advise_only_repos=advise_only_repos,
         min_sessions=min_sessions, transcript_cache_dir=transcript_cache_dir,
         conn=conn, persona=persona,
-        existing_agent_file_tokens=existing_agent_file_tokens,
         window_labels=window_labels,
     )
     archived_sessions = len({f.session_id for f in archived_failures})
@@ -2579,7 +2408,8 @@ def run(ctx: AnalyzerContext) -> None:
     ``storage.retention_days`` — what tokenjam actually kept — which is the
     point of keeping it.
     """
-    from tokenjam.core.optimize.scope import resolve_analyzer_scope
+    from tokenjam.core.optimize.report_window import report_window_label
+    from tokenjam.core.optimize.scope import resolve_analyzer_scope, resolve_write_scope
     from tokenjam.core.transcript_cache import default_cache_dir
 
     scope = ctx.scope if ctx.scope is not None else resolve_analyzer_scope(ctx.config)
@@ -2598,25 +2428,42 @@ def run(ctx: AnalyzerContext) -> None:
         optimize_cfg, "min_recurring_sessions", MIN_RECURRING_SESSIONS,
     )
     storage_cfg = getattr(ctx.config, "storage", None)
-    retention_days = getattr(storage_cfg, "retention_days", None)
-    # The write budget's headroom comes from the `summarize` analyzer's own
-    # measurement of the agent files these proposals would append to. It runs
-    # ahead of relearn in ANALYZER_ORDER, so its finding is already on the
-    # report; when it wasn't selected this is None and the lane cap stands
-    # alone. This is the cross-reference the two halves of the loop were
-    # missing: relearn can no longer offer rules for a file the same report
-    # is recommending the user compress.
-    from tokenjam.core.optimize.write_budget import measured_agent_file_tokens
-
+    # Resolved, never read off the field: `storage.retention_days` is now
+    # derived from the chosen analysis span and is None on a default config,
+    # which a raw read would take to mean "unbounded" — the opposite of what a
+    # 90-day span promises. See core/analysis_span.py.
+    retention_days = (
+        retention_days_for(storage_cfg) if storage_cfg is not None else None
+    )
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, min_sessions=min_sessions,
+        # WHICH LANES may contribute — see `compute_relearn_finding`. Distinct
+        # from `persona` just below it, which only gates the WRITE.
+        persona_scope=ctx.persona_scope,
         retention_days=retention_days,
+        # So the inbox's one window label always has a bucket on this side
+        # too. Resolved through `core/optimize/report_window`, the seam the
+        # cost side and the stored report both take their window from — the
+        # inbox matches this vocabulary EXACTLY, so a label derived any other
+        # way here drops every cluster out of the headline.
+        window_labels=window_labels_including(
+            report_window_label(ctx.config, ctx.conn)
+        ),
         projects_root=scope.projects_root,
-        claude_home=scope.claude_home,
+        # THE APPLY TARGET AND THE WRITE GUARD MUST COME FROM ONE PLACE. This
+        # passed `scope.claude_home` directly while `relearn_store` passed
+        # `resolve_write_scope(scope=scope).suggest_root` for the same purpose,
+        # and that store carries a comment recording what independent
+        # derivation cost last time: the API's write guard authorizes against
+        # the OTHER half of this same type, so a card whose evidence is scoped
+        # one way and whose write target is scoped another describes two
+        # different machines. Both callers now resolve it here.
+        claude_home=resolve_write_scope(scope=scope).suggest_root,
         distill_cache_dir=_distill_cache_dir(ctx.config),
         transcript_cache_dir=default_cache_dir(ctx.config),
-        persona=ctx.persona,
-        existing_agent_file_tokens=measured_agent_file_tokens(
-            ctx.report.findings.get("summarize"),
-        ),
+        # The WRITE gate, and it follows the scope for the same reason the
+        # population does: a pass scoped to `sdk` must not be handed the
+        # corpus's `mixed` verdict and offer a CLAUDE.md write off the back of
+        # it. Distinct from `persona_scope` above, which chooses the lanes.
+        persona=ctx.effective_persona,
     )

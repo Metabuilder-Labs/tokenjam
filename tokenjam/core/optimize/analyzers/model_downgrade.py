@@ -64,6 +64,7 @@ from tokenjam.core.optimize.types import (
     OpusAuditExample,
     OpusQuotaAudit,
 )
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Structural heuristic thresholds for the SECONDARY tiny-session case. Sessions
 # are flagged only when ALL three hold; the analyzer never claims the cheaper
@@ -261,6 +262,7 @@ def _alt_unit_cost(provider: str, original_model: str, alt_model: str,
 
 def _turns_by_session(
     conn, since: datetime, until: datetime, agent_id: str | None,
+    persona_scope: str | None = None,
 ) -> dict[str, list[TurnComposition]]:
     """Window turns grouped by session, ordered, with tool activity attached.
 
@@ -270,32 +272,39 @@ def _turns_by_session(
     """
     by_session: dict[str, list[TurnComposition]] = {}
     for turn in load_turn_compositions(
-        conn, since, until, agent_id, ordered=True, with_tool_activity=True,
+        conn, since, until, agent_id, persona_scope=persona_scope,
+        ordered=True, with_tool_activity=True,
     ):
         by_session.setdefault(turn.session_id, []).append(turn)
     return by_session
 
 
 DRIVER_ROLE_BASIS_TEMPLATE = (
-    "Sessions where a premium-tier model drove the whole session inline: it "
-    "never dispatched a subagent, ran {floor}+ main-thread tool calls, and "
-    "accumulated more than {ctx:,} tokens of context. Two exact arithmetic "
-    "halves over the turns inside a tool-driven stretch (a contiguous run of "
-    "turns that each ran at least one tool — the reads/searches/edits a worker "
-    "would have carried). (1) OFFLOAD: the uncached material those turns pulled "
-    "in — tool results, file contents — is re-read by every later main-thread "
-    "turn until the next compaction, billed at the premium cache-read rate; a "
-    "worker's tool output never enters the caller's context, so that tail is "
-    "removed. Only the pulled-in material is counted, never the assistant's own "
-    "output, because a worker's short conclusion does come back to the caller. "
+    "Sessions where a premium-tier model drove the whole session inline. It "
+    "never dispatched a subagent. It ran {floor}+ main-thread tool calls and "
+    "accumulated more than {ctx:,} tokens of context.\n\n"
+    "Two exact arithmetic halves apply to the turns inside a tool-driven "
+    "stretch. A tool-driven stretch is a contiguous run of turns that each "
+    "ran at least one tool: the reads/searches/edits a worker would have "
+    "carried.\n\n"
+    "(1) OFFLOAD: the uncached material those turns pulled in (tool results, "
+    "file contents) is re-read by every later main-thread turn until the "
+    "next compaction. It is billed at the premium cache-read rate. A "
+    "worker's tool output never enters the caller's context, so that tail "
+    "is removed.\n\n"
+    "Only the pulled-in material is counted, never the assistant's own "
+    "output. That is because a worker's short conclusion does come back to "
+    "the caller.\n\n"
     "(2) TIER: those same turns' own input and output repriced at the "
     "substitute worker tier ({substitutes}) instead of the premium driver's. "
-    "The two compound — where the work runs and what it runs on are "
-    "independent. The premium driver itself is left in place and is NOT "
-    "repriced: an interactive session must stay smart, so nothing here assumes "
-    "you downgrade your own thread. Disjoint by construction from the resend "
-    "card (which skips exactly these sessions) and from the subagent card "
-    "(these sessions dispatch no subagent, so they carry no subagent spans)."
+    "The two compound: where the work runs and what it runs on are "
+    "independent.\n\n"
+    "The premium driver itself is left in place and is NOT repriced. An "
+    "interactive session must stay smart, so nothing here assumes you "
+    "downgrade your own thread.\n\n"
+    "Disjoint by construction from the resend card, which skips exactly "
+    "these sessions. Also disjoint from the subagent card: these sessions "
+    "dispatch no subagent, so they carry no subagent spans."
 )
 
 
@@ -467,6 +476,7 @@ def analyze_model_downgrade(
     until: datetime,
     agent_id: str | None,
     window_days: float,
+    persona_scope: str | None = None,
 ) -> DowngradeFinding | None:
     """
     Two cases, one finding (see the module docstring for why the split exists).
@@ -508,6 +518,10 @@ def analyze_model_downgrade(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
 
     # First pass: main-thread LLM spans grouped by session.
@@ -538,7 +552,8 @@ def analyze_model_downgrade(
         str(r[0]): (str(r[2]) if r[2] else "unknown") for r in llm_rows if r[0]
     }
     driver_aggs = analyze_driver_role(
-        _turns_by_session(conn, since, until, agent_id), agent_by_session,
+        _turns_by_session(conn, since, until, agent_id, persona_scope),
+        agent_by_session,
         window_start=since,
     )
     driver_sessions = {a.session_id for a in driver_aggs}
@@ -668,6 +683,15 @@ def analyze_model_downgrade(
     total_savings = savings_window + driver_savings
     monthly_savings = (total_savings / window_days * 30.0) if window_days > 0 else 0.0
     percent = (candidate_sessions / total_sessions * 100.0) if total_sessions else 0.0
+    # Both cases combined — the population `past_overspend_usd` actually sums
+    # over. `percent`/`percent_of_sessions` above stays tiny-session-only (see
+    # its own comment); this is the pair a surface must use beside the dollar
+    # tile, or a driver-role-only window renders a real $ figure next to "0%,
+    # 0 of N" — see `DowngradeFinding.percent_of_all_sessions`.
+    percent_of_all = (
+        ((candidate_sessions + len(driver_aggs)) / total_sessions * 100.0)
+        if total_sessions else 0.0
+    )
     # The confidence interval brackets what the card actually shows, so it has
     # to resample BOTH cases' per-session values, not just the tiny-session one.
     per_session_savings.extend(a.recoverable_usd for a in driver_aggs)
@@ -696,7 +720,8 @@ def analyze_model_downgrade(
     per_agent = build_agent_price_rows(
         price_candidates, window_days,
         thinking_tokens_by_session(
-            conn, since, until, agent_id, main_thread_only=True,
+            conn, since, until, agent_id,
+            persona_scope=persona_scope, main_thread_only=True,
         ),
         window_start=since,
     )
@@ -747,6 +772,7 @@ def analyze_model_downgrade(
         alternative_cost_usd=round(alt_cost, 6),
         monthly_savings_usd=round(monthly_savings, 2),
         percent_of_sessions=round(percent, 1),
+        percent_of_all_sessions=round(percent_of_all, 1),
         examples=examples,
         suggestions=suggestions,
         bench_command=bench_command,
@@ -802,7 +828,7 @@ def analyze_model_downgrade(
         ) + (
             (
                 "SECONDARY (structurally tiny sessions): candidate sessions "
-                "routed to a cheaper model over the window — structural fit "
+                "routed to a cheaper model over the window. Structural fit "
                 "only, no quality validation."
             ) if candidate_sessions else ""
         ),
@@ -819,6 +845,12 @@ def analyze_model_downgrade(
         driver_substitutes=driver_substitutes,
         driver_examples=driver_examples,
         driver_estimate_basis=driver_basis,
+        # Per-session breakdown of `driver_tokens` above (they sum to it),
+        # carried so the rule this card proposes can be placed in the projects
+        # that actually incurred it — see `DowngradeFinding.driver_session_tokens`.
+        driver_session_tokens={
+            str(a.session_id): int(a.tokens) for a in driver_aggs if a.session_id
+        },
     )
 
 
@@ -853,13 +885,24 @@ def run(ctx: AnalyzerContext) -> None:
 
     ctx.report.downgrade = analyze_model_downgrade(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
+        ctx.persona_scope,
     )
-    if "placement" in disabled_analyzers_for_persona(ctx.persona):
+    # `effective_persona`, not `persona`: this pass may be scoped to one side of
+    # the picker over a corpus that resolves to `mixed`, and `mixed` disables
+    # nothing. Keying off the window's own persona there attaches a batch-lane
+    # card to a Claude-Code-scoped pass — a dollar figure for a lever that
+    # persona structurally cannot pull.
+    if "placement" in disabled_analyzers_for_persona(ctx.effective_persona):
         return
     optimize_cfg = getattr(ctx.config, "optimize", None)
     ctx.report.findings["placement"] = analyze_batch_placement(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        # The window cost this is compared against comes from `ctx.summary`,
+        # which `build_report` already scoped to the same persona — so the
+        # group costs below and the window total they are a share of cover one
+        # population.
         ctx.summary.total_cost_usd or 0.0,
+        persona_scope=ctx.persona_scope,
         min_sessions_for_cadence=getattr(
             optimize_cfg, "min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE,
         ),

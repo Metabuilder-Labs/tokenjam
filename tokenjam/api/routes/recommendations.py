@@ -33,6 +33,16 @@ def get_recommendations(request: Request) -> dict[str, Any]:
     Best-effort runs adoption detection first (the daemon holds the connection);
     a detection failure never blocks the read — the already-recorded ledger is
     still returned.
+
+    **DELIBERATELY PERSONA-BLIND, and this is the reason.** The outcome ledger
+    (``core/recommendations.py``) is an append-only record of recommendations
+    the user was shown and whether they adopted them. It carries no
+    ``agent_id`` on any record — there is nothing here to bucket by, and adding
+    a ``persona`` parameter that quietly returned the same rows would assert a
+    scoping that does not exist. The rows describe the USER'S OWN history with
+    the product, which is one history whichever persona they are currently
+    viewing as. If per-persona outcomes are ever wanted, the ledger has to
+    start recording the persona at write time; there is no read-side fix.
     """
     db = request.app.state.db
     config = request.app.state.config

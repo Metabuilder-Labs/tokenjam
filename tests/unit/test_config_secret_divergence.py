@@ -1,23 +1,27 @@
-"""
-Test the diverged-secret warning at config-load time (#68 §5).
+"""Diverged-secret detection at config-load time — and, more importantly, the
+absence of a warning there.
+
+`load_config` used to print a warning to stderr whenever a project-local config
+shadowed the global one with a different `ingest_secret`. That fired on EVERY
+invocation of every command, in front of unrelated output, on a fault the user
+cannot act on from where they are standing, and (in the case that motivated the
+change) while nothing was listening on the endpoint at all. A warning that is
+always on is a warning people learn to read past.
+
+The detection itself is kept and still exercised here: `find_diverged_secret_config`
+is the shared helper, now consumed by `tj doctor`'s ingest-secret check, where
+the verdict is queryable and repeatable rather than ambient. These assertions are
+therefore inverted rather than deleted — the pairing that used to warn must now
+be silent at load time AND still be detectable on demand.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from tokenjam.core.config import (
-    SEARCH_PATHS,
-    _reset_secret_divergence_warning,
+    find_diverged_secret_config,
     load_config,
 )
-
-
-@pytest.fixture(autouse=True)
-def _reset_warning_state():
-    """Reset the once-per-process warning guard before every test."""
-    _reset_secret_divergence_warning()
 
 
 def _write_config(path: Path, *, secret: str) -> None:
@@ -29,14 +33,24 @@ def _write_config(path: Path, *, secret: str) -> None:
     )
 
 
-def test_warns_when_project_and_global_diverge(tmp_path, monkeypatch, capsys):
-    """Project-local + global with different secrets → stderr warning."""
+def _raw(path: Path) -> dict:
+    import sys
+
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib  # type: ignore[no-redef]
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def test_load_config_is_silent_when_project_and_global_diverge(tmp_path, monkeypatch, capsys):
+    """The divergence exists, and `load_config` says nothing about it."""
     project_local = tmp_path / "project" / ".tj" / "config.toml"
     global_cfg = tmp_path / "home" / ".config" / "tj" / "config.toml"
     _write_config(project_local, secret="A" * 64)
     _write_config(global_cfg, secret="B" * 64)
 
-    # Point the discovery + the helper at our temp paths.
     monkeypatch.setattr(
         "tokenjam.core.config.SEARCH_PATHS",
         [project_local, global_cfg],
@@ -46,12 +60,18 @@ def test_warns_when_project_and_global_diverge(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
 
     assert cfg.security.ingest_secret == "A" * 64
-    assert "warning: ingest_secret differs" in captured.err
-    assert ".tj/config.toml" in captured.err or str(project_local) in captured.err
+    assert "ingest_secret" not in captured.err
+    assert "ingest_secret" not in captured.out
+
+    # ...and the same state is still detectable on demand, which is what
+    # `tj doctor`'s ingest-secret check reports.
+    diverged = find_diverged_secret_config(project_local, _raw(project_local))
+    assert diverged is not None
+    assert diverged[0] == global_cfg
 
 
-def test_no_warning_when_only_one_config_exists(tmp_path, monkeypatch, capsys):
-    """No global config → nothing to compare against → no warning."""
+def test_no_divergence_when_only_one_config_exists(tmp_path, monkeypatch):
+    """No global config → nothing to compare against."""
     project_local = tmp_path / ".tj" / "config.toml"
     _write_config(project_local, secret="A" * 64)
 
@@ -60,14 +80,11 @@ def test_no_warning_when_only_one_config_exists(tmp_path, monkeypatch, capsys):
         [project_local, Path("/nonexistent/global/config.toml")],
     )
 
-    load_config(str(project_local))
-    captured = capsys.readouterr()
-
-    assert "warning: ingest_secret" not in captured.err
+    assert find_diverged_secret_config(project_local, _raw(project_local)) is None
 
 
-def test_no_warning_when_secrets_match(tmp_path, monkeypatch, capsys):
-    """Same secret in both configs → no divergence → no warning."""
+def test_no_divergence_when_secrets_match(tmp_path, monkeypatch):
+    """Same secret in both configs → the aligned state onboarding now produces."""
     project_local = tmp_path / "project" / ".tj" / "config.toml"
     global_cfg = tmp_path / "home" / ".config" / "tj" / "config.toml"
     _write_config(project_local, secret="SAME" + "x" * 60)
@@ -78,13 +95,12 @@ def test_no_warning_when_secrets_match(tmp_path, monkeypatch, capsys):
         [project_local, global_cfg],
     )
 
-    load_config(str(project_local))
-    captured = capsys.readouterr()
-    assert "warning: ingest_secret" not in captured.err
+    assert find_diverged_secret_config(project_local, _raw(project_local)) is None
 
 
-def test_warning_fires_at_most_once_per_process(tmp_path, monkeypatch, capsys):
-    """Repeated load_config calls in one process emit the warning once."""
+def test_repeated_loads_stay_silent(tmp_path, monkeypatch, capsys):
+    """No warning on the first load, and none on any later one either — the
+    old guard suppressed repeats of a warning that should not fire at all."""
     project_local = tmp_path / "project" / ".tj" / "config.toml"
     global_cfg = tmp_path / "home" / ".config" / "tj" / "config.toml"
     _write_config(project_local, secret="A" * 64)
@@ -100,4 +116,4 @@ def test_warning_fires_at_most_once_per_process(tmp_path, monkeypatch, capsys):
     load_config(str(project_local))
 
     captured = capsys.readouterr()
-    assert captured.err.count("warning: ingest_secret differs") == 1
+    assert "ingest_secret" not in captured.err

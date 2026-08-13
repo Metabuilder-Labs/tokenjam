@@ -21,6 +21,7 @@ import click
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.config import (
     AgentConfig,
     AlertChannelConfig,
@@ -59,9 +60,9 @@ class PolicyRow:
         return {"policy": self.policy, "setting": self.setting, "source": self.source}
 
 
-@click.group("policy", invoke_without_command=False)
+@click.group("policy", cls=TjGroup, invoke_without_command=False)
 def cmd_policy() -> None:
-    """Unified view of policy-adjacent configuration (read-only preview)."""
+    """View policy-related config in one place."""
 
 
 @cmd_policy.command("list")

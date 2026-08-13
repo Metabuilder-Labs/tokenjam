@@ -70,7 +70,54 @@ def _parse_attrs(raw_attrs: list[dict]) -> dict[str, Any]:
 
 
 def _ts_to_datetime(timestamp_ns: int) -> datetime:
+    """Convert a record timestamp. Callers must have established it is real.
+
+    `_observed_timestamp_ns` below is the gate: a record with no observed time
+    is rejected before it reaches any converter, so a zero can no longer arrive
+    here and be turned into `1970-01-01`. That sentinel was not a harmless
+    placeholder — it participates in MIN(), in ORDER BY and in every day union,
+    and one such row was enough to make a corpus with two months of usable
+    history report a span in the thousands of days.
+    """
     return datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc)
+
+
+def _observed_timestamp_ns(record: dict, attrs: dict[str, Any]) -> int:
+    """The record's observed time in epoch nanoseconds.
+
+    Raises `SpanRejectedError` when there is none. Both producers are live, not
+    hypothetical: Claude Code's own OTel log exporter omits `timeUnixNano` on
+    some records, and Codex sets it to 0 and puts the real timestamp in
+    `attrs["event.timestamp"]` as an ISO-8601 UTC string — which can itself be
+    absent or unparseable. Rejecting is the idiom the ingest adapters already
+    use (`ingest_adapters/langfuse.py`, `helicone.py`): a record that cannot say
+    when it happened is not ingested, rather than ingested with a made-up time.
+
+    Every parse failure in here becomes a rejection of THIS record. A malformed
+    `timeUnixNano` or a non-string `event.timestamp` used to raise out of the
+    per-record guard and fail the whole export batch with a 500.
+    """
+    try:
+        timestamp_ns = int(record.get("timeUnixNano", 0))
+    except (TypeError, ValueError) as exc:
+        raise SpanRejectedError(f"unparseable timeUnixNano: {exc}") from None
+    if timestamp_ns > 0:
+        return timestamp_ns
+
+    ts_str = attrs.get(CodexEvents.EVENT_TIMESTAMP)
+    if ts_str:
+        try:
+            dt = datetime.fromisoformat(str(ts_str).rstrip("Z") + "+00:00")
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise SpanRejectedError(
+                f"unparseable {CodexEvents.EVENT_TIMESTAMP}: {exc}"
+            ) from None
+        return int(dt.timestamp() * 1e9)
+
+    raise SpanRejectedError(
+        "record carries no observed timestamp (timeUnixNano is absent or zero "
+        f"and there is no {CodexEvents.EVENT_TIMESTAMP} to fall back to)"
+    )
 
 
 def _api_request_to_span(
@@ -567,7 +614,6 @@ def parse_log_records(
 
         for scope_log in resource_log.get("scopeLogs", []):
             for record in scope_log.get("logRecords", []):
-                timestamp_ns = int(record.get("timeUnixNano", 0))
                 body_val = record.get("body", {})
                 event_name = _otlp_value(body_val) if isinstance(body_val, dict) else body_val
 
@@ -583,25 +629,19 @@ def parse_log_records(
                 if not isinstance(event_name, str):
                     continue
 
-                # Codex CLI sets timeUnixNano=0 and puts the real timestamp in
-                # attrs["event.timestamp"] as an ISO-8601 UTC string.
-                if timestamp_ns == 0:
-                    ts_str = attrs.get(CodexEvents.EVENT_TIMESTAMP)
-                    if ts_str:
-                        try:
-                            dt = datetime.fromisoformat(ts_str.rstrip("Z") + "+00:00")
-                            timestamp_ns = int(dt.timestamp() * 1e9)
-                        except ValueError:
-                            pass
-
                 converter = _CONVERTERS.get(event_name)
                 if converter is None:
                     # Unknown event — skip silently
                     continue
 
-                record_id = f"{event_name}:{timestamp_ns}"
-
+                # Inside the per-record guard, deliberately: an unparseable
+                # timestamp rejects THIS record. Read outside it, a malformed
+                # `timeUnixNano` or a non-string `event.timestamp` raised
+                # straight out of the loop and failed the whole export batch.
+                record_id = event_name
                 try:
+                    timestamp_ns = _observed_timestamp_ns(record, attrs)
+                    record_id = f"{event_name}:{timestamp_ns}"
                     span = converter(attrs, resource_attrs, timestamp_ns)
                     if span is None:
                         continue

@@ -12,10 +12,20 @@ from pathlib import Path
 import pytest
 
 from tokenjam.core.config import StorageConfig, TjConfig
-from tokenjam.core.summarize import wrap
+from tokenjam.core.summarize import estimate, wrap
 from tokenjam.core.summarize.apply import apply_staged, undo
+from tokenjam.core.summarize.estimate import (
+    PUBLISHED_LINE_TARGET,
+    PUBLISHED_LINE_TARGET_SOURCE,
+)
+from tokenjam.core.summarize.route import (
+    HOOK_QUOTE,
+    PATH_SCOPE_QUOTE,
+    PRUNE_TEST_QUOTE,
+)
+from tests.summarize_fakes import compliant_summary
 from tokenjam.core.summarize.session import (
-    SummarizeRefused, check, clear, list_staged, prepare, read_staged,
+    SummarizeRefused, check, clear, list_attempts, list_staged, prepare, read_staged,
 )
 
 PROSE = "Always act carefully and never drop a required step when you respond. " * 30
@@ -89,10 +99,12 @@ def test_check_dropped_marker_not_staged(cfg, tmp_path):
 
 
 def test_check_tracks_must_keep(cfg, tmp_path):
+    # Pure prose, no fences: zero protected blocks, so the echoed envelope is the ONLY thing the
+    # gate can verify here — hence the nonce. Without it this file passes on any output at all.
     path = _write(tmp_path, "CLAUDE.md", "You must never delete the file. " + PROSE)
     res = prepare(path=path)
-    verdict = check(cfg, path, _perfect_summary(res.wrapped_prompt, "Avoid removing the file."),
-                    res.source_sha256)
+    verdict = check(cfg, path, compliant_summary(res.wrapped_prompt, "Avoid removing the file."),
+                    res.source_sha256, source_nonce=res.source_nonce)
     assert verdict.structure_ok                          # a rephrase doesn't fail the structure gate
     assert "never" in verdict.must_keep_removed           # but the dropped word is tracked
 
@@ -140,6 +152,131 @@ def test_check_no_false_refuse(cfg, tmp_path):
     res = prepare(path=path)
     verdict = check(cfg, path, _perfect_summary(res.wrapped_prompt, "Careful prose."), res.source_sha256)
     assert verdict.structure_ok                          # no spurious "changed since prep"
+
+
+# --- the published line target: what the rewriter is ASKED for (never claimed) ---
+
+def test_prepare_aims_at_the_published_line_target_for_an_oversized_claude_md(tmp_path):
+    """An always-resident file far over the published size target gets a harsher
+    ask than the ratio, and the basis says whose target it is."""
+    text = ("Always act carefully and never drop a required step. " * 6 + "\n") * 600
+    path = _write(tmp_path, "CLAUDE.md", text)
+
+    res = prepare(path=path)
+
+    assert res.line_target == PUBLISHED_LINE_TARGET
+    assert res.lines_before > PUBLISHED_LINE_TARGET
+    # The line goal is the binding one: stricter than keeping half the prose.
+    assert res.target_prose_words < int(0.5 * res.prose_words)
+    assert str(PUBLISHED_LINE_TARGET) in res.system_rules
+    assert "under 200 lines" in res.target_basis
+    assert PUBLISHED_LINE_TARGET_SOURCE in res.target_basis
+    assert "That target is theirs, not tokenjam's" in res.target_basis
+    # Rule 14: adherence is the RATIONALE for the target, never a claimed saving.
+    assert "Only the token reduction is ever claimed as a saving" in res.target_basis
+    # Compression must NOT be presented as the only or default route.
+    assert "only ONE of four routes" not in res.target_basis   # (that phrasing is the analyzer's)
+    assert "four routes" in res.target_basis
+    # Prune and expire PERFORM now (quarantined, behind the same approve step),
+    # so the basis must not still claim compression is the only route the tool
+    # can take — a self-description that lags the code is a live defect.
+    assert "summarize only performs the last" not in res.target_basis
+    assert "tj summarize prune" in res.target_basis
+    assert "tj summarize restore" in res.target_basis
+    assert PRUNE_TEST_QUOTE in res.target_basis
+    assert PATH_SCOPE_QUOTE in res.target_basis
+    assert HOOK_QUOTE in res.target_basis
+    assert "does not write them for you" in res.target_basis  # ...but hooks/path-scoping still do not
+    # ...and the quality tax that makes compression the worst route here.
+    assert "trades adherence for tokens" in res.target_basis
+
+
+def test_prepare_states_the_ratio_target_is_ours_when_no_published_one_applies(tmp_path):
+    """Where no published target exists for the file class, the ratio stays and
+    is labelled as tokenjam's own, unenforced ask."""
+    d = tmp_path / "skills" / "ship"
+    d.mkdir(parents=True)
+    path = _write(d, "SKILL.md", PROSE)
+
+    res = prepare(path=path)
+
+    assert res.line_target is None
+    assert res.target_prose_words == max(8, int(0.5 * res.prose_words))
+    assert "tokenjam's own target, not published guidance" in res.target_basis
+    assert PUBLISHED_LINE_TARGET_SOURCE not in res.target_basis
+    # Still honest about what is and is not verified.
+    assert "not checked by anything automatic" in res.target_basis
+
+
+def test_a_short_instruction_file_still_gets_the_route_framing(tmp_path):
+    """The published target is not the only reason the routes matter: a
+    rule-heavy file that is already short is still the wrong thing to compress,
+    so the advice does not wait for the file to cross 200 lines."""
+    rules = "\n".join(f"- Never skip step {i}; run its check first." for i in range(40))
+    path = _write(tmp_path, "CLAUDE.md", rules)
+
+    res = prepare(path=path)
+
+    assert res.line_target is None                    # under the published target
+    assert "rules ACCUMULATED" in res.target_basis    # ...and still diagnosed
+    assert PRUNE_TEST_QUOTE in res.target_basis
+
+
+def test_line_target_does_not_apply_to_an_on_demand_skill_body(tmp_path):
+    """The published guidance is about a file that loads every session; a skill
+    body is not one, so it is not restated as if it were."""
+    text = ("Always act carefully and never drop a required step. " * 6 + "\n") * 600
+    d = tmp_path / "skills" / "ship"
+    d.mkdir(parents=True)
+    path = _write(d, "SKILL.md", text)
+
+    res = prepare(path=path)
+
+    assert res.line_target is None
+    assert res.target_prose_words == max(8, int(0.5 * res.prose_words))
+
+
+# --- a failed structure gate is recorded as evidence, never silently dropped ---
+
+def test_a_gate_failure_is_recorded_as_an_attempt_not_dropped(cfg, tmp_path):
+    """The rewrite cost money and produced a finding ("this file cannot be
+    safely compressed"). It must not be indistinguishable from never running."""
+    path = _write(tmp_path, "CLAUDE.md", PROSE + "\n```\nkeep = 'me'\n```\n")
+    res = prepare(path=path)
+
+    verdict = check(cfg, path, "Short careful prose, every marker dropped.", res.source_sha256)
+
+    assert not verdict.structure_ok and not verdict.staged
+    # A figure derived from output the gate REFUSED is fabricated, not
+    # conservative. Observed in the wild: a CLAUDE.md the rewriter answered as a
+    # live prompt (returning a chat greeting, dropping all 583 blocks) was
+    # refused and still credited with a five-figure token saving.
+    assert verdict.est_tokens_saved is None
+    assert verdict.to_dict()["est_tokens_saved"] is None
+    assert list_staged(cfg) == []                 # nothing applyable, correctly
+    attempts = list_attempts(cfg)
+    assert len(attempts) == 1
+    assert attempts[0]["path"] == str(tmp_path / "CLAUDE.md")
+    assert attempts[0]["record_kind"] == "attempt"
+    assert attempts[0]["reason"]
+    # Metadata only: a rejected rewrite's text is not kept on disk.
+    assert "restored" not in attempts[0] and "diff" not in attempts[0]
+    # It is not ratio evidence, and it does not zero the ratio either.
+    assert estimate.observed_prose_ratio(cfg) == (None, 0)
+    assert estimate.gate_failed_attempts(cfg) == 1
+
+
+def test_a_later_success_supersedes_the_recorded_failure(cfg, tmp_path):
+    path = _write(tmp_path, "CLAUDE.md", PROSE + "\n```\nkeep = 'me'\n```\n")
+    res = prepare(path=path)
+    check(cfg, path, "Mangled, no markers.", res.source_sha256)
+    assert len(list_attempts(cfg)) == 1
+
+    check(cfg, path, _perfect_summary(res.wrapped_prompt, "Short."), res.source_sha256)
+
+    assert list_attempts(cfg) == []
+    assert len(list_staged(cfg)) == 1
+    assert apply_staged(cfg)["skipped"] == []      # an attempt never reaches apply
 
 
 # --- the invariant re-derive depends on: protect() is deterministic ---

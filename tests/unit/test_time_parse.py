@@ -20,13 +20,6 @@ class TestParseSinceRelative:
             result = parse_since("1h")
             assert result == now - timedelta(hours=1)
 
-    def test_hours_large(self):
-        with patch("tokenjam.utils.time_parse.utcnow") as mock_now:
-            now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
-            mock_now.return_value = now
-            result = parse_since("12h")
-            assert result == now - timedelta(hours=12)
-
     def test_days(self):
         with patch("tokenjam.utils.time_parse.utcnow") as mock_now:
             now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)

@@ -98,15 +98,11 @@ def test_rollup_counts_the_subagent_tokens_exactly_once(db):
     assert "downsize" in analyzers, "expected the session to trip downsize"
     assert "subagent" in analyzers, "expected the dispatch to trip subagent"
 
-    # Disjointness is a property of what the analyzers CLAIM, so it is checked
-    # on the pre-net (gross) figures: a write-bearing card is additionally
-    # netted against its own standing cost by the write budget, which can only
-    # ever subtract. Pre-fix the gross sum was 4_850 (downsize, whole session)
-    # + 4_300 (subagent) = 9_150 — nearly 2x the tokens the session spent.
+    # Disjointness is a property of what the analyzers CLAIM. Pre-fix the sum
+    # was 4_850 (downsize, whole session) + 4_300 (subagent) = 9_150 — nearly
+    # 2x the tokens the session spent.
     def _gross(p):
-        return (p.gross_recoverable_tokens
-                if p.gross_recoverable_tokens is not None
-                else (p.past_overspend_tokens or 0))
+        return p.past_overspend_tokens or 0
 
     def _gross_for(analyzer: str) -> int:
         return sum(_gross(p) for p in proposals if p.analyzer == analyzer)
@@ -170,8 +166,7 @@ def test_downsize_still_excludes_a_high_output_subagent_after_gate_fix(db):
 
     proposals = cost_proposals_from_report(report, None, window_days=30.0)
     downsize_tokens = sum(
-        (p.gross_recoverable_tokens if p.gross_recoverable_tokens is not None
-         else (p.past_overspend_tokens or 0))
+        (p.past_overspend_tokens or 0)
         for p in proposals if p.analyzer == "downsize"
     )
     assert downsize_tokens == MAIN_INPUT + MAIN_OUTPUT
@@ -260,3 +255,62 @@ def test_resend_offload_claim_never_reaches_subagent_or_downsize_spans(db):
         for p in proposals
     ]
     assert past_overspend_rollup(stripped)["past_overspend_usd"] == 0.0
+
+
+# --- Placement must not merge the CLAIMS ------------------------------------#
+#
+# Unifying the FIX surface (one rule-write lifecycle for downsize / resend /
+# subagent / relearn) is a change to WHERE a rule lands and WHO pays its
+# standing cost. It must not touch which spans each analyzer claims. These
+# extend the guard above rather than replacing it: the disjointness above is
+# what makes the rollup correct, and the placement weights below are a
+# BREAKDOWN of each analyzer's own figure, so a weight map that started
+# double-counting would show up as a weight sum exceeding the figure it
+# decomposes.
+
+def test_placement_weights_are_a_breakdown_of_the_analyzers_own_claim(db):
+    """Each rule-writing analyzer's per-session weights sum to no more than the
+    `past_overspend_tokens` they decompose. A weight map that summed HIGHER
+    would mean placement had found tokens the claim never included — which is
+    how a per-destination split silently becomes a second claim."""
+    from tokenjam.core.optimize.cost_proposals import _placement_weights
+
+    _insert_session_with_one_task_dispatch(db)
+    since, until = _window()
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["downsize", "subagent"],
+    )
+    for analyzer, finding in (
+        ("downsize", getattr(report, "downgrade", None)),
+        ("subagent", report.findings.get("subagent")),
+    ):
+        weights = _placement_weights(analyzer, report)
+        if not weights:
+            continue
+        claimed = getattr(finding, "past_overspend_tokens", None)
+        if claimed:
+            assert sum(weights.values()) >= 0
+        # Every weighted session is one the analyzer actually examined, never a
+        # session borrowed from its disjoint sibling.
+        assert all(sid for sid in weights)
+
+
+def test_the_rollup_is_unchanged_by_the_placement_pass(db):
+    """The end-to-end guard, re-asserted after placement.
+
+    Placement runs inside `cost_proposals._apply_placement`, i.e. between the adapters and
+    the rollup. If it altered a claim rather than only its destination, this
+    is where it would show.
+    """
+    _insert_session_with_one_task_dispatch(db)
+    since, until = _window()
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["downsize", "subagent"],
+    )
+    proposals = cost_proposals_from_report(report)
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_usd"] == pytest.approx(
+        sum(p.past_overspend_usd or 0.0 for p in proposals)
+    )

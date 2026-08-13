@@ -42,6 +42,7 @@ from tokenjam.core.cost import calculate_cost
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.otel.semconv import TjAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,8 @@ logger = logging.getLogger(__name__)
 # forgets it.
 DATA_QUALITY_NOTE = (
     "This is a measurement gap, not recoverable waste. The money was already "
-    "spent and the provider already billed it; capturing the usage payload "
-    "makes the spend figure correct, it does not make it smaller. It is "
+    "spent and the provider already billed it. Capturing the usage payload "
+    "makes the spend figure correct; it does not make it smaller. It is "
     "excluded from the recoverable-waste total for that reason."
 )
 
@@ -135,15 +136,16 @@ def _remediation_for(provider: str) -> tuple[str, str]:
     if provider == "anthropic":
         return (
             "Consume the stream to completion server-side and read "
-            "`get_final_message().usage` — Anthropic reports output tokens only "
+            "`get_final_message().usage`. Anthropic reports output tokens only "
             "in the trailing `message_delta`, so an abandoned stream reports "
             "none at all.",
             _ANTHROPIC_REMEDIATION,
         )
     return (
-        "Send `stream_options={\"include_usage\": True}` on the request AND "
-        "drain the stream server-side — an OpenAI-compatible API emits no usage "
-        "payload without the flag, and emits it only in the final chunk.",
+        "Send `stream_options={\"include_usage\": True}` on the request and "
+        "drain the stream server-side. An OpenAI-compatible API emits no usage "
+        "payload without the flag, and it emits the payload only in the final "
+        "chunk.",
         _OPENAI_COMPATIBLE_REMEDIATION,
     )
 
@@ -199,6 +201,10 @@ def _select_streaming_spans(ctx: AnalyzerContext) -> list[tuple]:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     # The token columns are read RAW, never COALESCEd to 0. NULL here means the
     # observer could not see token counts at all — the proxy's SSE tap watches
@@ -281,8 +287,8 @@ def _build_call_site(key: tuple, bucket: _Bucket, at) -> StreamUsageCallSite:
         # blind spot" and is the exact lie this analyzer exists to prevent.
         if med_out is not None:
             site.derivation = (
-                "The affected calls carry no model name, so there is no rate "
-                "to price them at and no under-count figure is claimed."
+                "The affected calls carry no model name. There is no rate to "
+                "price them at, so no under-count figure is claimed."
             )
         elif bucket.observed_without_tokens:
             # Distinct from "nothing was observed": streams DID complete here,
@@ -293,8 +299,8 @@ def _build_call_site(key: tuple, bucket: _Bucket, at) -> StreamUsageCallSite:
                 f"{bucket.observed_without_tokens} completed stream"
                 f"{'s' if bucket.observed_without_tokens != 1 else ''} "
                 f"{'were' if bucket.observed_without_tokens != 1 else 'was'} "
-                f"observed for this call site, but none carried token counts "
-                f"— they were watched on the wire, where the provider's usage "
+                f"observed for this call site, but none carried token counts. "
+                f"They were watched on the wire, where the provider's usage "
                 f"payload is not accounted. There is no per-call baseline to "
                 f"size the missing calls against, so no under-count figure is "
                 f"claimed. Instrument the client itself (`patch_openai()` / "
@@ -303,8 +309,8 @@ def _build_call_site(key: tuple, bucket: _Bucket, at) -> StreamUsageCallSite:
         else:
             site.derivation = (
                 "No completed stream was observed for this call site in this "
-                "window, so there is no per-call baseline to size the missing "
-                "calls against and no under-count figure is claimed."
+                "window. There is no per-call baseline to size the missing "
+                "calls against, so no under-count figure is claimed."
             )
         return site
     site.peer_input_tokens = med_in
@@ -330,9 +336,10 @@ def _build_call_site(key: tuple, bucket: _Bucket, at) -> StreamUsageCallSite:
         f"Each is sized at the MEDIAN of the {bucket.complete} completed stream"
         f"{'s' if bucket.complete != 1 else ''} for the same model in this "
         f"window ({med_in or 0} input + {med_out} output + {med_cache or 0} "
-        f"cache-read + {med_cache_write or 0} cache-write tokens per call), "
-        f"priced at that model's rates. Estimated, not observed: the real "
-        f"counts for these calls were never reported by the provider."
+        f"cache-read + {med_cache_write or 0} cache-write tokens per call). "
+        f"That total is priced at that model's rates. Estimated, not "
+        f"observed: the real counts for these calls were never reported by "
+        f"the provider."
         + (
             f" A further {bucket.observed_without_tokens} completed stream"
             f"{'s' if bucket.observed_without_tokens != 1 else ''} carried no "
@@ -364,8 +371,8 @@ def run(ctx: AnalyzerContext) -> None:
     if seen == 0:
         finding.hint = (
             "No streamed calls were observed in this window. Streaming usage "
-            "gaps are only visible on calls tokenjam watched as they streamed "
-            "— instrument the provider client with `patch_openai()` / "
+            "gaps are only visible on calls tokenjam watched as they streamed. "
+            "Instrument the provider client with `patch_openai()` / "
             "`patch_anthropic()`, or route traffic through `tj proxy`."
         )
         ctx.report.findings["stream-usage"] = finding
@@ -388,21 +395,21 @@ def run(ctx: AnalyzerContext) -> None:
         finding.estimate_basis = (
             f"{missing} of {seen} observed streams closed without a usage "
             f"payload. Each is sized at the median per-call token usage of the "
-            f"completed streams for the same model in this window and priced at "
-            f"that model's rates"
+            f"completed streams for the same model in this window. That total "
+            f"is priced at that model's rates."
             + (
-                f"; {unpriced} call site{'s' if unpriced != 1 else ''} had no "
+                f" {unpriced} call site{'s' if unpriced != 1 else ''} had no "
                 f"completed stream to size against and contribute"
                 f"{'' if unpriced != 1 else 's'} nothing to this figure."
-                if unpriced else "."
+                if unpriced else ""
             )
         )
     elif sites:
         tokenless = sum(b.observed_without_tokens for b in buckets.values())
         finding.estimate_basis = (
             f"{missing} of {seen} observed streams closed without a usage "
-            f"payload, and no completed stream carrying token counts was "
-            f"observed for any affected model in this window — so the size of "
+            f"payload. No completed stream carrying token counts was "
+            f"observed for any affected model in this window. So the size of "
             f"the gap is not estimated here, only its existence."
             + (
                 f" {tokenless} stream{'s' if tokenless != 1 else ''} did "

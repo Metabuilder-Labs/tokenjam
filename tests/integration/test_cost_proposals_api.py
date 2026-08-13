@@ -11,6 +11,8 @@ from datetime import timedelta
 import httpx
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_SKILL
+
 from tokenjam.api.app import create_app
 from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
@@ -77,7 +79,11 @@ async def test_cost_refresh_then_proposals_listed(app, client):
         headers={"X-TJ-Local-Token": token},
     )
     assert r.status_code == 200
-    assert r.json()["status"] == "ready"
+    body = r.json()
+    assert body["status"] == "ready"
+    assert body["fresh"] is True
+    assert body["reason"] is None
+    assert body["proposals"] >= 1
 
     r2 = await client.get("/api/v1/relearn/cost-proposals")
     body = r2.json()
@@ -88,6 +94,51 @@ async def test_cost_refresh_then_proposals_listed(app, client):
     prop = cache_props[0]
     assert prop["kind"] == "cost"
     assert prop["advise_only"] is True
+
+
+async def test_a_declined_refresh_never_reads_as_a_completed_one(app, client):
+    """The route used to answer ``{"status": "ready", "proposals": 0}`` for a
+    refresh that never ran — a decline, a held lock, a crashed build and a
+    genuinely empty result were all the same ``[]`` coming back from
+    ``recompute_cost_proposals``, and the route could not tell them apart. Its
+    own docstring claimed it returned "the unchanged last-good proposals"; it
+    never re-read the store, so a client saw a successful refresh reporting zero
+    while a full, good set was sitting there.
+
+    Both halves are pinned: the STATUS must say declined, and the COUNT must be
+    the last-good set's real size rather than a zero nobody measured.
+    """
+    from tokenjam.core.optimize import scan_cycle
+
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    first = (await client.post(
+        "/api/v1/relearn/cost-proposals/refresh", headers=hdr,
+    )).json()
+    assert first["status"] == "ready"
+    assert first["proposals"] >= 1, (
+        "fixture assumption broken: the decline below proves nothing unless a "
+        "good set is already stored"
+    )
+
+    scan_cycle._CYCLE_COMPUTING.set()
+    try:
+        declined = (await client.post(
+            "/api/v1/relearn/cost-proposals/refresh", headers=hdr,
+        )).json()
+    finally:
+        scan_cycle._CYCLE_COMPUTING.clear()
+
+    assert declined["status"] == "declined"
+    assert declined["fresh"] is False
+    assert declined["reason"] == "scan_cycle_in_flight"
+    assert declined["detail"]
+    assert declined["proposals"] == first["proposals"]
+    assert declined["computed_at"] is not None
+
+    # And nothing was actually rebuilt: the listing still serves the same set.
+    listed = (await client.get("/api/v1/relearn/cost-proposals")).json()
+    assert len(listed["proposals"]) >= 1
+    assert listed["status"] == "ready"
 
 
 async def test_mark_cost_applied_round_trip(app, client):
@@ -126,6 +177,73 @@ async def test_mark_cost_applied_round_trip(app, client):
     )
     assert rev.status_code == 200
     assert rev.json()["state"] == "reverted"
+
+
+# --- an applied proposal loses its OFFER and keeps its FIGURE ---------------- #
+
+async def test_an_applied_proposal_is_withdrawn_on_the_PAYLOAD(app, client):
+    """Verified WITHOUT consulting a second endpoint — that is the whole point.
+
+    THE DEFECT. This route computed a filtered ``open_proposals`` for its rollup
+    and then returned the UNFILTERED ``proposals`` list, and the rows carried no
+    ``applied``/``applied_at`` field at all. So an already-applied proposal went
+    out advertising ``apply_capable: true`` with nothing on it to say otherwise.
+    Only the browser was safe, and only because it independently re-fetches
+    ``/relearn/cost-applied`` and filters client-side — meaning the CLI,
+    ``--json``, an export and every future surface saw an offer to re-apply
+    something already done, and had to know to cross-reference a second endpoint
+    to avoid it. Measured on a real corpus: the ONE apply-capable row in the
+    whole inbox was a fix that had already been applied.
+
+    Critical Rule 32: the offer is withdrawn, the figure is kept, and the row
+    stays listed CARRYING an applied state.
+    """
+    token = app.state.relearn_write_token
+    hdr = {"X-TJ-Local-Token": token}
+    await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    before = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = next(p for p in before if p["analyzer"] == "cache")
+    assert prop["applied"] is False, "every row carries the field, open ones included"
+    assert prop["applied_at"] is None
+
+    applied = await client.post(
+        "/api/v1/relearn/cost-proposals/apply",
+        json={"proposal_id": prop["proposal_id"]}, headers=hdr,
+    )
+    assert applied.status_code == 200
+
+    after = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    row = next(p for p in after if p["signature"] == prop["signature"])
+    assert row["applied"] is True
+    assert row["applied_at"], "an applied row must carry WHEN"
+    assert row.get("apply_capable") is not True, (
+        "an applied fix is still being offered for application"
+    )
+    # The figure is what the behaviour ALREADY cost. Applying the fix afterwards
+    # does not un-spend the money, and a gate that edits a past figure is the
+    # "this was free" conflation Critical Rule 32 exists to stop.
+    assert row["past_overspend_usd"] == prop["past_overspend_usd"]
+
+
+async def test_a_reverted_proposal_is_offered_again_on_the_payload(app, client):
+    """A revert is the user saying the fix is no longer in place."""
+    token = app.state.relearn_write_token
+    hdr = {"X-TJ-Local-Token": token}
+    await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = next(p for p in proposals if p["analyzer"] == "cache")
+    rec = (await client.post(
+        "/api/v1/relearn/cost-proposals/apply",
+        json={"proposal_id": prop["proposal_id"]}, headers=hdr,
+    )).json()
+    await client.post(
+        f"/api/v1/relearn/cost-applied/{rec['id']}/revert", headers=hdr,
+    )
+
+    after = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    row = next(p for p in after if p["signature"] == prop["signature"])
+    assert row["applied"] is False
+    assert row["applied_at"] is None
 
 
 # --- the marker's numbers come from the STORE, never from the caller -------- #
@@ -198,14 +316,12 @@ async def test_apply_workspace_refuses_a_caller_supplied_proposed_fix(
 
 
 async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, db, monkeypatch, tmp_path):
-    """A CC-origin subagent proposal routes a reversible rung-1 note through the
+    """A CC-origin subagent proposal routes a reversible CLAUDE.md rule through the
     existing relearn apply path, then records the cost marker for delta-verify."""
     from tokenjam.core.optimize import relearn_apply as pa
 
-    # over_powered subagent fan-out on a premium model, in-window. Sized past
-    # the $5 write floor (`write_budget.MIN_NET_WRITE_USD`): this test asserts
-    # the card is APPLY-CAPABLE, and the budget declines a permanent write for
-    # a couple of dollars, so a cent-scale seed no longer reaches that path.
+    # over_powered subagent fan-out on a premium model, in-window: this test
+    # asserts the card is APPLY-CAPABLE and that the write actually lands.
     now = utcnow()
     for i in range(4):
         db.insert_span(make_llm_span(
@@ -253,17 +369,17 @@ async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, 
     assert any(r["analyzer"] == "subagent" for r in applied["applied"])
 
 
-async def test_cost_apply_workspace_writes_skill_for_a_rung2_proposal_and_reverts(
+async def test_cost_apply_workspace_writes_skill_for_a_skill_proposal_and_reverts(
     app, client, config, db, monkeypatch, tmp_path,
 ):
     """`apply-workspace` is generic across analyzers, not special-cased to
-    `subagent`: a rung-2 skill-note proposal routes through the SAME path,
+    `subagent`: a skill-note proposal routes through the SAME path,
     writes, and reverts cleanly.
 
     Two facts are pinned here. First, a deterministic tool-call cluster on a
     claude-code window produces NO `script` card any more: the analyzer has no
     fix that survives for that persona and is skipped before it runs. Second,
-    the generic rung-2 write/revert route still works, exercised by seeding the
+    the generic skill write/revert route still works, exercised by seeding the
     proposal the adapter builds directly into the store."""
     from tokenjam.core.optimize import relearn_apply as pa, relearn_store
     from tokenjam.core.optimize.analyzers.workflow_restructure import (
@@ -322,7 +438,7 @@ async def test_cost_apply_workspace_writes_skill_for_a_rung2_proposal_and_revert
     prop = script_props[0]
     assert prop["apply_capable"] is True
     assert prop["advise_only"] is False
-    assert prop["rung"] == 2
+    assert prop["delivery"] == DELIVERY_SKILL
 
     body = {"proposal_id": prop["proposal_id"], "target_path": str(target)}
 
