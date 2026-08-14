@@ -65,15 +65,15 @@ TokenJam also ships as a Claude Code plugin — see [`plugin/`](plugin/) for the
 
 ```
 /plugin marketplace add Metabuilder-Labs/tokenjam
-/plugin install tokenjam
-/onboard    # wires the statusline, resume-brief hook, and local telemetry ingest — same as `tj onboard --claude-code`
-/status     # tj status
-/optimize   # tj optimize
-/doctor     # tj doctor
-/uninstall  # tj uninstall --yes
+/plugin install tokenjam@tokenjam
+/tokenjam:onboard    # wires the statusline, resume-brief hook, and local telemetry ingest — same as `tj onboard --claude-code`
+/tokenjam:status     # tj status
+/tokenjam:optimize   # tj optimize
+/tokenjam:doctor     # tj doctor
+/tokenjam:uninstall  # tj uninstall --yes
 ```
 
-The plugin deliberately does not ship its own hooks or an `.mcp.json`: the statusline and hooks are wired by `/onboard` calling the existing, idempotent `tj onboard --claude-code`, so there's exactly one writer of `~/.claude/settings.json`. TokenJam's MCP server (`tj mcp`) also stays opt-in and out of this plugin's default install — it's built for SDK/API integrations that already sit in the request path, not for Claude Code, where an in-loop MCP measurably taxes every turn.
+The plugin deliberately does not ship its own hooks or an `.mcp.json`: the statusline and hooks are wired by `/tokenjam:onboard` calling the existing, idempotent `tj onboard --claude-code`, so there's exactly one writer of `~/.claude/settings.json`. TokenJam's MCP server (`tj mcp`) also stays opt-in and out of this plugin's default install — it's built for SDK/API integrations that already sit in the request path, not for Claude Code, where an in-loop MCP measurably taxes every turn.
 
 ---
 
