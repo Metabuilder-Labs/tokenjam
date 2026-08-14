@@ -13,6 +13,7 @@ from tokenjam.core.backfill import (
     count_claude_code_sessions_in_scope,
     ingest_claude_code,
 )
+from tokenjam.core.cost import defer_pricing_warnings, print_deferred_pricing_warnings
 from tokenjam.core.ingest_adapters.codex import (
     CODEX_SESSIONS_ROOT,
     ingest_codex,
@@ -80,68 +81,70 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
 
     console.print(f"Backfilling Claude Code sessions from {root} …")
     # Pass config so backfilled sessions carry the declared plan tier (#176).
-    with backfill_progress(total_in_scope, quiet=quiet) as progress:
-        result = ingest_claude_code(
-            db, root=root, since=since, progress=progress,
-            config=ctx.obj.get("config"), reingest=reingest,
-        )
+    with defer_pricing_warnings() as pricing_warnings:
+        with backfill_progress(total_in_scope, quiet=quiet) as progress:
+            result = ingest_claude_code(
+                db, root=root, since=since, progress=progress,
+                config=ctx.obj.get("config"), reingest=reingest,
+            )
 
-    if result.sessions_seen == 0:
-        console.print(
-            "[yellow]No sessions found.[/yellow] "
-            "[dim]Use Claude Code for a while, then re-run.[/dim]"
-        )
-        return
+        if result.sessions_seen == 0:
+            console.print(
+                "[yellow]No sessions found.[/yellow] "
+                "[dim]Use Claude Code for a while, then re-run.[/dim]"
+            )
+            return
 
-    days_span = None
-    if result.earliest and result.latest:
-        days_span = (result.latest - result.earliest).days
+        days_span = None
+        if result.earliest and result.latest:
+            days_span = (result.latest - result.earliest).days
 
-    total = result.sessions_total
-    parts = [
-        f"Backfilled [bold]{result.sessions_new}[/bold] new "
-        f"({result.sessions_existing} already present) · "
-        f"[bold]{total}[/bold] total session{'s' if total != 1 else ''}",
-    ]
-    if days_span is not None:
-        parts.append(f"over {days_span} day{'s' if days_span != 1 else ''}")
-    if result.project_count:
-        parts.append(f"from {result.project_count} project"
-                     f"{'s' if result.project_count != 1 else ''}")
-    parts.append(f"({format_cost(result.total_cost_usd)} total spend)")
-    console.print("[green]✓[/green] " + ", ".join(parts) + ".")
+        total = result.sessions_total
+        parts = [
+            f"Backfilled [bold]{result.sessions_new}[/bold] new "
+            f"({result.sessions_existing} already present) · "
+            f"[bold]{total}[/bold] total session{'s' if total != 1 else ''}",
+        ]
+        if days_span is not None:
+            parts.append(f"over {days_span} day{'s' if days_span != 1 else ''}")
+        if result.project_count:
+            parts.append(f"from {result.project_count} project"
+                         f"{'s' if result.project_count != 1 else ''}")
+        parts.append(f"({format_cost(result.total_cost_usd)} total spend)")
+        console.print("[green]✓[/green] " + ", ".join(parts) + ".")
 
-    # Make the conversations-vs-sessions distinction explicit when they differ
-    # (Claude Code writes multiple JSONL files per session) so the smaller
-    # `sessions` count doesn't read as data loss (#238).
-    if result.conversations_seen != total:
-        console.print(
-            f"  [dim]Parsed {result.conversations_seen} conversation files "
-            f"into {total} session{'s' if total != 1 else ''}.[/dim]"
-        )
+        # Make the conversations-vs-sessions distinction explicit when they differ
+        # (Claude Code writes multiple JSONL files per session) so the smaller
+        # `sessions` count doesn't read as data loss (#238).
+        if result.conversations_seen != total:
+            console.print(
+                f"  [dim]Parsed {result.conversations_seen} conversation files "
+                f"into {total} session{'s' if total != 1 else ''}.[/dim]"
+            )
 
-    if result.spans_retagged:
-        console.print(
-            f"  [dim]Re-tagged {result.spans_retagged} existing spans "
-            f"(subagent identity refreshed).[/dim]"
-        )
-    if result.spans_skipped_existing:
-        console.print(
-            f"  [dim]Skipped {result.spans_skipped_existing} spans already "
-            f"present (idempotent re-run).[/dim]"
-        )
-    if result.files_failed:
-        console.print(
-            f"  [yellow]Warning: {result.files_failed} session(s) failed to "
-            f"parse — sample errors:[/yellow]"
-        )
-        for err in result.sample_errors:
-            console.print(f"    [dim]{err}[/dim]")
-    if days_span is not None and days_span < 7:
-        console.print(
-            "  [dim]Less than 7 days of history available — `tj optimize` will "
-            "flag thin-data projections.[/dim]"
-        )
+        if result.spans_retagged:
+            console.print(
+                f"  [dim]Re-tagged {result.spans_retagged} existing spans "
+                f"(subagent identity refreshed).[/dim]"
+            )
+        if result.spans_skipped_existing:
+            console.print(
+                f"  [dim]Skipped {result.spans_skipped_existing} spans already "
+                f"present (idempotent re-run).[/dim]"
+            )
+        if result.files_failed:
+            console.print(
+                f"  [yellow]Warning: {result.files_failed} session(s) failed to "
+                f"parse — sample errors:[/yellow]"
+            )
+            for err in result.sample_errors:
+                console.print(f"    [dim]{err}[/dim]")
+        if days_span is not None and days_span < 7:
+            console.print(
+                "  [dim]Less than 7 days of history available — `tj optimize` will "
+                "flag thin-data projections.[/dim]"
+            )
+        print_deferred_pricing_warnings(console=console, messages=pricing_warnings)
 
 
 @cmd_backfill.command("status", status_message="Checking backfill status…")

@@ -55,6 +55,7 @@ import click
 
 from tokenjam.cli.backfill_progress import backfill_progress, transient_status
 from tokenjam.core.backfill import CLAUDE_CODE_PROJECTS_ROOT, ingest_claude_code
+from tokenjam.core.cost import defer_pricing_warnings, print_deferred_pricing_warnings
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.utils.formatting import console, err_console, format_cost
 from tokenjam.utils.theme import ACCENT
@@ -181,69 +182,77 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
     # therefore runs without a denominator, and the report states the one
     # session count this screen makes.
     status_console.print(f"[dim]{_pre_ingest_status(since, max_sessions)}[/dim]")
-    with backfill_progress(None, console=status_console) as progress_cb:
-        result = ingest_claude_code(db, root=root, since=since_dt,
-                                    max_sessions=max_sessions, progress=progress_cb)
+    with defer_pricing_warnings() as pricing_warnings:
+        with backfill_progress(None, console=status_console) as progress_cb:
+            result = ingest_claude_code(db, root=root, since=since_dt,
+                                        max_sessions=max_sessions, progress=progress_cb)
 
-    if result.sessions_ingested == 0:
-        _render_no_sessions(result, since, output_json)
-        return
+        if result.sessions_ingested == 0:
+            _render_no_sessions(result, since, output_json)
+            print_deferred_pricing_warnings(
+                console=err_console if output_json else console,
+                messages=pricing_warnings,
+            )
+            return
 
-    if output_json:
-        from tokenjam.core.context_diagnostic import (
-            compute_context_diagnostic,
-            diagnostic_to_dict,
-        )
-        from tokenjam.core.session_timeline import (
-            compute_session_timeline,
-            timeline_to_dict,
-        )
-        payload = {
-            "quota_composition": diagnostic_to_dict(
-                compute_context_diagnostic(db.conn, since_dt, until_dt)),
-            "session_timeline": timeline_to_dict(
-                compute_session_timeline(db.conn)),
-            "backfill": {
-                "sessions_ingested": result.sessions_ingested,
-                "spans_ingested": result.spans_ingested,
-                "project_count": result.project_count,
-                "total_cost_usd": round(result.total_cost_usd, 6),
-                "limit_reached": result.limit_reached,
-                "max_sessions": max_sessions,
-            },
-        }
-        click.echo(_json.dumps(payload, default=str))
-        return
+        if output_json:
+            from tokenjam.core.context_diagnostic import (
+                compute_context_diagnostic,
+                diagnostic_to_dict,
+            )
+            from tokenjam.core.session_timeline import (
+                compute_session_timeline,
+                timeline_to_dict,
+            )
+            payload = {
+                "quota_composition": diagnostic_to_dict(
+                    compute_context_diagnostic(db.conn, since_dt, until_dt)),
+                "session_timeline": timeline_to_dict(
+                    compute_session_timeline(db.conn)),
+                "backfill": {
+                    "sessions_ingested": result.sessions_ingested,
+                    "spans_ingested": result.spans_ingested,
+                    "project_count": result.project_count,
+                    "total_cost_usd": round(result.total_cost_usd, 6),
+                    "limit_reached": result.limit_reached,
+                    "max_sessions": max_sessions,
+                },
+            }
+            click.echo(_json.dumps(payload, default=str))
+            print_deferred_pricing_warnings(
+                console=err_console, messages=pricing_warnings)
+            return
 
-    # Computed only on the human path: `--json` must stay byte-clean AND fast,
-    # and the analyzers are the one materially expensive step after ingest.
-    #
-    # `fallback_sessions` is only that: the analyzed population comes off the
-    # report's own window, and `sessions_ingested` stands in ONLY when the
-    # computation could not run (there is then no figure to mispair it with).
-    # The two genuinely differ: the ingest picks the most-recent N session FILES
-    # by mtime, while the report filters by span timestamp, so a real corpus can
-    # ingest 300 files and analyze 143 sessions. Printing the ingest count beside
-    # a figure summed over the analyzed one is exactly the mixed-population
-    # defect this screen must not have.
-    #
-    # This is the last slow stretch, and it used to be silent: measured on a
-    # real corpus, ~14s elapses between the final backfill line and the first
-    # line of the report, long enough to read as a hang. `transient_status`
-    # holds one self-erasing line built from the SAME `Progress` construction
-    # the backfill counter above uses, so the two phases read as one process,
-    # and it erases before the report renders. The message names what is
-    # happening in the product's own terms and promises NO number: nothing on
-    # this screen may claim a figure, a count or an all-clear while the
-    # computation that would establish it is still running.
-    with transient_status(_ANALYZING_STATUS):
-        avoidable = _compute_avoidable_total(
-            db, since_dt, until_dt,
-            fallback_sessions=result.sessions_ingested,
-            population_capped=max_sessions is not None and result.limit_reached,
-        )
+        # Computed only on the human path: `--json` must stay byte-clean AND fast,
+        # and the analyzers are the one materially expensive step after ingest.
+        #
+        # `fallback_sessions` is only that: the analyzed population comes off the
+        # report's own window, and `sessions_ingested` stands in ONLY when the
+        # computation could not run (there is then no figure to mispair it with).
+        # The two genuinely differ: the ingest picks the most-recent N session FILES
+        # by mtime, while the report filters by span timestamp, so a real corpus can
+        # ingest 300 files and analyze 143 sessions. Printing the ingest count beside
+        # a figure summed over the analyzed one is exactly the mixed-population
+        # defect this screen must not have.
+        #
+        # This is the last slow stretch, and it used to be silent: measured on a
+        # real corpus, ~14s elapses between the final backfill line and the first
+        # line of the report, long enough to read as a hang. `transient_status`
+        # holds one self-erasing line built from the SAME `Progress` construction
+        # the backfill counter above uses, so the two phases read as one process,
+        # and it erases before the report renders. The message names what is
+        # happening in the product's own terms and promises NO number: nothing on
+        # this screen may claim a figure, a count or an all-clear while the
+        # computation that would establish it is still running.
+        with transient_status(_ANALYZING_STATUS):
+            avoidable = _compute_avoidable_total(
+                db, since_dt, until_dt,
+                fallback_sessions=result.sessions_ingested,
+                population_capped=max_sessions is not None and result.limit_reached,
+            )
 
-    _render(avoidable, fallback_sessions=result.sessions_ingested)
+        _render(avoidable, fallback_sessions=result.sessions_ingested)
+        print_deferred_pricing_warnings(console=console, messages=pricing_warnings)
 
 
 # ────────────────────────── avoidable total ────────────────────────────────

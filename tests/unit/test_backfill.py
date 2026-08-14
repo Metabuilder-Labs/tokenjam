@@ -563,6 +563,37 @@ def test_claude_code_backfill_rejects_two_since_flags(tmp_path, monkeypatch):
     assert "Use either --since or --since-days" in result.output
 
 
+def test_claude_code_backfill_prints_unknown_model_warning_after_summary(tmp_path):
+    import tokenjam.core.cost as cost_mod
+
+    _make_session_file(
+        tmp_path,
+        session_id="sess-unknown",
+        cwd="/Users/me/proj",
+        records=[
+            _assistant_record(
+                "u1", "totally-unknown-model-xyz", 1000, 200,
+                "2026-06-20T10:00:00.000Z", "sess-unknown", "/Users/me/proj",
+            ),
+        ],
+    )
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+    db = InMemoryBackend()
+
+    result = CliRunner().invoke(
+        cmd_backfill_module.claude_code,
+        ["--root", str(tmp_path), "--quiet"],
+        obj={"db": db, "config": None},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Backfilled" in result.output
+    assert "No pricing data for anthropic/totally-unknown-model-xyz" in result.output
+    assert result.output.index("Backfilled") < result.output.index(
+        "No pricing data for anthropic/totally-unknown-model-xyz"
+    )
+
+
 # --- #443: cheap in-scope session count (progress bar total + heads-up) -----
 
 
