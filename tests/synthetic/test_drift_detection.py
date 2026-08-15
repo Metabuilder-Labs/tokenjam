@@ -87,6 +87,32 @@ def test_baseline_built_after_n_sessions(db):
     assert baseline.avg_input_tokens == 1000.0
 
 
+def test_terminal_sessions_feed_drift_baseline(db):
+    _setup_agent(db)
+    closed = make_session(agent_id="test-agent", status="closed", input_tokens=100)
+    completed = make_session(agent_id="test-agent", status="completed", input_tokens=300)
+    db.upsert_session(closed)
+    db.upsert_session(completed)
+
+    assert db.get_completed_session_count("test-agent") == 2
+    sessions = db.get_completed_sessions("test-agent", limit=2)
+    assert {session.session_id for session in sessions} == {
+        closed.session_id,
+        completed.session_id,
+    }
+
+    detector = DriftDetector(
+        db,
+        MagicMock(),
+        _make_config(baseline_sessions=2),
+    )
+    detector.on_session_end("test-agent", completed)
+
+    baseline = db.get_baseline("test-agent")
+    assert baseline is not None
+    assert baseline.sessions_sampled == 2
+
+
 def test_drift_inactive_before_baseline_complete(db):
     _setup_agent(db)
     config = _make_config(baseline_sessions=10)

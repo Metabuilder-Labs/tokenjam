@@ -37,6 +37,7 @@ from tokenjam.core.models import (
     SessionRecord,
     SpanKind,
     SpanStatus,
+    TERMINAL_STATUSES,
     TraceCostStats,
     TraceFilters,
     TraceRecord,
@@ -3821,19 +3822,24 @@ class DuckDBBackend:
         # still active afterwards — otherwise the status tile shows a 40s blip
         # instead of the real multi-hour session. Falls back to started_at when
         # ended_at is NULL.
+        terminal_placeholders = ", ".join("?" for _ in TERMINAL_STATUSES)
         cur = self.conn.execute(
-            "SELECT * FROM sessions WHERE agent_id = $1 AND status = 'completed' "
-            "ORDER BY COALESCE(ended_at, started_at) DESC LIMIT $2",
-            [agent_id, limit],
+            "SELECT * FROM sessions WHERE agent_id = ? AND status IN ("
+            + terminal_placeholders
+            + ") ORDER BY COALESCE(ended_at, started_at) DESC LIMIT ?",
+            [agent_id, *TERMINAL_STATUSES, limit],
         )
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         return [_row_to_session(r, cols) for r in rows]
 
     def get_completed_session_count(self, agent_id: str) -> int:
+        terminal_placeholders = ", ".join("?" for _ in TERMINAL_STATUSES)
         result = self.conn.execute(
-            "SELECT COUNT(*) FROM sessions WHERE agent_id = $1 AND status = 'completed'",
-            [agent_id],
+            "SELECT COUNT(*) FROM sessions WHERE agent_id = ? AND status IN ("
+            + terminal_placeholders
+            + ")",
+            [agent_id, *TERMINAL_STATUSES],
         ).fetchone()
         return result[0] if result else 0
 
