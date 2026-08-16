@@ -2,7 +2,7 @@
   "name": "tokenjam",
   "displayName": "TokenJam",
   "description": "Local-first observability and cost control for Claude Code agents: a zero-token statusline showing context re-read %, savings/optimize reports, and a health check. Runs 100% locally against your own telemetry, no signup or network account required.",
-  "version": "0.6.10",
+  "version": "0.6.11",
   "author": {
     "name": "Anil Murty",
     "email": "anil@metabldr.com",

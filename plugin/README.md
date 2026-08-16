@@ -17,22 +17,24 @@ The plugin lives in a subdirectory of the `tokenjam` repo, so install it via a `
 }
 ```
 
-Or, once listed in a marketplace: `/plugin install tokenjam`.
+Or, once listed in a marketplace: `/plugin install tokenjam@tokenjam`.
 
 ## Commands
 
-| Command      | Runs                       | Does |
-|--------------|-----------------------------|------|
-| `/onboard`   | `tj onboard --claude-code`  | Wires the zero-token statusline, the resume-brief `SessionStart` hook, and local OTel telemetry ingest. Idempotent — safe to re-run. |
-| `/status`    | `tj status`                 | Token usage, cost today, active alerts, per agent. |
-| `/optimize`  | `tj optimize`                | Savings report: where quota is going and the concrete fix for each finding. |
-| `/doctor`    | `tj doctor`                  | Health check on config, ingest endpoint, and storage. |
-| `/uninstall` | `tj uninstall --yes`         | Unwires the statusline, hooks, and OTel env vars `/onboard` set up. |
+Claude Code namespaces every plugin command to `/<plugin-name>:<command>`; this plugin's name (from `plugin.json`) is `tokenjam`.
+
+| Command                | Runs                        | Does |
+|-------------------------|-----------------------------|------|
+| `/tokenjam:onboard`   | `tj onboard --claude-code`  | Wires the zero-token statusline, the resume-brief `SessionStart` hook, and local OTel telemetry ingest. Idempotent — safe to re-run. |
+| `/tokenjam:status`    | `tj status`                 | Token usage, cost today, active alerts, per agent. |
+| `/tokenjam:optimize`  | `tj optimize`                | Savings report: where quota is going and the concrete fix for each finding. |
+| `/tokenjam:doctor`    | `tj doctor`                  | Health check on config, ingest endpoint, and storage. |
+| `/tokenjam:uninstall` | `tj uninstall --yes`         | Unwires the statusline, hooks, and OTel env vars `/tokenjam:onboard` set up. |
 
 ## Why no `hooks.json` or `.mcp.json`
 
 This plugin ships neither, on purpose:
 
-- **Statusline.** A plugin's own `settings.json` only supports the `agent` and `subagentStatusLine` keys — there is no plugin-manifest path to the main terminal `statusLine` ([plugins-reference](https://code.claude.com/docs/en/plugins-reference), "File locations reference" table; [statusline docs](https://code.claude.com/docs/en/statusline#subagent-status-lines)). `/onboard` gets there by calling `tj onboard --claude-code` instead, which writes `statusLine` directly into the user's `~/.claude/settings.json`.
-- **Hooks.** `tj onboard --claude-code` already writes a `SessionStart` hook (`tj resume-brief --from-hook`) into the user's global settings, matched/deduped by a marker in the command string. A second, independent `hooks/hooks.json` in this plugin would not recognize that marker and would double-fire the hook on every session start. Routing through `/onboard` keeps `~/.claude/settings.json` to one writer.
+- **Statusline.** A plugin's own `settings.json` only supports the `agent` and `subagentStatusLine` keys — there is no plugin-manifest path to the main terminal `statusLine` ([plugins-reference](https://code.claude.com/docs/en/plugins-reference), "File locations reference" table; [statusline docs](https://code.claude.com/docs/en/statusline#subagent-status-lines)). `/tokenjam:onboard` gets there by calling `tj onboard --claude-code` instead, which writes `statusLine` directly into the user's `~/.claude/settings.json`.
+- **Hooks.** `tj onboard --claude-code` already writes a `SessionStart` hook (`tj resume-brief --from-hook`) into the user's global settings, matched/deduped by a marker in the command string. A second, independent `hooks/hooks.json` in this plugin would not recognize that marker and would double-fire the hook on every session start. Routing through `/tokenjam:onboard` keeps `~/.claude/settings.json` to one writer.
 - **MCP.** `tj mcp` is tokenjam's in-request-path surface, built for SDK/API integrations that already sit in the loop. A measured A/B showed an in-loop MCP costs Claude Code / subscription users +36% model-weighted tokens versus the zero-token statusline — auto-wiring it here would regress the exact thing `tj onboard --claude-code` deliberately avoids. Run `tj mcp` yourself (or `claude mcp add tj -- tj mcp`) if you want it for an SDK-style use case.
