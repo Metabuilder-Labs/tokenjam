@@ -3,6 +3,7 @@ import contextvars
 import logging
 import re
 from contextlib import contextmanager
+from rich.markup import escape
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from tokenjam.core.models import NormalizedSpan
@@ -53,7 +54,13 @@ def defer_pricing_warnings():
     try:
         yield messages
     finally:
+        # Fail-safe: any warning collected but not rendered (early return,
+        # exception, Ctrl-C) must still reach the user. The dedup set is
+        # marked at collection time, so a swallowed warning is gone forever.
+        unconsumed = list(messages)
         _DEFERRED_PRICING_WARNINGS.reset(token)
+        for message in unconsumed:
+            logger.warning("%s", message)
 
 
 def drain_deferred_pricing_warnings() -> list[str]:
@@ -68,9 +75,13 @@ def drain_deferred_pricing_warnings() -> list[str]:
 
 def print_deferred_pricing_warnings(*, console, messages: list[str] | None = None) -> None:
     """Render deferred unknown-model pricing warnings, if any."""
-    pending = list(messages) if messages is not None else drain_deferred_pricing_warnings()
+    if messages is not None:
+        pending = list(messages)
+        messages.clear()
+    else:
+        pending = drain_deferred_pricing_warnings()
     for message in pending:
-        console.print(f"[yellow]{message}[/yellow]")
+        console.print(f"[warn]{escape(message)}[/warn]")
 
 
 def billing_rates(

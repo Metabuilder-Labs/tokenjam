@@ -93,6 +93,8 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
                 "[yellow]No sessions found.[/yellow] "
                 "[dim]Use Claude Code for a while, then re-run.[/dim]"
             )
+            print_deferred_pricing_warnings(
+                console=console, messages=pricing_warnings)
             return
 
         days_span = None

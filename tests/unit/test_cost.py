@@ -9,6 +9,7 @@ from tokenjam.core.cost import (
     calculate_cost,
     defer_pricing_warnings,
     drain_deferred_pricing_warnings,
+    print_deferred_pricing_warnings,
     WindowTotals,
 )
 from tokenjam.core.pricing import (
@@ -113,10 +114,42 @@ def test_defer_pricing_warnings_collects_instead_of_logging(caplog):
         with defer_pricing_warnings() as messages:
             calculate_cost("defer_provider", "defer_model", 1000, 200)
             calculate_cost("defer_provider", "defer_model", 1000, 200)
+            assert caplog.text == ""
 
-    assert caplog.text == ""
     assert len(messages) == 1
     assert "defer_provider/defer_model" in messages[0]
+    # Unconsumed warnings are emitted in the context manager's finally block.
+    assert "defer_provider/defer_model" in caplog.text
+
+
+def test_defer_pricing_warnings_skips_finally_when_consumed(caplog):
+    import tokenjam.core.cost as cost_mod
+    from unittest.mock import MagicMock
+
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+    console = MagicMock()
+    with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
+        with defer_pricing_warnings() as messages:
+            calculate_cost("consumed_provider", "consumed_model", 1000, 200)
+            print_deferred_pricing_warnings(console=console, messages=messages)
+
+    assert caplog.text == ""
+    assert messages == []
+    console.print.assert_called_once()
+
+
+def test_print_deferred_pricing_warnings_escapes_rich_markup():
+    from unittest.mock import MagicMock
+
+    from tokenjam.core.cost import print_deferred_pricing_warnings
+
+    console = MagicMock()
+    messages = ["No pricing data for test/ll[/]ama — using default rates"]
+    print_deferred_pricing_warnings(console=console, messages=messages)
+    printed = console.print.call_args[0][0]
+    assert "[warn]" in printed
+    assert "ll\\[/]ama" in printed
+    assert messages == []
 
 
 def test_defer_pricing_warnings_logs_normally_outside_context(caplog):
