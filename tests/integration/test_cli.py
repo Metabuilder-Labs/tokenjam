@@ -2753,3 +2753,18 @@ def test_validate_daemon_lock_fails_cleanly(runner, config):
                          ["optimize", "--validate", "downsize"])
     assert result.exit_code == 1
     assert "tj serve" in result.output
+
+
+@pytest.mark.parametrize("args", [
+    ["optimize", "downsize", "--help"],
+    ["backfill", "langfuse", "--help"],
+    ["loop", "annotate", "--help"],
+])
+def test_nested_subcommand_help_skips_db_probe(runner, args):
+    """Nested group subcommand --help must not open DuckDB (#580)."""
+    with patch("tokenjam.cli.main.load_config", return_value=TjConfig(version="1")), \
+         patch("tokenjam.cli.main.open_db",
+               side_effect=AssertionError("must not open db for --help")):
+        result = runner.invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert "Usage:" in result.output
