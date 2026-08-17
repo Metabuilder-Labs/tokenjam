@@ -563,6 +563,76 @@ def test_claude_code_backfill_rejects_two_since_flags(tmp_path, monkeypatch):
     assert "Use either --since or --since-days" in result.output
 
 
+def test_claude_code_backfill_prints_unknown_model_warning_after_summary(tmp_path):
+    import tokenjam.core.cost as cost_mod
+
+    _make_session_file(
+        tmp_path,
+        session_id="sess-unknown",
+        cwd="/Users/me/proj",
+        records=[
+            _assistant_record(
+                "u1", "totally-unknown-model-xyz", 1000, 200,
+                "2026-06-20T10:00:00.000Z", "sess-unknown", "/Users/me/proj",
+            ),
+        ],
+    )
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+    db = InMemoryBackend()
+
+    result = CliRunner().invoke(
+        cmd_backfill_module.claude_code,
+        ["--root", str(tmp_path), "--quiet"],
+        obj={"db": db, "config": None},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Backfilled" in result.output
+    assert "No pricing data for anthropic/totally-unknown-model-xyz" in result.output
+    assert result.output.index("Backfilled") < result.output.index(
+        "No pricing data for anthropic/totally-unknown-model-xyz"
+    )
+
+
+def test_claude_code_backfill_prints_unknown_model_warning_after_no_sessions(tmp_path):
+    """Issue #585: zero-session backfill must still surface deferred pricing notes."""
+    import os
+    import time
+    import tokenjam.core.cost as cost_mod
+
+    old = _make_session_file(
+        tmp_path,
+        session_id="sess-old",
+        cwd="/Users/me/proj",
+        records=[
+            _assistant_record(
+                "u1", "totally-unknown-model-xyz", 1000, 200,
+                "2020-01-01T10:00:00.000Z", "sess-old", "/Users/me/proj",
+            ),
+        ],
+    )
+    # mtime passes the cheap pre-filter; ended_at predates --since so the
+    # session is discarded after parse (and pricing runs during parse).
+    recent_time = time.time()
+    os.utime(old, (recent_time, recent_time))
+
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+    db = InMemoryBackend()
+
+    result = CliRunner().invoke(
+        cmd_backfill_module.claude_code,
+        ["--root", str(tmp_path), "--since", "2026-01-01", "--quiet"],
+        obj={"db": db, "config": None},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "No sessions found" in result.output
+    assert "No pricing data for anthropic/totally-unknown-model-xyz" in result.output
+    assert result.output.index("No sessions found") < result.output.index(
+        "No pricing data for anthropic/totally-unknown-model-xyz"
+    )
+
+
 # --- #443: cheap in-scope session count (progress bar total + heads-up) -----
 
 

@@ -5,7 +5,13 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tokenjam.core.cost import calculate_cost, WindowTotals
+from tokenjam.core.cost import (
+    calculate_cost,
+    defer_pricing_warnings,
+    drain_deferred_pricing_warnings,
+    print_deferred_pricing_warnings,
+    WindowTotals,
+)
 from tokenjam.core.pricing import (
     load_pricing_table,
     get_rates,
@@ -98,6 +104,63 @@ def test_calculate_cost_unknown_model_warns_only_once_per_pair(caplog):
             calculate_cost("test_provider_xyz", "different_model", 1000, 200)
     matching = [r for r in caplog.records if "different_model" in r.message]
     assert len(matching) == 1
+
+
+def test_defer_pricing_warnings_collects_instead_of_logging(caplog):
+    import tokenjam.core.cost as cost_mod
+
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+    with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
+        with defer_pricing_warnings() as messages:
+            calculate_cost("defer_provider", "defer_model", 1000, 200)
+            calculate_cost("defer_provider", "defer_model", 1000, 200)
+            assert caplog.text == ""
+
+    assert len(messages) == 1
+    assert "defer_provider/defer_model" in messages[0]
+    # Unconsumed warnings are emitted in the context manager's finally block.
+    assert "defer_provider/defer_model" in caplog.text
+
+
+def test_defer_pricing_warnings_skips_finally_when_consumed(caplog):
+    import tokenjam.core.cost as cost_mod
+    from unittest.mock import MagicMock
+
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+    console = MagicMock()
+    with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
+        with defer_pricing_warnings() as messages:
+            calculate_cost("consumed_provider", "consumed_model", 1000, 200)
+            print_deferred_pricing_warnings(console=console, messages=messages)
+
+    assert caplog.text == ""
+    assert messages == []
+    console.print.assert_called_once()
+
+
+def test_print_deferred_pricing_warnings_escapes_rich_markup():
+    from unittest.mock import MagicMock
+
+    from tokenjam.core.cost import print_deferred_pricing_warnings
+
+    console = MagicMock()
+    messages = ["No pricing data for test/ll[/]ama — using default rates"]
+    print_deferred_pricing_warnings(console=console, messages=messages)
+    printed = console.print.call_args[0][0]
+    assert "[warn]" in printed
+    assert "ll\\[/]ama" in printed
+    assert messages == []
+
+
+def test_defer_pricing_warnings_logs_normally_outside_context(caplog):
+    import tokenjam.core.cost as cost_mod
+
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+    with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
+        calculate_cost("live_provider", "live_model", 1000, 200)
+
+    assert "live_provider/live_model" in caplog.text
+    assert drain_deferred_pricing_warnings() == []
 
 
 def test_deprecated_anthropic_base_models_are_priced():

@@ -1,6 +1,9 @@
 from __future__ import annotations
+import contextvars
 import logging
 import re
+from contextlib import contextmanager
+from rich.markup import escape
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from tokenjam.core.models import NormalizedSpan
@@ -22,6 +25,63 @@ logger = logging.getLogger(__name__)
 # emit the same warning hundreds of times in a row (issue #98). Now it
 # emits exactly once and stays out of the way.
 _UNKNOWN_MODEL_WARNED: set[tuple[str, str]] = set()
+
+# When set, unknown-model pricing warnings are collected here instead of being
+# logged immediately. CLI surfaces that ingest inline before rendering (e.g.
+# `tj quickstart`, `tj backfill`) enter this mode so a pricing note lands after
+# the report body rather than ahead of it (issue #585).
+_DEFERRED_PRICING_WARNINGS: contextvars.ContextVar[list[str] | None] = (
+    contextvars.ContextVar("_deferred_pricing_warnings", default=None)
+)
+
+
+def _unknown_model_warning_message(provider: str, model: str) -> str:
+    return (
+        "No pricing data for %s/%s — using default rates, including "
+        "guessed cache rates (cost figures may be inaccurate, "
+        "especially for cache-heavy traffic). Upgrade tokenjam for "
+        "current pricing, or add an override to "
+        "~/.config/tj/pricing.toml — see `tj pricing list`."
+        % (provider, model)
+    )
+
+
+@contextmanager
+def defer_pricing_warnings():
+    """Collect unknown-model pricing warnings until the caller renders them."""
+    messages: list[str] = []
+    token = _DEFERRED_PRICING_WARNINGS.set(messages)
+    try:
+        yield messages
+    finally:
+        # Fail-safe: any warning collected but not rendered (early return,
+        # exception, Ctrl-C) must still reach the user. The dedup set is
+        # marked at collection time, so a swallowed warning is gone forever.
+        unconsumed = list(messages)
+        _DEFERRED_PRICING_WARNINGS.reset(token)
+        for message in unconsumed:
+            logger.warning("%s", message)
+
+
+def drain_deferred_pricing_warnings() -> list[str]:
+    """Return and clear any pricing warnings collected under defer mode."""
+    bucket = _DEFERRED_PRICING_WARNINGS.get()
+    if not bucket:
+        return []
+    messages = list(bucket)
+    bucket.clear()
+    return messages
+
+
+def print_deferred_pricing_warnings(*, console, messages: list[str] | None = None) -> None:
+    """Render deferred unknown-model pricing warnings, if any."""
+    if messages is not None:
+        pending = list(messages)
+        messages.clear()
+    else:
+        pending = drain_deferred_pricing_warnings()
+    for message in pending:
+        console.print(f"[warn]{escape(message)}[/warn]")
 
 
 def billing_rates(
@@ -59,14 +119,12 @@ def billing_rates(
     key = (provider, model)
     if key not in _UNKNOWN_MODEL_WARNED:
         _UNKNOWN_MODEL_WARNED.add(key)
-        logger.warning(
-            "No pricing data for %s/%s — using default rates, including "
-            "guessed cache rates (cost figures may be inaccurate, "
-            "especially for cache-heavy traffic). Upgrade tokenjam for "
-            "current pricing, or add an override to "
-            "~/.config/tj/pricing.toml — see `tj pricing list`.",
-            provider, model,
-        )
+        message = _unknown_model_warning_message(provider, model)
+        bucket = _DEFERRED_PRICING_WARNINGS.get()
+        if bucket is not None:
+            bucket.append(message)
+        else:
+            logger.warning("%s", message)
     # cache_read/write_per_mtok are non-zero guesses, not 0.0: a model with
     # NO pricing entry that is mostly cache traffic would otherwise have
     # ~all of its real cost priced at zero, silently, rather than merely

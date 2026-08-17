@@ -194,6 +194,54 @@ def _invoke_quickstart(args):
     return CliRunner().invoke(cmd_quickstart, args)
 
 
+def _assistant_with_unknown_model(uuid: str, session_id: str, cwd: str, ts: str) -> dict:
+    record = _assistant(uuid, session_id, cwd, ts)
+    record["message"]["model"] = "totally-unknown-model-xyz"
+    return record
+
+
+def test_quickstart_prints_unknown_model_pricing_warning_after_report(tmp_path):
+    """Issue #585: pricing warnings encountered during ingest must land after
+    the report body, not ahead of it."""
+    root = tmp_path / "projects"
+    _make_session_file(root, "sess-unknown", "/Users/me/projUnknown", [
+        _assistant_with_unknown_model(
+            "u1", "sess-unknown", "/Users/me/projUnknown",
+            _ts(6, 20, "10:00:00.000"),
+        ),
+    ])
+
+    import tokenjam.core.cost as cost_mod
+
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "No pricing data for anthropic/totally-unknown-model-xyz" in result.output
+    assert result.output.index("TokenJam reads your") < result.output.index(
+        "No pricing data for anthropic/totally-unknown-model-xyz"
+    )
+
+
+def test_quickstart_json_keeps_pricing_warning_on_stderr(tmp_path):
+    root = tmp_path / "projects"
+    _make_session_file(root, "sess-unknown", "/Users/me/projUnknown", [
+        _assistant_with_unknown_model(
+            "u1", "sess-unknown", "/Users/me/projUnknown",
+            _ts(6, 20, "10:00:00.000"),
+        ),
+    ])
+
+    import tokenjam.core.cost as cost_mod
+
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "No pricing data for anthropic/totally-unknown-model-xyz" in result.stderr
+    assert "No pricing data for anthropic/totally-unknown-model-xyz" not in result.stdout
+
+
 def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     root = _fixture_root(tmp_path)
     result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
