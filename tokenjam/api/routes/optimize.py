@@ -31,7 +31,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key, require_relearn_write_auth
-from tokenjam.cli.cmd_optimize import _rank_findings
 from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
     PERSONAS,
@@ -44,6 +43,7 @@ from tokenjam.core.optimize import (
     ANALYZER_REGISTRY,
     disabled_analyzers_for_persona,
     findings_for_persona,
+    rank_findings,
     report_store,
 )
 from tokenjam.core.persona_scope import persona_scopes_population
@@ -246,13 +246,13 @@ def get_optimize(
     if "downsize" in persona_disabled:
         payload["downgrade"] = None
 
-    # Biggest-waste-first ranking — the same `_rank_findings` the CLI's text
+    # Biggest-waste-first ranking — the same `rank_findings` the CLI's text
     # view ranks by, so the web doesn't fall back to Object.keys() insertion
     # order. `share` of None means "no quantified estimate" (unranked), which
     # is NOT zero — the UI must not sort those away as de-minimis.
     payload["finding_rank"] = [
         {"name": name, "share": share}
-        for name, share in _rank_findings(report, None)
+        for name, share in rank_findings(report, None)
         if name not in persona_disabled
     ]
 
