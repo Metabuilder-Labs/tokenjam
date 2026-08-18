@@ -186,7 +186,7 @@ def cmd_optimize(
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
-    if db is None or config is None:
+    if config is None:
         raise click.ClickException("optimize requires a database connection.")
 
     try:
@@ -262,10 +262,8 @@ def cmd_optimize(
             # API-shim path
             from tokenjam.core.api_backend import ApiBackend
             if not isinstance(db, ApiBackend):
-                raise click.ClickException(
-                    "optimize requires either a direct DuckDB connection or a "
-                    "running tj serve at the configured api.{host,port}."
-                )
+                from tokenjam.cli.tj_status import db_required_message
+                raise click.ClickException(db_required_message("optimize"))
             try:
                 report_dict = db.fetch_optimize_report(
                     since=since,
