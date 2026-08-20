@@ -2780,5 +2780,5 @@ def test_db_requiring_command_fails_cleanly_when_db_is_none(runner, config):
             ["loop", "annotate", "session-1", "--note", "--help"],
         )
     assert result.exit_code == 1, result.output
-    assert "annotate requires either a direct DuckDB connection" in result.output
+    assert "`--help` was consumed as an option value" in result.output
     assert "AttributeError" not in result.output

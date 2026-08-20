@@ -10,7 +10,7 @@ from rich.padding import Padding
 from rich.table import Table
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
-from tokenjam.cli.tj_status import TjCommand, tj_status
+from tokenjam.cli.tj_status import TjCommand, db_required_message, tj_status
 from tokenjam.core.optimize.analyzers.deadweight import UNUSED_RECENCY_WINDOW_DAYS
 from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
 from tokenjam.core.framing import (
@@ -187,7 +187,7 @@ def cmd_optimize(
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     if config is None:
-        raise click.ClickException("optimize requires a database connection.")
+        raise click.ClickException("optimize could not load configuration.")
 
     try:
         since_dt = parse_since(since)
@@ -262,7 +262,6 @@ def cmd_optimize(
             # API-shim path
             from tokenjam.core.api_backend import ApiBackend
             if not isinstance(db, ApiBackend):
-                from tokenjam.cli.tj_status import db_required_message
                 raise click.ClickException(db_required_message("optimize"))
             try:
                 report_dict = db.fetch_optimize_report(

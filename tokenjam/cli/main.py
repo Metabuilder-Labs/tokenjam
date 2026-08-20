@@ -109,7 +109,10 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     if projects_root:
         config.optimize.projects_root = projects_root
 
-    # Commands that don't need a database connection
+    # Commands that don't need a database connection. A DB-needing leaf added
+    # later under one of these groups inherits ``requires_db=False`` from the
+    # root callback; override with ``requires_db=True`` on that leaf's
+    # ``@click.command(..., cls=TjCommand, requires_db=True)``.
     no_db_commands = {
         "stop", "uninstall", "onboard", "mcp", "demo", "policy",
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",

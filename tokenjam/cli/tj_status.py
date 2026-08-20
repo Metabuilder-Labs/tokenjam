@@ -94,6 +94,15 @@ def db_required_message(command_name: str) -> str:
     )
 
 
+def help_consumed_as_option_value_message(command_name: str) -> str:
+    """When ``--help`` is parsed as an option value, #726 skips opening the DB
+    and leaves ``db`` as ``None`` — starting ``tj serve`` cannot fix that."""
+    return (
+        f"{command_name} cannot run: `--help` was consumed as an option value. "
+        "Put `--help` before other flags, or drop the option that took it."
+    )
+
+
 class TjCommand(click.Command):
     """The class every `tj` command is built from, whether or not it ever
     renders anything. `status_message` is the single switch that decides
@@ -129,7 +138,7 @@ class TjCommand(click.Command):
     def _requires_db(self, ctx: click.Context) -> bool:
         if self.requires_db is not None:
             return self.requires_db
-        return bool((ctx.obj or {}).get("requires_db", True))
+        return bool((ctx.obj or {}).get("requires_db", False))
 
     def _ensure_db_available(self, ctx: click.Context) -> None:
         """Raise a clean ``ClickException`` when a DB-requiring leaf runs with
@@ -143,7 +152,13 @@ class TjCommand(click.Command):
             return
         if (ctx.obj or {}).get("db") is not None:
             return
-        raise click.ClickException(db_required_message(self.name or "this command"))
+        command_name = self.name or "this command"
+        obj = ctx.obj or {}
+        if obj.get("_skip_db_for_help"):
+            raise click.ClickException(
+                help_consumed_as_option_value_message(command_name)
+            )
+        raise click.ClickException(db_required_message(command_name))
 
     def invoke(self, ctx: click.Context) -> Any:
         ctx.ensure_object(dict)
@@ -184,6 +199,7 @@ __all__ = [
     "TjCommand",
     "TjGroup",
     "db_required_message",
+    "help_consumed_as_option_value_message",
     "tj_status",
     "tj_status_stream",
 ]
