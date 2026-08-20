@@ -124,7 +124,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     }
     invoked = ctx.invoked_subcommand
 
-    if invoked in no_db_commands:
+    if invoked in no_db_commands or ctx.obj.get("_skip_db_for_help"):
         ctx.obj["config"] = config
         ctx.obj["config_path_override"] = config_path
         ctx.obj["db"] = None

@@ -105,7 +105,21 @@ class TjCommand(click.Command):
         self.no_status = no_status
         super().__init__(*args, **kwargs)
 
+    def _tokens_request_help(self, ctx: click.Context) -> bool:
+        names: set[str] = set()
+        node: click.Context | None = ctx
+        while node is not None:
+            names.update(node.help_option_names)
+            node = node.parent
+        tokens = list(ctx.args)
+        return any(tok in names for tok in tokens)
+
     def invoke(self, ctx: click.Context) -> Any:
+        ctx.ensure_object(dict)
+        if self._tokens_request_help(ctx):
+            # Root/nested group callbacks probe DuckDB before Click renders
+            # ``--help`` on a leaf subcommand (#580).
+            ctx.obj["_skip_db_for_help"] = True
         if not self.status_message:
             return super().invoke(ctx)
         with tj_status(self.status_message, ctx):
