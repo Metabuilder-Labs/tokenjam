@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -19,7 +19,7 @@ from tokenjam.core.config import (
     resolve_effective_budget,
     resolve_group_budget,
 )
-from tokenjam.core.models import Alert, AlertType, Severity
+from tokenjam.core.models import Alert, AlertFilters, AlertType, Severity
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.utils.formatting import console, severity_colour
 from tokenjam.utils.ids import new_uuid
@@ -51,6 +51,11 @@ _FAILURE_RATE_WINDOW = 20
 _FAILURE_RATE_THRESHOLD = 0.20
 _FAILURE_RATE_CHECK_INTERVAL = 5
 _SESSION_DURATION_DEFAULT = 3600  # seconds
+
+# Row cap for the startup queries that rebuild CooldownTracker/_failure_rate_fired
+# from the alerts table (#592). Generous rather than exact: missing a stale row
+# only means an old alert is treated as new, the same behavior as before this fix.
+_HYDRATION_LIMIT = 10_000
 
 # Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex): a
 # heterogeneous, arg-less, human-driven workload with no stable, repeatable
@@ -180,7 +185,8 @@ class CooldownTracker:
     """
     Prevents alert storms by suppressing repeat alerts of the same type
     for the same agent within the cooldown window.
-    Stored in-memory — resets when the process restarts.
+    In-memory, so a fresh instance is blind to state from before a restart
+    until `hydrate()` seeds it from persisted alert rows (#592).
     """
 
     def __init__(self, cooldown_seconds: int = 60) -> None:
@@ -197,6 +203,21 @@ class CooldownTracker:
     def record(self, agent_id: str | None, alert_type: AlertType) -> None:
         key = (agent_id or "", alert_type.value)
         self._last_fired[key] = utcnow()
+
+    def hydrate(self, alerts: list[Alert]) -> None:
+        """Seed `_last_fired` from persisted, non-suppressed alert rows.
+
+        `alerts` must be newest-first (matches `StorageBackend.get_alerts`'s
+        `ORDER BY fired_at DESC`): the first row seen for a (agent_id, type)
+        key is its most recent firing, so once a key is set it is never
+        overwritten by an older row later in the list.
+        """
+        for alert in alerts:
+            if alert.suppressed:
+                continue
+            key = (alert.agent_id or "", alert.type.value)
+            if key not in self._last_fired:
+                self._last_fired[key] = alert.fired_at
 
 
 # ── Alert engine ───────────────────────────────────────────────────────────
@@ -215,8 +236,32 @@ class AlertEngine:
         # Sessions that have already fired a failure-rate alert. One struggling
         # session = one alert: without this, every additional error past the
         # threshold re-fired (5/20, 6/20, 7/20 …), turning a few incidents into a
-        # cascade of near-identical alerts. In-memory (resets per process).
+        # cascade of near-identical alerts.
         self._failure_rate_fired: set[str] = set()
+        self._hydrate_from_db()
+
+    def _hydrate_from_db(self) -> None:
+        """Reconstruct cooldown/dedup state from the alerts table (#592).
+
+        Both `self.cooldown` and `_failure_rate_fired` start empty on every
+        construction, and `AlertEngine` is built fresh on every process
+        start. Without this, a restart mid-cooldown (or mid-session, for a
+        session that already crossed the failure-rate threshold) forgets
+        that state, and a still-true condition inserts and dispatches a
+        duplicate alert as if it were new. The `alerts` table already has
+        everything needed: `fired_at`/`type`/`agent_id` for the cooldown
+        window, `session_id` for which sessions already fired FAILURE_RATE.
+        """
+        since = utcnow() - timedelta(seconds=self.cooldown.cooldown_seconds)
+        recent = self.db.get_alerts(AlertFilters(since=since, limit=_HYDRATION_LIMIT))
+        self.cooldown.hydrate(recent)
+
+        fired = self.db.get_alerts(
+            AlertFilters(type=AlertType.FAILURE_RATE, limit=_HYDRATION_LIMIT)
+        )
+        for alert in fired:
+            if alert.session_id:
+                self._failure_rate_fired.add(alert.session_id)
 
     def evaluate(self, span: NormalizedSpan) -> None:
         """Evaluate all per-span alert rules against this span."""
