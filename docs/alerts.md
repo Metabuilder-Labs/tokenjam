@@ -84,6 +84,8 @@ To prevent alert storms, `tj` tracks a cooldown per agent + alert type. Repeat a
 cooldown_seconds = 300   # 5 minutes between repeated alerts of the same type
 ```
 
+Cooldown state survives a daemon restart: `AlertEngine` rehydrates it from the persisted `alerts` table on startup, so a restart mid-cooldown does not re-fire a duplicate alert or resend a duplicate ntfy/Discord push.
+
 ## Content stripping
 
 By default, alert payloads sent to external channels (Discord, Telegram, webhook, ntfy) have sensitive content stripped: `prompt_content`, `completion_content`, `tool_input`, `tool_output`. To include full content:

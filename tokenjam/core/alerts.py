@@ -55,6 +55,13 @@ _SESSION_DURATION_DEFAULT = 3600  # seconds
 # Row cap for the startup queries that rebuild CooldownTracker/_failure_rate_fired
 # from the alerts table (#592). Generous rather than exact: missing a stale row
 # only means an old alert is treated as new, the same behavior as before this fix.
+# get_alerts applies this cap in SQL before CooldownTracker.hydrate() filters out
+# suppressed rows, so a single (agent_id, type) key producing more than this many
+# rows inside one cooldown window can crowd a different key's lone unsuppressed
+# row out of the page returned to hydrate(). Requires >10k alert rows for one key
+# inside a single cooldown window (default 60s) to matter, and the failure mode
+# degrades to pre-#592 behavior (that key comes back unhydrated) rather than
+# suppressing wrongly.
 _HYDRATION_LIMIT = 10_000
 
 # Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex): a
@@ -207,16 +214,16 @@ class CooldownTracker:
     def hydrate(self, alerts: list[Alert]) -> None:
         """Seed `_last_fired` from persisted, non-suppressed alert rows.
 
-        `alerts` must be newest-first (matches `StorageBackend.get_alerts`'s
-        `ORDER BY fired_at DESC`): the first row seen for a (agent_id, type)
-        key is its most recent firing, so once a key is set it is never
-        overwritten by an older row later in the list.
+        Order-independent: keeps the newest `fired_at` seen for each
+        (agent_id, type) key rather than trusting the caller's row order,
+        so a change to `get_alerts`' `ORDER BY` cannot silently regress this.
         """
         for alert in alerts:
             if alert.suppressed:
                 continue
             key = (alert.agent_id or "", alert.type.value)
-            if key not in self._last_fired:
+            existing = self._last_fired.get(key)
+            if existing is None or alert.fired_at > existing:
                 self._last_fired[key] = alert.fired_at
 
 
@@ -251,17 +258,37 @@ class AlertEngine:
         duplicate alert as if it were new. The `alerts` table already has
         everything needed: `fired_at`/`type`/`agent_id` for the cooldown
         window, `session_id` for which sessions already fired FAILURE_RATE.
-        """
-        since = utcnow() - timedelta(seconds=self.cooldown.cooldown_seconds)
-        recent = self.db.get_alerts(AlertFilters(since=since, limit=_HYDRATION_LIMIT))
-        self.cooldown.hydrate(recent)
 
-        fired = self.db.get_alerts(
-            AlertFilters(type=AlertType.FAILURE_RATE, limit=_HYDRATION_LIMIT)
-        )
-        for alert in fired:
-            if alert.session_id:
-                self._failure_rate_fired.add(alert.session_id)
+        `AlertEngine.__init__` was previously pure in-memory and could not
+        fail; it now runs two DB queries at construction, which happens on
+        every `tj serve` and SDK-bootstrap startup. A storage error here
+        degrades to pre-#592 behavior (both structures stay empty, exactly
+        what construction did before this fix) rather than blocking startup
+        for what is a best-effort optimization.
+        """
+        # Deferred: tokenjam.core.db imports tokenjam.core.persona_scope,
+        # which imports interactive_coding_agent_sql from this module, so a
+        # module-level import here would be circular.
+        from tokenjam.core.db import handle_if_fatal
+
+        try:
+            since = utcnow() - timedelta(seconds=self.cooldown.cooldown_seconds)
+            recent = self.db.get_alerts(AlertFilters(since=since, limit=_HYDRATION_LIMIT))
+            self.cooldown.hydrate(recent)
+
+            fired = self.db.get_alerts(
+                AlertFilters(type=AlertType.FAILURE_RATE, limit=_HYDRATION_LIMIT)
+            )
+            for alert in fired:
+                if alert.session_id:
+                    self._failure_rate_fired.add(alert.session_id)
+        except Exception as exc:
+            if not handle_if_fatal(exc, what="AlertEngine cooldown/dedup hydration"):
+                logger.warning(
+                    "cooldown/dedup hydration from the alerts table failed (%s: %s); "
+                    "starting with empty in-memory state, same as before #592",
+                    type(exc).__name__, str(exc).split("\n")[0],
+                )
 
     def evaluate(self, span: NormalizedSpan) -> None:
         """Evaluate all per-span alert rules against this span."""
