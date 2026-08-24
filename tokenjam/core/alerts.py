@@ -286,7 +286,7 @@ class AlertEngine:
             if not handle_if_fatal(exc, what="AlertEngine cooldown/dedup hydration"):
                 logger.warning(
                     "cooldown/dedup hydration from the alerts table failed (%s: %s); "
-                    "starting with empty in-memory state, same as before #592",
+                    "starting with empty in-memory state, same as before this hydration existed",
                     type(exc).__name__, str(exc).split("\n")[0],
                 )
 
