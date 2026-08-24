@@ -26,6 +26,12 @@ from __future__ import annotations
 
 # Re-export the public surface used by cmd_optimize.py, mcp/server.py, tests.
 from tokenjam.core.optimize import report_store
+from tokenjam.core.optimize.rank import (
+    ALWAYS_FULL_FINDINGS,
+    CARD_FINDING_NAMES,
+    rank_findings,
+    reclaimable_share,
+)
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY, register
 from tokenjam.core.optimize.runner import (
     ANALYZER_ORDER,
@@ -69,8 +75,10 @@ from tokenjam.core.optimize.analyzers.model_downgrade import (
 )
 
 __all__ = [
+    "ALWAYS_FULL_FINDINGS",
     "ANALYZER_ORDER",
     "ANALYZER_REGISTRY",
+    "CARD_FINDING_NAMES",
     "GATED_PERSONAS",
     "PERSONA_DISABLED_ANALYZERS",
     "AnalyzerContext",
@@ -96,6 +104,8 @@ __all__ = [
     "disabled_analyzers_for_personas",
     "findings_for_persona",
     "project_budget",
+    "rank_findings",
+    "reclaimable_share",
     "register",
     "report_from_dict",
     "report_store",

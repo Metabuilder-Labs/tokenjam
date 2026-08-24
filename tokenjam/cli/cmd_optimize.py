@@ -25,6 +25,7 @@ from tokenjam.core.framing import (
     render_savings,
 )
 from tokenjam.core.optimize import (
+    ALWAYS_FULL_FINDINGS as _ALWAYS_FULL_FINDINGS,
     ANALYZER_REGISTRY,
     MODEL_DOWNGRADE_CAVEAT,
     BudgetProjection,
@@ -32,6 +33,8 @@ from tokenjam.core.optimize import (
     OptimizeReport,
     build_report,
     disabled_analyzers_for_persona as _disabled_analyzers,
+    rank_findings as _rank_findings_core,
+    reclaimable_share as _reclaimable_share,  # noqa: F401 — re-exported for tests
     report_from_dict,
     report_to_dict,
 )
@@ -584,7 +587,7 @@ DE_MINIMIS_SHARE = 0.01
 # "~0.0% of window tokens" pointer — the same "nothing found" failure as the
 # empty-state bug. These findings always render in full (the `unranked`
 # bucket): their own detail when populated, their own empty-state when not.
-_ALWAYS_FULL_FINDINGS = {"relearn"}
+# `_ALWAYS_FULL_FINDINGS` is imported from core so CLI and API cannot drift.
 
 # Display labels for the "Minor findings" collapsed pointer list — must match
 # the header text each renderer prints in its numbered form.
@@ -611,24 +614,6 @@ def _numbered_marker(n: int) -> str:
     if 1 <= n <= 20:
         return chr(0x2460 + n - 1)
     return f"({n})"  # defensive — no report should ever have this many
-
-
-def _reclaimable_share(finding: Any, window_total_tokens: int) -> float | None:
-    """Estimated-recoverable-tokens share of the window, for ranking.
-
-    Returns ``None`` — not 0.0 — when the finding has no quantified estimate
-    at all (analyzer disabled, no candidates, or cache-recommend, which
-    recommends a cache_control placement rather than a token count). Those
-    findings still render in full (they're not "de-minimis", they're
-    "unranked") — only a finding with a real-but-tiny share collapses into
-    the Minor findings pointer list. Conflating the two would hide an
-    analyzer's own diagnostic empty-state message (e.g. "no tool spans in
-    this window") behind a generic pointer.
-    """
-    tokens = getattr(finding, "past_overspend_tokens", None)
-    if tokens is None or window_total_tokens <= 0:
-        return None
-    return max(float(tokens), 0.0) / window_total_tokens
 
 
 def _echo_scan_not_ready(payload: dict, output_json: bool) -> None:
@@ -673,51 +658,13 @@ def _echo_scan_not_ready(payload: dict, output_json: bool) -> None:
 def _rank_findings(
     report: OptimizeReport, requested: list[str] | None,
 ) -> list[tuple[str, float | None]]:
-    """Rank findings with something to show by reclaimable token share
-    (largest first; unranked findings — no quantified estimate — sort last).
-    Ties fall back to ANALYZER_ORDER for determinism.
-    """
-    window_tokens = report.window.total_tokens
-    order = ["downsize", *_FINDING_RENDERERS.keys()]
-    order_index = {name: i for i, name in enumerate(order)}
-
-    items: list[tuple[str, float | None]] = []
-    # Render an explicit "no candidates" empty state when the downsize
-    # analyzer ran but found nothing — the Optimize web tab does this
-    # (PR #130 / issue #126) and the CLI used to silently skip the section,
-    # which makes reviewers think the analyzer didn't run. Skip the section
-    # entirely (empty state or full) when the user asked for a different
-    # positional subset (`tj optimize cache` shouldn't mention downsize at
-    # all). This also covers `tj optimize placement`: that alias resolves to
-    # running the `downsize` analyzer (see `_resolve_analyzer_names`), so
-    # `report.downgrade` is populated even though the user never typed
-    # "downsize" — without this guard its card would leak into a report the
-    # user only asked to see `placement` in.
-    downsize_was_requested = (not requested) or ("downsize" in requested)
-    if downsize_was_requested:
-        if report.downgrade is not None:
-            items.append(("downsize", _reclaimable_share(report.downgrade, window_tokens)))
-        else:
-            items.append(("downsize", None))
-
-    for name, finding in (report.findings or {}).items():
-        if name not in _FINDING_RENDERERS:
-            continue
-        # A non-token finding (e.g. relearn) is forced into the unranked bucket
-        # so its clusters always render in full — a large window denominator
-        # must not collapse them into the de-minimis pointer list.
-        share = (
-            None if name in _ALWAYS_FULL_FINDINGS
-            else _reclaimable_share(finding, window_tokens)
-        )
-        items.append((name, share))
-
-    items.sort(key=lambda item: (
-        item[1] is None,
-        -(item[1] or 0.0),
-        order_index.get(item[0], len(order)),
-    ))
-    return items
+    """Rank findings with something to show by reclaimable token share."""
+    return _rank_findings_core(
+        report,
+        requested,
+        known_names=_FINDING_RENDERERS,
+        always_full=_ALWAYS_FULL_FINDINGS,
+    )
 
 
 # ---------------------------------------------------------------------------
