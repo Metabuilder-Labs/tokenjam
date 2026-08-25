@@ -86,20 +86,20 @@ def tj_status_stream(message: str, ctx: click.Context) -> AbstractContextManager
     return phase_status(message, console=_status_console(ctx))
 
 
-def db_required_message(command_name: str) -> str:
+def db_required_message(command_path: str) -> str:
     """Single copy of the CLI error when a DB-requiring command finds ``db is None``."""
     return (
-        f"{command_name} requires either a direct DuckDB connection or a running "
+        f"{command_path} requires either a direct DuckDB connection or a running "
         "tj serve at the configured api.{host,port}."
     )
 
 
-def help_consumed_as_option_value_message(command_name: str) -> str:
+def help_consumed_as_option_value_message(command_path: str) -> str:
     """When ``--help`` is parsed as an option value, #726 skips opening the DB
     and leaves ``db`` as ``None`` — starting ``tj serve`` cannot fix that."""
     return (
-        f"{command_name} cannot run: `--help` was consumed as an option value. "
-        "Put `--help` before other flags, or drop the option that took it."
+        f"{command_path} cannot run: `--help` was consumed as an option value. "
+        "Give that option a value (e.g. `tj cost --since 7d --help`) or drop it."
     )
 
 
@@ -152,13 +152,13 @@ class TjCommand(click.Command):
             return
         if (ctx.obj or {}).get("db") is not None:
             return
-        command_name = self.name or "this command"
+        command_path = ctx.command_path or self.name or "this command"
         obj = ctx.obj or {}
         if obj.get("_skip_db_for_help"):
             raise click.ClickException(
-                help_consumed_as_option_value_message(command_name)
+                help_consumed_as_option_value_message(command_path)
             )
-        raise click.ClickException(db_required_message(command_name))
+        raise click.ClickException(db_required_message(command_path))
 
     def invoke(self, ctx: click.Context) -> Any:
         ctx.ensure_object(dict)

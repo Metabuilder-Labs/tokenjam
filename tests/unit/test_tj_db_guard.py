@@ -14,16 +14,18 @@ from tokenjam.cli.tj_status import (
 )
 
 
-def test_db_required_message_names_command() -> None:
-    msg = db_required_message("annotate")
-    assert "annotate requires either a direct DuckDB connection" in msg
+def test_db_required_message_names_command_path() -> None:
+    msg = db_required_message("tj loop annotate")
+    assert "tj loop annotate requires either a direct DuckDB connection" in msg
     assert "api.{host,port}" in msg
 
 
-def test_help_consumed_as_option_value_message_names_command() -> None:
-    msg = help_consumed_as_option_value_message("annotate")
-    assert "annotate cannot run" in msg
+def test_help_consumed_as_option_value_message_names_command_path() -> None:
+    msg = help_consumed_as_option_value_message("tj loop annotate")
+    assert "tj loop annotate cannot run" in msg
     assert "`--help` was consumed as an option value" in msg
+    assert "Give that option a value" in msg
+    assert "Put `--help` before other flags" not in msg
 
 
 def test_tj_command_guard_raises_click_exception_not_traceback() -> None:
@@ -50,6 +52,17 @@ def test_tj_command_guard_help_skip_message() -> None:
         demo_cmd.invoke(ctx)
     assert "`--help` was consumed as an option value" in str(exc.value)
     assert "direct DuckDB connection" not in str(exc.value)
+
+
+def test_tj_command_guard_fail_open_without_requires_db_key() -> None:
+    """``requires_db`` absent from ``ctx.obj`` must not fail-closed (#729)."""
+    @click.command("demo-cmd", cls=TjCommand)
+    def demo_cmd() -> None:
+        return "ok"
+
+    ctx = click.Context(demo_cmd)
+    ctx.obj = {"db": None}
+    assert demo_cmd.invoke(ctx) == "ok"
 
 
 def test_tj_command_guard_allows_live_backend() -> None:
