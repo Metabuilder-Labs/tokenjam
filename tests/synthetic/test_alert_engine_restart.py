@@ -96,9 +96,9 @@ def test_cooldown_does_not_suppress_after_a_restart_past_the_window():
     than the cooldown must NOT suppress a fresh firing after restart.
 
     Inserts a row directly (bypassing evaluate()) with `fired_at` well
-    outside a real, non-zero cooldown window, so a build that dropped the
-    `since=` bound from `_hydrate_from_db`'s query, rather than one that
-    never suppresses at all, would also be caught here.
+    outside a real, non-zero cooldown window. The bound itself is enforced
+    by `CooldownTracker.is_suppressed`'s own timestamp check, not by this
+    test; it does not exercise `_hydrate_from_db`'s `since=` query filter.
     """
     config = _make_config(
         cooldown_seconds=60,
