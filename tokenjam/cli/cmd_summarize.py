@@ -411,7 +411,14 @@ def cmd_summarize_check(
     config: TjConfig = ctx.obj["config"]
     output_json = resolve_output_json(ctx, output_json_flag)
     summary_text = (
-        click.get_text_stream("stdin").read() if summary_path == "-"
+        # click 8.5.0 made `click.get_text_stream` resolve as `object` to type
+        # checkers (`click.utils.get_text_stream` too), so mypy reads the
+        # `.read()` here as a call on `object`. Runtime is unaffected: the full
+        # suite passes on 8.5, and `click>=8.2` is deliberately unbounded so a
+        # runtime pin would degrade every install to quiet a type checker.
+        # Remove this ignore once click restores the annotation.
+        click.get_text_stream("stdin").read()  # type: ignore[operator]
+        if summary_path == "-"
         else Path(summary_path).expanduser().read_text(encoding="utf-8")
     )
     try:
