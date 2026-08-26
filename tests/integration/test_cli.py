@@ -2768,3 +2768,17 @@ def test_nested_subcommand_help_skips_db_probe(runner, args):
         result = runner.invoke(cli, args)
     assert result.exit_code == 0, result.output
     assert "Usage:" in result.output
+
+
+def test_db_requiring_command_fails_cleanly_when_db_is_none(runner, config):
+    """A DB-requiring leaf with db=None raises ClickException, not a traceback (#727)."""
+    with patch("tokenjam.cli.main.load_config", return_value=config), \
+         patch("tokenjam.cli.main.open_db",
+               side_effect=AssertionError("must not open db")):
+        result = runner.invoke(
+            cli,
+            ["loop", "annotate", "session-1", "--note", "--help"],
+        )
+    assert result.exit_code == 1, result.output
+    assert "`--help` was consumed as an option value" in result.output
+    assert "AttributeError" not in result.output

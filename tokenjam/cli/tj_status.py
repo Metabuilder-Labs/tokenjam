@@ -86,6 +86,23 @@ def tj_status_stream(message: str, ctx: click.Context) -> AbstractContextManager
     return phase_status(message, console=_status_console(ctx))
 
 
+def db_required_message(command_path: str) -> str:
+    """Single copy of the CLI error when a DB-requiring command finds ``db is None``."""
+    return (
+        f"{command_path} requires either a direct DuckDB connection or a running "
+        "tj serve at the configured api.{host,port}."
+    )
+
+
+def help_consumed_as_option_value_message(command_path: str) -> str:
+    """When ``--help`` is parsed as an option value, #726 skips opening the DB
+    and leaves ``db`` as ``None`` — starting ``tj serve`` cannot fix that."""
+    return (
+        f"{command_path} cannot run: `--help` was consumed as an option value. "
+        "Give that option a value (e.g. `tj cost --since 7d --help`) or drop it."
+    )
+
+
 class TjCommand(click.Command):
     """The class every `tj` command is built from, whether or not it ever
     renders anything. `status_message` is the single switch that decides
@@ -100,9 +117,13 @@ class TjCommand(click.Command):
     """
 
     def __init__(self, *args: Any, status_message: str | None = None,
-                 no_status: bool = False, **kwargs: Any) -> None:
+                 no_status: bool = False, requires_db: bool | None = None,
+                 **kwargs: Any) -> None:
         self.status_message = status_message
         self.no_status = no_status
+        # ``None`` → inherit ``ctx.obj["requires_db"]`` at invoke time (set in
+        # ``cli/main.py``). Explicit ``False`` for a leaf that opts out locally.
+        self.requires_db = requires_db
         super().__init__(*args, **kwargs)
 
     def _tokens_request_help(self, ctx: click.Context) -> bool:
@@ -114,12 +135,38 @@ class TjCommand(click.Command):
         tokens = list(ctx.args)
         return any(tok in names for tok in tokens)
 
+    def _requires_db(self, ctx: click.Context) -> bool:
+        if self.requires_db is not None:
+            return self.requires_db
+        return bool((ctx.obj or {}).get("requires_db", False))
+
+    def _ensure_db_available(self, ctx: click.Context) -> None:
+        """Raise a clean ``ClickException`` when a DB-requiring leaf runs with
+        ``db is None`` (#727). Real ``--help`` exits during ``make_context``
+        before a leaf ``invoke`` runs; the crash case is a command body that
+        actually executes (e.g. a ``--help`` token consumed as an option value).
+        """
+        if isinstance(self, click.Group):
+            return
+        if not self._requires_db(ctx):
+            return
+        if (ctx.obj or {}).get("db") is not None:
+            return
+        command_path = ctx.command_path or self.name or "this command"
+        obj = ctx.obj or {}
+        if obj.get("_skip_db_for_help"):
+            raise click.ClickException(
+                help_consumed_as_option_value_message(command_path)
+            )
+        raise click.ClickException(db_required_message(command_path))
+
     def invoke(self, ctx: click.Context) -> Any:
         ctx.ensure_object(dict)
         if self._tokens_request_help(ctx):
             # Root/nested group callbacks probe DuckDB before Click renders
             # ``--help`` on a leaf subcommand (#580).
             ctx.obj["_skip_db_for_help"] = True
+        self._ensure_db_available(ctx)
         if not self.status_message:
             return super().invoke(ctx)
         with tj_status(self.status_message, ctx):
@@ -148,4 +195,11 @@ class TjGroup(TjCommand, click.Group):
     group_class = type
 
 
-__all__ = ["TjCommand", "TjGroup", "tj_status", "tj_status_stream"]
+__all__ = [
+    "TjCommand",
+    "TjGroup",
+    "db_required_message",
+    "help_consumed_as_option_value_message",
+    "tj_status",
+    "tj_status_stream",
+]
