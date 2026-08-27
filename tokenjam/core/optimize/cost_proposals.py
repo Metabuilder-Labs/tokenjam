@@ -384,6 +384,7 @@ class CostProposal:
 
 def _downsize_to_proposal(
     finding: Any, config: Any = None, persona: str = "unknown",
+    resend_finding: Any = None,
 ) -> list[CostProposal]:
     """The model-over-sizing card(s).
 
@@ -417,7 +418,7 @@ def _downsize_to_proposal(
     # merging the two would put one number on top of two unrelated derivations.
     # Exactly one window-wide card, never one per agent, so this adds at most a
     # single row to the inbox.
-    proposals = _driver_role_proposals(finding, persona)
+    proposals = _driver_role_proposals(finding, persona, resend_finding=resend_finding)
     if persona == "claude-code":
         # See the docstring above: the tiny-session/per-agent cards never had
         # a fix on this persona's action surface, only a pointer to other
@@ -550,7 +551,9 @@ def _driver_role_advice() -> str:
     )
 
 
-def _driver_role_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
+def _driver_role_proposals(
+    finding: Any, persona: str = "unknown", resend_finding: Any = None,
+) -> list[CostProposal]:
     """The model-ROLE card: a premium model drove undelegated work inline.
 
     One window-wide card, deliberately never one per agent — the standing
@@ -561,6 +564,11 @@ def _driver_role_proposals(finding: Any, persona: str = "unknown") -> list[CostP
     CLAUDE.md rule plus an agent-file `model:` pin, both of which are on the
     Claude Code action surface, so there is no "you can't switch your own
     interactive model" caveat to apply.
+
+    ``resend_finding``, when present, states the reciprocal of resend's own
+    `coverage_note` (#613): the mirror sentence that these sessions also
+    carry a cost on resend's card, read off resend's own fields so the two
+    cards cannot disagree.
     """
     sessions = int(getattr(finding, "driver_sessions", 0) or 0)
     usd = float(getattr(finding, "driver_recoverable_usd", 0.0) or 0.0)
@@ -581,6 +589,19 @@ def _driver_role_proposals(finding: Any, persona: str = "unknown") -> list[CostP
         f"({swap_text or 'a cheaper same-family model'}) would have saved "
         f"${offload:,.2f} of re-reads plus ${tier:,.2f} of tier difference."
     )
+    # Reciprocal of resend's own coverage_note (#613). Read resend's
+    # already-computed session count and dollar figure rather than
+    # recomputing, so the two cards cannot disagree.
+    resend_sessions = int(getattr(resend_finding, "driver_role_sessions", 0) or 0)
+    resend_usd = float(getattr(resend_finding, "cost_driver_role_usd", 0.0) or 0.0)
+    coverage_note = ""
+    if resend_sessions and resend_usd:
+        coverage_note = (
+            f"COVERAGE. These {resend_sessions:,} session(s) also carry "
+            f"${resend_usd:,.2f} of resend's observed cost, analysed there as "
+            f"re-sent context. The two figures price the same sessions and "
+            f"must not be added together."
+        )
     # A FOURTH copy of the offload rule used to live here, abbreviated. The
     # consolidation that gave the three analyzers one record reached the card's
     # advise text and missed its one-paste block, so the user still received a
@@ -601,6 +622,7 @@ def _driver_role_proposals(finding: Any, persona: str = "unknown") -> list[CostP
         title="Premium model in the driver role (route the work, not the thread)",
         target_key={"models": models, "suggestions": substitutes},
         evidence=evidence,
+        coverage_note=coverage_note,
         baseline={
             "driver_sessions": sessions,
             "total_sessions": total_sessions,
@@ -3423,7 +3445,12 @@ def _adapt_report(
     adapters = (
         (
             "downsize",
-            lambda f: _downsize_to_proposal(f, config, persona=persona),
+            # Needs resend's driver-role figures for the reciprocal
+            # `coverage_note` (#613), read here like `resend` already reads
+            # `subagent` below, so neither analyzer depends on the other.
+            lambda f: _downsize_to_proposal(
+                f, config, persona=persona, resend_finding=_pick("resend"),
+            ),
             getattr(report, "downgrade", None),
         ),
         ("cache", lambda f: _cache_to_proposals(f, persona=persona), _pick("cache")),

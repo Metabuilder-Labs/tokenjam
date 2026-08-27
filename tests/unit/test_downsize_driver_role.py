@@ -275,6 +275,52 @@ def test_resend_hands_driver_sessions_to_downsize(db):
     assert any("model-role card" in n for n in resend.notes)
 
 
+def test_the_driver_card_discloses_it_shares_sessions_with_resends_cost(db):
+    # #613: resend's card already discloses this overlap; the mirror sentence
+    # on THIS card was missing, so summing both cards double-counted.
+    _seed_driver_session(db, session_id="deleg", delegate=True)
+    _seed_driver_session(db, session_id="driver")
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-x", model=PREMIUM, provider="anthropic",
+        input_tokens=100, output_tokens=10, cost_usd=0.01,
+        session_id="pad", sub_agent_id=None, start_time=utcnow() - timedelta(days=2),
+    ))
+    since, until = _window()
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["resend", "downsize"],
+    )
+    resend = report.findings["resend"]
+    assert resend.driver_role_sessions == 1, "same fixture as the sibling test above"
+    proposals = cost_proposals_from_report(report, None, window_days=30.0)
+    driver_card = next(
+        p for p in proposals if p.signature == "cost:downsize:driver-role"
+    )
+    # Read off the SAME fields resend's own note reads, so the two cards
+    # cannot state different numbers for sessions one shared predicate
+    # partitioned to this one.
+    assert f"{resend.driver_role_sessions:,}" in driver_card.coverage_note
+    assert f"${resend.cost_driver_role_usd:,.2f}" in driver_card.coverage_note
+    assert "not" in driver_card.coverage_note and "add" in driver_card.coverage_note
+
+
+def test_the_driver_card_has_no_coverage_note_without_a_resend_finding(db):
+    # `resend` can be disabled for a persona/report scope independently of
+    # `downsize`: the reciprocal disclosure must degrade to nothing, not to
+    # a note quoting zeroes, when there is no sibling finding to read.
+    _seed_driver_session(db, session_id="driver")
+    since, until = _window()
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["downsize"],
+    )
+    proposals = cost_proposals_from_report(report, None, window_days=30.0)
+    driver_card = next(
+        p for p in proposals if p.signature == "cost:downsize:driver-role"
+    )
+    assert driver_card.coverage_note == ""
+
+
 def test_the_rollup_counts_a_driver_session_exactly_once(db):
     # End to end. `downsize` claims the driver session; `resend` claims the
     # delegating one. Neither analyzer's signature can dedup against the other
