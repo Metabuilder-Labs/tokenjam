@@ -592,16 +592,35 @@ def _driver_role_proposals(
     # Reciprocal of resend's own coverage_note (#613). Read resend's
     # already-computed session count and dollar figure rather than
     # recomputing, so the two cards cannot disagree.
+    #
+    # resend classifies a session as driver-role from `premium_driver_role`
+    # alone; this card's own `sessions` additionally requires a priced,
+    # contiguous tool-driven stretch (`_driver_session_arithmetic`'s mask and
+    # rate lookups), so `sessions` is always a SUBSET of resend's
+    # `resend_sessions`, never the same population under a different name.
+    # Quoting resend_sessions/resend_usd as if they described exactly THESE
+    # `sessions` overstates the overlap whenever the populations diverge
+    # (resend counts sessions this card's own gates reject); the wording below
+    # only claims what is actually true of the relationship in either case.
     resend_sessions = int(getattr(resend_finding, "driver_role_sessions", 0) or 0)
     resend_usd = float(getattr(resend_finding, "cost_driver_role_usd", 0.0) or 0.0)
     coverage_note = ""
     if resend_sessions and resend_usd:
-        coverage_note = (
-            f"COVERAGE. These {resend_sessions:,} session(s) also carry "
-            f"${resend_usd:,.2f} of resend's observed cost, analysed there as "
-            f"re-sent context. The two figures price the same sessions and "
-            f"must not be added together."
-        )
+        if resend_sessions > sessions:
+            coverage_note = (
+                f"COVERAGE. These {sessions:,} session(s) sit inside resend's "
+                f"broader {resend_sessions:,}-session driver-role class, which "
+                f"also carries ${resend_usd:,.2f} of resend's observed cost, "
+                f"analysed there as re-sent context. The two figures price "
+                f"overlapping populations and must not be added together."
+            )
+        else:
+            coverage_note = (
+                f"COVERAGE. These {resend_sessions:,} session(s) also carry "
+                f"${resend_usd:,.2f} of resend's observed cost, analysed there as "
+                f"re-sent context. The two figures price the same sessions and "
+                f"must not be added together."
+            )
     # A FOURTH copy of the offload rule used to live here, abbreviated. The
     # consolidation that gave the three analyzers one record reached the card's
     # advise text and missed its one-paste block, so the user still received a

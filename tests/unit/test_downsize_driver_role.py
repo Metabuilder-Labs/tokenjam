@@ -304,6 +304,67 @@ def test_the_driver_card_discloses_it_shares_sessions_with_resends_cost(db):
     assert "not" in driver_card.coverage_note and "add" in driver_card.coverage_note
 
 
+def test_the_coverage_note_does_not_overstate_a_divergent_population(db):
+    # Greptile review on #735: resend classifies a session as driver-role from
+    # `premium_driver_role` alone, while this card's own `sessions` additionally
+    # requires a priced, CONTIGUOUS tool-driven stretch
+    # (`tool_driven_stretch_mask`, MIN_TOOL_STRETCH_TURNS=2). A session whose
+    # tool calls are scattered across non-adjacent turns clears
+    # `premium_driver_role`'s DRIVER_TOOL_FANOUT_FLOOR (a plain sum) but never
+    # forms a run of 2, so resend counts it while this card's own gates reject
+    # it, the two populations diverge, and the note must not claim the
+    # broader resend figure describes exactly these sessions.
+    _seed_driver_session(db, session_id="deleg", delegate=True)
+    _seed_driver_session(db, session_id="driver")  # counted by BOTH sides
+    start = utcnow() - timedelta(days=2)
+    for i in range(TURNS):
+        turn_at = start + timedelta(minutes=i * 10)
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", model=PREMIUM, provider="anthropic",
+            input_tokens=MIN_SESSION_CONTEXT_TOKENS,
+            cache_tokens=MIN_SESSION_CONTEXT_TOKENS * i,
+            output_tokens=800, cost_usd=1.0,
+            session_id="scattered", sub_agent_id=None, start_time=turn_at,
+        ))
+        if i % 2 == 0:
+            # 4 tools on every other turn: 3 turns x 4 = 12 >= the
+            # DRIVER_TOOL_FANOUT_FLOOR (10) sum, but no two consecutive turns
+            # both run a tool, so no contiguous stretch ever reaches
+            # MIN_TOOL_STRETCH_TURNS (2). resend counts this session; this
+            # card's own gate does not.
+            for j in range(4):
+                db.insert_span(make_tool_span(
+                    agent_id="claude-code-x", tool_name="Read",
+                    session_id="scattered",
+                    start_time=turn_at + timedelta(seconds=j + 1),
+                ))
+    since, until = _window()
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["resend", "downsize"],
+    )
+    resend = report.findings["resend"]
+    assert resend.driver_role_sessions == 2, "both 'driver' and 'scattered' flag"
+    assert report.downgrade is not None
+    assert report.downgrade.driver_sessions == 1, (
+        "'scattered' has no contiguous tool-driven stretch, so only 'driver' "
+        "clears this card's own gate"
+    )
+    proposals = cost_proposals_from_report(report, None, window_days=30.0)
+    driver_card = next(
+        p for p in proposals if p.signature == "cost:downsize:driver-role"
+    )
+    note = driver_card.coverage_note
+    # The populations diverge (1 vs 2): the note must describe ITS OWN 1
+    # session as sitting inside resend's broader 2-session class, never claim
+    # resend's 2-session figure describes exactly these 1 session(s).
+    assert f"{resend.driver_role_sessions:,}" in note
+    assert f"${resend.cost_driver_role_usd:,.2f}" in note
+    assert "not" in note and "add" in note
+    assert f"These {report.downgrade.driver_sessions:,} session(s)" in note
+    assert f"These {resend.driver_role_sessions:,} session(s)" not in note
+
+
 def test_the_driver_card_has_no_coverage_note_without_a_resend_finding(db):
     # `resend` can be disabled for a persona/report scope independently of
     # `downsize`: the reciprocal disclosure must degrade to nothing, not to
