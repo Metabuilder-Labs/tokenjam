@@ -8,14 +8,17 @@ not insert or dispatch a duplicate alert.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
+from tests.factories import make_llm_span, make_session, make_tool_span
 from tokenjam.core.alerts import AlertEngine, CooldownTracker
 from tokenjam.core.config import (
     AgentConfig,
     AlertChannelConfig,
     AlertsConfig,
+    BudgetConfig,
     SensitiveAction,
     TjConfig,
 )
@@ -23,7 +26,6 @@ from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.models import Alert, AlertFilters, AlertType, Severity
 from tokenjam.utils.ids import new_uuid
 from tokenjam.utils.time_parse import utcnow
-from tests.factories import make_llm_span, make_tool_span
 
 
 def _make_alert(
@@ -123,6 +125,53 @@ def test_cooldown_does_not_suppress_after_a_restart_past_the_window():
     assert channel.send.call_count == 1
 
 
+def test_session_limit_dedup_survives_a_restart_past_the_cooldown_window():
+    config = _make_config(
+        cooldown_seconds=60,
+        agents={"test-agent": AgentConfig(budget=BudgetConfig(session_usd=1.0))},
+    )
+    db = InMemoryBackend()
+    session = make_session(
+        agent_id="test-agent", session_id="session-budget-restart",
+        total_cost_usd=2.0, status="active", ended_at=None,
+    )
+
+    engine1 = AlertEngine(db, config)
+    engine1.dispatcher.channels = []
+    engine1.evaluate_session_progress(session)
+    assert len(db.get_alerts(AlertFilters(type=AlertType.COST_BUDGET_SESSION, limit=10))) == 1
+
+    engine2 = AlertEngine(db, config)
+    channel = MagicMock()
+    engine2.dispatcher.channels = [channel]
+    engine2.evaluate_session_progress(session)
+
+    assert channel.send.call_count == 0
+    assert len(db.get_alerts(AlertFilters(type=AlertType.COST_BUDGET_SESSION, limit=10))) == 1
+
+
+def test_concurrent_session_limit_evaluations_fire_once():
+    config = _make_config(
+        cooldown_seconds=0,
+        agents={"test-agent": AgentConfig(budget=BudgetConfig(session_usd=1.0))},
+    )
+    db = InMemoryBackend()
+    engine = AlertEngine(db, config)
+    channel = MagicMock()
+    engine.dispatcher.channels = [channel]
+    session = make_session(
+        agent_id="test-agent", session_id="concurrent-session",
+        total_cost_usd=2.0, status="active", ended_at=None,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(engine.evaluate_session_progress, [session, session]))
+
+    alerts = db.get_alerts(AlertFilters(type=AlertType.COST_BUDGET_SESSION, limit=10))
+    assert len(alerts) == 1
+    assert channel.send.call_count == 1
+
+
 def test_failure_rate_does_not_refire_for_the_same_session_after_a_restart():
     """A session that already crossed the failure-rate threshold before a
     restart must not fire a second FAILURE_RATE alert after it, even though
@@ -216,8 +265,8 @@ def test_hydrate_keeps_the_newest_firing_regardless_of_row_order():
     ])
 
     assert (
-        newest_first._last_fired[("test-agent", AlertType.SENSITIVE_ACTION.value)]
-        == oldest_first._last_fired[("test-agent", AlertType.SENSITIVE_ACTION.value)]
+        newest_first._last_fired[("test-agent", AlertType.SENSITIVE_ACTION.value, "")]
+        == oldest_first._last_fired[("test-agent", AlertType.SENSITIVE_ACTION.value, "")]
         == now
     )
 

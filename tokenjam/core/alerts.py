@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -67,6 +68,10 @@ _SESSION_SCOPED_ALERT_TYPES = frozenset({
 # degrades to pre-#592 behavior (that key comes back unhydrated) rather than
 # suppressing wrongly.
 _HYDRATION_LIMIT = 10_000
+# Session-scoped limits are level-triggered for the lifetime of a session, so
+# their dedup state must be hydrated beyond the cooldown window. Keep this
+# bounded as a protection against an unexpectedly large alerts table.
+_SESSION_LIMIT_HYDRATION_LIMIT = 100_000
 
 # Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex): a
 # heterogeneous, arg-less, human-driven workload with no stable, repeatable
@@ -257,6 +262,7 @@ class AlertEngine:
         # cascade of near-identical alerts.
         self._failure_rate_fired: set[str] = set()
         self._session_limit_fired: set[tuple[str, str]] = set()
+        self._session_limit_lock = threading.Lock()
         self._hydrate_from_db()
 
     def _hydrate_from_db(self) -> None:
@@ -290,6 +296,19 @@ class AlertEngine:
             for alert in recent:
                 if alert.type in _SESSION_SCOPED_ALERT_TYPES and alert.session_id:
                     self._session_limit_fired.add((alert.session_id, alert.type.value))
+
+            # Session limits are one alert per threshold crossing for the
+            # lifetime of a session, unlike ordinary alerts whose dedup state
+            # expires with the cooldown window. Hydrate these keys separately
+            # so a restart cannot forget an older crossing.
+            for alert_type in _SESSION_SCOPED_ALERT_TYPES:
+                session_alerts = self.db.get_alerts(AlertFilters(
+                    type=alert_type,
+                    limit=_SESSION_LIMIT_HYDRATION_LIMIT,
+                ))
+                for alert in session_alerts:
+                    if alert.session_id and not alert.suppressed:
+                        self._session_limit_fired.add((alert.session_id, alert.type.value))
 
             fired = self.db.get_alerts(
                 AlertFilters(type=AlertType.FAILURE_RATE, limit=_HYDRATION_LIMIT)
@@ -665,18 +684,28 @@ class AlertEngine:
 
     def _fire(self, alert: Alert) -> None:
         """Persist alert to DB and dispatch. Suppressed alerts are persisted but not dispatched."""
-        session_key = (alert.session_id, alert.type.value)
         if alert.type in _SESSION_SCOPED_ALERT_TYPES and alert.session_id:
-            if session_key in self._session_limit_fired:
+            session_key: tuple[str, str] = (alert.session_id, alert.type.value)
+            # The check and first-write marker must be one critical section:
+            # concurrent ingest evaluations must not both observe a new
+            # threshold crossing before either one records it.
+            with self._session_limit_lock:
+                if session_key in self._session_limit_fired:
+                    return
+                if self.cooldown.is_suppressed(alert.agent_id, alert.type, alert.session_id):
+                    alert.suppressed = True
+                    self.db.insert_alert(alert)
+                    return
+                self.db.insert_alert(alert)
+                self._session_limit_fired.add(session_key)
+                self.cooldown.record(alert.agent_id, alert.type, alert.session_id)
+        else:
+            if self.cooldown.is_suppressed(alert.agent_id, alert.type, alert.session_id):
+                alert.suppressed = True
+                self.db.insert_alert(alert)
                 return
-        if self.cooldown.is_suppressed(alert.agent_id, alert.type, alert.session_id):
-            alert.suppressed = True
             self.db.insert_alert(alert)
-            return
-        self.db.insert_alert(alert)
-        if alert.type in _SESSION_SCOPED_ALERT_TYPES and alert.session_id:
-            self._session_limit_fired.add(session_key)
-        self.cooldown.record(alert.agent_id, alert.type, alert.session_id)
+            self.cooldown.record(alert.agent_id, alert.type, alert.session_id)
         self.dispatcher.dispatch(alert)
 
 
