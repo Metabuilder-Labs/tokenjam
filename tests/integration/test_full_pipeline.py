@@ -13,11 +13,10 @@ Uses a module-level TracerProvider with a swappable exporter to avoid OTel's
 from __future__ import annotations
 
 import json
-import threading
+from datetime import timedelta
 from typing import Sequence
 
 import pytest
-from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
@@ -39,6 +38,7 @@ from tokenjam.otel.semconv import GenAIAttributes
 from tokenjam.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
 from tokenjam.utils.time_parse import utcnow
 import tokenjam.sdk.agent as agent_mod
+from tests.factories import make_llm_span
 
 
 
@@ -156,6 +156,7 @@ def full_stack():
 
     stack = _Stack()
     stack.db = db
+    stack.pipeline = pipeline
 
     yield stack
 
@@ -266,6 +267,67 @@ def test_multiple_llm_calls_accumulate_in_session(full_stack):
     spans = _all_spans(full_stack.db)
     llm_spans = [s for s in spans if s.name == GenAIAttributes.SPAN_LLM_CALL]
     assert len(llm_spans) == 3
+
+
+def test_llm_only_session_enforces_session_budget_while_still_active(full_stack):
+    """A stream without invoke_agent still reaches session-scoped alerts."""
+    full_stack.pipeline.process(
+        make_llm_span(
+            agent_id="test-agent",
+            session_id="llm-only-budget",
+            input_tokens=30_000_000,
+            output_tokens=0,
+        )
+    )
+    full_stack.pipeline.process(
+        make_llm_span(
+            agent_id="test-agent",
+            session_id="llm-only-budget",
+            input_tokens=30_000_000,
+            output_tokens=0,
+        )
+    )
+    full_stack.pipeline.process(
+        make_llm_span(
+            agent_id="test-agent",
+            session_id="another-llm-only-budget",
+            input_tokens=30_000_000,
+            output_tokens=0,
+        )
+    )
+
+    rows = full_stack.db.conn.execute(
+        "SELECT type, suppressed FROM alerts ORDER BY fired_at"
+    ).fetchall()
+    assert [(row[0], row[1]) for row in rows] == [
+        ("cost_budget_session", False),
+        ("cost_budget_session", False),
+    ]
+
+
+def test_llm_only_session_enforces_duration_limit_while_still_active(full_stack):
+    """Duration is checked from the running session's observed span bounds."""
+    start = utcnow() - timedelta(seconds=4001)
+    full_stack.pipeline.process(
+        make_llm_span(
+            agent_id="test-agent",
+            session_id="llm-only-duration",
+            start_time=start,
+            cost_usd=0.01,
+        )
+    )
+    full_stack.pipeline.process(
+        make_llm_span(
+            agent_id="test-agent",
+            session_id="llm-only-duration",
+            cost_usd=0.01,
+        )
+    )
+
+    rows = full_stack.db.conn.execute(
+        "SELECT type FROM alerts WHERE session_id = ?", ["llm-only-duration"]
+    ).fetchall()
+    assert [row[0] for row in rows] == ["session_duration"]
 
 
 def test_tool_call_flows_to_db(full_stack):

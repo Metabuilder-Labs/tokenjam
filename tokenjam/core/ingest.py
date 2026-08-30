@@ -333,6 +333,20 @@ class IngestPipeline:
         # 6. Post-ingest hooks (never let hook errors kill the pipeline)
         self._run_hooks(span)
 
+        # CostEngine runs in the post-ingest hooks and may replace the span's
+        # incoming cost, so evaluate active-session limits against the
+        # persisted record after those hooks have completed.
+        if not self._is_session_end(span) and self.alert_engine:
+            try:
+                evaluate_progress = getattr(
+                    self.alert_engine, "evaluate_session_progress", None
+                )
+                if evaluate_progress is not None:
+                    current_session = self.db.get_session(span.session_id) or session
+                    evaluate_progress(current_session)
+            except Exception as exc:
+                logger.warning("AlertEngine progress hook failed: %s", exc)
+
     def _is_duplicate_observation(self, span: NormalizedSpan) -> bool:
         """True when another ingest source already recorded this exact call.
 
