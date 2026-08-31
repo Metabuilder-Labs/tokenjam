@@ -245,6 +245,11 @@ class AlertEngine:
         # threshold re-fired (5/20, 6/20, 7/20 …), turning a few incidents into a
         # cascade of near-identical alerts.
         self._failure_rate_fired: set[str] = set()
+        # Sessions that have already run session-end-gated checks (duration /
+        # session cost budget). Without this, llm.call-only ingest that never
+        # emits a wrapping invoke_agent span would either never fire (#554) or
+        # re-fire on every subsequent span once a threshold is crossed.
+        self._session_end_gated_fired: set[str] = set()
         self._hydrate_from_db()
 
     def _hydrate_from_db(self) -> None:
@@ -282,6 +287,14 @@ class AlertEngine:
             for alert in fired:
                 if alert.session_id:
                     self._failure_rate_fired.add(alert.session_id)
+
+            for alert_type in (AlertType.SESSION_DURATION, AlertType.COST_BUDGET_SESSION):
+                gated = self.db.get_alerts(
+                    AlertFilters(type=alert_type, limit=_HYDRATION_LIMIT)
+                )
+                for alert in gated:
+                    if alert.session_id:
+                        self._session_end_gated_fired.add(alert.session_id)
         except Exception as exc:
             if not handle_if_fatal(exc, what="AlertEngine cooldown/dedup hydration"):
                 logger.warning(
@@ -304,6 +317,34 @@ class AlertEngine:
         """
         self._check_cost_budgets(session)
         self._check_session_duration(session)
+        self._session_end_gated_fired.add(session.session_id)
+
+    def evaluate_session_progress(self, session: SessionRecord) -> None:
+        """Run session-end-gated checks during ongoing ingest (#554).
+
+        A wrapping invoke_agent span with real duration remains the fast path
+        via ``evaluate_session_end()``. This covers llm.call-only streams (raw
+        OTLP exporters, benchmark replayers, manual ``record_llm_call()`` without
+        ``@watch()``) that never emit that span.
+        """
+        if session.session_id in self._session_end_gated_fired:
+            return
+        if not self._session_end_gated_thresholds_exceeded(session):
+            return
+        self.evaluate_session_end(session)
+
+    def _session_end_gated_thresholds_exceeded(self, session: SessionRecord) -> bool:
+        """Cheap pre-check before running session-end-gated rules mid-stream."""
+        if not is_interactive_coding_agent(session.agent_id):
+            duration = session.duration_seconds
+            if duration is not None and duration > _SESSION_DURATION_DEFAULT:
+                return True
+
+        budget = resolve_effective_budget(session.agent_id, self.config)
+        if budget.session_usd is not None and session.total_cost_usd is not None:
+            if session.total_cost_usd > budget.session_usd:
+                return True
+        return False
 
     def fire(
         self,

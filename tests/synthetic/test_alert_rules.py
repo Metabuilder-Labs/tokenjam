@@ -364,6 +364,27 @@ def test_session_duration_does_not_fire_under_threshold():
         assert alert.type != AlertType.SESSION_DURATION
 
 
+def test_evaluate_session_progress_fires_when_duration_exceeded():
+    engine, db = _make_engine()
+    session = make_session(agent_id="test-agent", duration_seconds=4000.0)
+    engine.evaluate_session_progress(session)
+    db.insert_alert.assert_called()
+    alert: Alert = db.insert_alert.call_args[0][0]
+    assert alert.type == AlertType.SESSION_DURATION
+
+
+def test_evaluate_session_progress_skips_when_already_evaluated():
+    engine, db = _make_engine()
+    session = make_session(agent_id="test-agent", duration_seconds=4000.0)
+    engine.evaluate_session_progress(session)
+    engine.evaluate_session_progress(session)
+    session_duration_calls = [
+        c for c in db.insert_alert.call_args_list
+        if c[0][0].type == AlertType.SESSION_DURATION
+    ]
+    assert len(session_duration_calls) == 1
+
+
 # ── Content stripping ──��───────────────────────────────────────────────────
 
 def test_content_stripped_from_external_payload():

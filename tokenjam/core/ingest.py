@@ -329,6 +329,11 @@ class IngestPipeline:
             if session.status != "active":
                 session.status = "active"
             self.db.upsert_session(session)
+            if self.alert_engine:
+                try:
+                    self.alert_engine.evaluate_session_progress(session)
+                except Exception as exc:
+                    logger.warning("AlertEngine session-progress hook failed: %s", exc)
 
         # 6. Post-ingest hooks (never let hook errors kill the pipeline)
         self._run_hooks(span)

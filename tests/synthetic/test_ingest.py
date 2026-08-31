@@ -2,19 +2,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
-from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig, AgentConfig
+from tokenjam.core.alerts import AlertEngine
+from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig, AgentConfig, BudgetConfig, AlertsConfig, AlertChannelConfig
+from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import (
     IngestPipeline,
     SpanRejectedError,
     SpanSanitizer,
     strip_captured_content,
 )
-from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
+from tokenjam.core.models import AlertFilters, AlertType, NormalizedSpan, SessionRecord, SpanStatus
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
+from tokenjam.utils.time_parse import utcnow
 from tests.factories import (
     make_invoke_agent_span,
     make_llm_span,
@@ -552,6 +555,76 @@ class TestSessionLifecycle:
         pipeline.process(make_llm_span(session_id="s1"))
 
         assert db.get_session("s1").status == "active"
+
+
+class TestSessionEndGatedAlertsWithoutInvokeAgent:
+    """#554: session-end-gated alerts must fire on llm.call-only ingest."""
+
+    def _pipeline_with_alerts(
+        self,
+        *,
+        agents: dict | None = None,
+    ) -> tuple[IngestPipeline, InMemoryBackend, AlertEngine]:
+        db = InMemoryBackend()
+        config = TjConfig(
+            version="1",
+            agents=agents or {},
+            alerts=AlertsConfig(
+                cooldown_seconds=0,
+                channels=[AlertChannelConfig(type="stdout")],
+            ),
+        )
+        engine = AlertEngine(db, config)
+        engine.dispatcher.channels = []
+        pipeline = IngestPipeline(
+            db=db,
+            config=config,
+            alert_engine=engine,
+        )
+        return pipeline, db, engine
+
+    def test_session_duration_fires_on_llm_call_only_stream(self):
+        pipeline, db, _engine = self._pipeline_with_alerts()
+        base = utcnow()
+        pipeline.process(make_llm_span(
+            session_id="s1", agent_id="sdk-agent", start_time=base,
+        ))
+        pipeline.process(make_llm_span(
+            session_id="s1",
+            agent_id="sdk-agent",
+            start_time=base + timedelta(seconds=3700),
+        ))
+
+        alerts = db.get_alerts(AlertFilters(limit=100))
+        duration_alerts = [a for a in alerts if a.type == AlertType.SESSION_DURATION]
+        assert len(duration_alerts) == 1
+        assert duration_alerts[0].session_id == "s1"
+
+    def test_session_cost_budget_fires_on_llm_call_only_stream(self):
+        pipeline, db, _engine = self._pipeline_with_alerts(agents={
+            "sdk-agent": AgentConfig(budget=BudgetConfig(session_usd=1.00)),
+        })
+        pipeline.process(make_llm_span(
+            session_id="s1", agent_id="sdk-agent", cost_usd=1.50,
+        ))
+
+        alerts = db.get_alerts(AlertFilters(limit=100))
+        budget_alerts = [a for a in alerts if a.type == AlertType.COST_BUDGET_SESSION]
+        assert len(budget_alerts) == 1
+        assert budget_alerts[0].session_id == "s1"
+
+    def test_session_end_gated_alerts_do_not_repeat_on_every_span(self):
+        pipeline, db, _engine = self._pipeline_with_alerts(agents={
+            "sdk-agent": AgentConfig(budget=BudgetConfig(session_usd=1.00)),
+        })
+        for _ in range(3):
+            pipeline.process(make_llm_span(
+                session_id="s1", agent_id="sdk-agent", cost_usd=0.60,
+            ))
+
+        alerts = db.get_alerts(AlertFilters(limit=100))
+        budget_alerts = [a for a in alerts if a.type == AlertType.COST_BUDGET_SESSION]
+        assert len(budget_alerts) == 1
 
 
 class TestServiceNamespace:
