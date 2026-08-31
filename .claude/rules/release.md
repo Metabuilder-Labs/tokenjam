@@ -81,7 +81,7 @@ and you can validate the same locally with `node -c npm-wrapper/bin/tj.js`.
 
 `.github/workflows/ci.yml` runs on push/PR to `main`:
 - **`lint`** job: Python 3.12 — `ruff check tokenjam/` and `mypy tokenjam/`
-- **`test`** job: Python 3.10/3.11/3.12 matrix — `pytest -n auto tests/unit/ tests/synthetic/ tests/agents/ tests/integration/` (parallelized via `pytest-xdist`; local runs, e.g. from `Makefile` or `CONTRIBUTING.md`, stay serial — no need for `-n auto` outside CI)
+- **`test`** job: Python 3.10/3.11/3.12 matrix — `pytest -n auto --dist loadscope tests/unit/ tests/synthetic/ tests/agents/ tests/integration/` (parallelized via `pytest-xdist`; local runs, e.g. from `Makefile` or `CONTRIBUTING.md`, stay serial — no need for `-n auto` outside CI)
 - **`test-ts`** job: Node 22 — `npm install && npm test` in `sdk-ts/`
 
 All steps are blocking. There is no pre-commit configuration in this repo; `ruff` and `mypy` only run

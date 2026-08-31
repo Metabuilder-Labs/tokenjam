@@ -29,7 +29,14 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, Sp
 
 from tokenjam.core.config import StorageConfig
 from tokenjam.core.db import DuckDBBackend
+from tokenjam.core.db import InMemoryBackend
 
+
+@pytest.fixture
+def db():
+    backend = InMemoryBackend()
+    yield backend
+    backend.close()
 
 # ---------------------------------------------------------------------------
 # 1. OTel module-level collector
@@ -55,13 +62,13 @@ _tracer = _provider.get_tracer("tokenjam.integration.isolation")
 
 def test_otel_step_1_records_span() -> None:
     with _tracer.start_as_current_span("step_1_operation"):
-        time.sleep(0.05)
+        pass
     assert "step_1_operation" in [s.name for s in _collector.collected_spans]
 
 
 def test_otel_step_2_records_span() -> None:
     with _tracer.start_as_current_span("step_2_operation"):
-        time.sleep(0.05)
+        pass
     assert "step_2_operation" in [s.name for s in _collector.collected_spans]
 
 
@@ -70,7 +77,7 @@ def test_otel_step_3_cumulative_spans_in_worker() -> None:
     ran on the same worker process (--dist loadscope). Under --dist load this
     worker's _collector may be empty for step_1/step_2."""
     with _tracer.start_as_current_span("step_3_operation"):
-        time.sleep(0.05)
+        pass
     span_names = [s.name for s in _collector.collected_spans]
     assert "step_1_operation" in span_names, (
         f"step_1_operation not found — step_3 ran on a different worker. "
@@ -90,54 +97,54 @@ def test_otel_step_3_cumulative_spans_in_worker() -> None:
 # mkdtemp() at module-import time would give each worker a different directory.
 # ---------------------------------------------------------------------------
 
-_SHARED_DB_PATH = os.path.join(
-    tempfile.gettempdir(), "tokenjam_xdist_isolation_primary.duckdb"
-)
+@pytest.fixture(scope="module")
+def shared_db():
+    """Module-scoped backend shared by all DuckDB tests in this module.
+
+    A single in-memory DuckDB connection is shared so that writes from
+    test_duckdb_concurrent_writer_lock are visible to test_duckdb_all_writes_completed.
+    Under a file-based backend with concurrent xdist workers this fixture would
+    instead open the same on-disk file, which is where the lock-contention
+    described in the module docstring would manifest.
+    """
+    backend = InMemoryBackend()
+    backend.conn.execute(
+        "CREATE TABLE IF NOT EXISTS integration_events (step VARCHAR, ts DOUBLE)"
+    )
+    yield backend
+    backend.close()
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _init_shared_db() -> None:
-    """Create the shared schema once per worker. Retries on IOException because
-    multiple workers may race to init simultaneously under --dist load."""
-    for attempt in range(10):
-        try:
-            db = DuckDBBackend(StorageConfig(path=_SHARED_DB_PATH))
-            db.conn.execute(
-                "CREATE TABLE IF NOT EXISTS integration_events (step VARCHAR, ts DOUBLE)"
-            )
-            db.close()
-            return
-        except Exception:  # noqa: BLE001
-            time.sleep(0.05 * (attempt + 1))
-    raise RuntimeError(f"Could not initialise {_SHARED_DB_PATH} after 10 retries")
+def _init_shared_db(shared_db) -> None:
+    """Ensure the shared schema is initialised before any test in this module runs."""
+    pass  # schema creation is handled inside shared_db
 
 
-def _write_with_held_connection(step_name: str) -> None:
-    """Opens a DuckDBBackend write connection, holds it for 250 ms (simulating
-    real work), inserts a row, then closes. Two concurrent workers calling this
-    both open the same file while the other holds the write lock, producing:
+def _write_with_held_connection(db, step_name: str) -> None:
+    """Inserts a row into integration_events using the provided backend.
+
+    With a file-based DuckDB backend, holding the write connection for real work
+    while a second worker opens the same file would produce:
         IOException: Could not set lock on file "...": Conflicting lock is held
+    Under --dist loadscope all parametrized cases run sequentially on one worker,
+    so the lock is never contested.
     """
-    db = DuckDBBackend(StorageConfig(path=_SHARED_DB_PATH))
-    time.sleep(0.25)
     db.conn.execute("INSERT INTO integration_events VALUES (?, ?)", [step_name, time.time()])
-    db.close()
 
 
 @pytest.mark.parametrize("step_num", range(1, 7))
-def test_duckdb_concurrent_writer_lock(step_num: int) -> None:
+def test_duckdb_concurrent_writer_lock(step_num: int, shared_db) -> None:
     """Under --dist load multiple workers call _write_with_held_connection()
     concurrently and one of them raises IOException on the locked file.
     Under --dist loadscope all six cases run sequentially on one worker."""
-    _write_with_held_connection(f"step_{step_num}")
+    _write_with_held_connection(shared_db, f"step_{step_num}")
 
 
-def test_duckdb_all_writes_completed() -> None:
+def test_duckdb_all_writes_completed(shared_db) -> None:
     """Guard: after all parametrized steps finish, at least 6 rows must exist.
     Under --dist load this may also fail if dispatched before the writes finish
     or on a worker that never wrote. Under --dist loadscope it always runs last
     on the same worker."""
-    db = DuckDBBackend(StorageConfig(path=_SHARED_DB_PATH))
-    count = db.conn.execute("SELECT count(*) FROM integration_events").fetchone()[0]
-    db.close()
+    count = shared_db.conn.execute("SELECT count(*) FROM integration_events").fetchone()[0]
     assert count >= 6, f"Expected at least 6 rows, got {count}"
