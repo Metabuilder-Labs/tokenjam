@@ -364,6 +364,7 @@ class IngestPipeline:
         )
         if evaluate_progress is None or span.session_id is None:
             return
+        session_id = span.session_id
         try:
             if fallback_session is not None:
                 # CostEngine updates the stored session by the same delta that
@@ -377,7 +378,7 @@ class IngestPipeline:
                 )
                 evaluate_progress(fallback_session)
             else:
-                current_session = self.db.get_session(span.session_id)
+                current_session = self.db.get_session(session_id)
                 if current_session is not None:
                     evaluate_progress(current_session)
         except Exception as exc:

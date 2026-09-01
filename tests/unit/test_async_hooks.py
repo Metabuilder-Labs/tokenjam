@@ -64,6 +64,15 @@ def test_async_hooks_execution():
     alert_mock = MagicMock()
     schema_mock = MagicMock()
 
+    started = threading.Event()
+    release = threading.Event()
+
+    def block_span_evaluation(_span):
+        started.set()
+        assert release.wait(timeout=5)
+
+    alert_mock.evaluate.side_effect = block_span_evaluation
+
     pipeline = IngestPipeline(
         db=db,
         config=config,
@@ -72,29 +81,32 @@ def test_async_hooks_execution():
         schema_validator=schema_mock,
     )
 
-    span = make_tool_span()
-    pipeline.process(span)
+    try:
+        span = make_tool_span()
+        pipeline.process(span)
 
-    # CostEngine is synchronous and must be called immediately
-    cost_mock.process_span.assert_called_once_with(span)
+        # CostEngine is synchronous and must be called immediately.
+        cost_mock.process_span.assert_called_once_with(span)
 
-    # AlertEngine and SchemaValidator should NOT be called yet (deferred)
-    alert_mock.evaluate.assert_not_called()
-    schema_mock.validate.assert_not_called()
+        # Hold the worker inside the first advisory hook. This makes the
+        # deferred-vs-inline assertion deterministic instead of racing the
+        # worker after process() returns.
+        assert started.wait(timeout=5)
+        alert_mock.evaluate.assert_called_once_with(span)
+        schema_mock.validate.assert_not_called()
 
-    # Queue and thread should be initialized
-    assert pipeline._hook_queue is not None
-    assert pipeline._hook_thread is not None
+        # Queue and thread should be initialized.
+        assert pipeline._hook_queue is not None
+        assert pipeline._hook_thread is not None
 
-    # Wait for background queue to process (flushing)
-    pipeline.flush()
+        release.set()
+        pipeline.flush()
 
-    # After flush, the deferred hooks must have executed
-    alert_mock.evaluate.assert_called_once_with(span)
-    schema_mock.validate.assert_called_once_with(span)
-
-    # Cleanup pipeline thread
-    pipeline.close()
+        # After flush, the deferred hooks must have executed.
+        schema_mock.validate.assert_called_once_with(span)
+    finally:
+        release.set()
+        pipeline.close()
     assert pipeline._hook_thread is None
 
 
