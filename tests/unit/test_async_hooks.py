@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import threading
+from unittest.mock import MagicMock, patch
+
+import duckdb
 
 from tokenjam.core.config import _parse, TjConfig
 from tokenjam.core.db import InMemoryBackend
@@ -93,6 +96,53 @@ def test_async_hooks_execution():
     # Cleanup pipeline thread
     pipeline.close()
     assert pipeline._hook_thread is None
+
+
+def test_async_session_progress_is_deferred_with_advisory_hooks():
+    config = TjConfig(version="1")
+    config.alerts.async_hooks = True
+
+    db = InMemoryBackend()
+    alert_mock = MagicMock()
+    started = threading.Event()
+    release = threading.Event()
+
+    def block_span_evaluation(_span):
+        started.set()
+        assert release.wait(timeout=5)
+
+    alert_mock.evaluate.side_effect = block_span_evaluation
+    pipeline = IngestPipeline(db=db, config=config, alert_engine=alert_mock)
+
+    try:
+        span = make_tool_span(session_id="async-session")
+        pipeline.process(span)
+
+        # Hold the advisory worker after per-span evaluation. Session progress
+        # must not run on the ingest thread before the worker is released.
+        assert started.wait(timeout=5)
+        alert_mock.evaluate_session_progress.assert_not_called()
+
+        release.set()
+        pipeline.flush()
+        alert_mock.evaluate_session_progress.assert_called_once()
+    finally:
+        release.set()
+        pipeline.close()
+
+
+def test_session_progress_fatal_storage_error_uses_fatal_handler():
+    config = TjConfig(version="1")
+    db = InMemoryBackend()
+    alert_mock = MagicMock()
+    pipeline = IngestPipeline(db=db, config=config, alert_engine=alert_mock)
+    db.get_session = MagicMock(side_effect=duckdb.FatalException("FATAL Error: broken"))
+
+    with patch("tokenjam.core.db.handle_if_fatal", return_value=True) as handler:
+        pipeline._evaluate_session_progress(make_tool_span(session_id="fatal-session"))
+
+    handler.assert_called_once()
+    alert_mock.evaluate_session_progress.assert_not_called()
 
 
 def test_async_hooks_error_tolerance(caplog):

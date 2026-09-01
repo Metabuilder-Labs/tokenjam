@@ -69,9 +69,10 @@ _SESSION_SCOPED_ALERT_TYPES = frozenset({
 # suppressing wrongly.
 _HYDRATION_LIMIT = 10_000
 # Session-scoped limits are level-triggered for the lifetime of a session, so
-# their dedup state must be hydrated beyond the cooldown window. Keep this
-# bounded as a protection against an unexpectedly large alerts table.
-_SESSION_LIMIT_HYDRATION_LIMIT = 100_000
+# their dedup state must be hydrated beyond the cooldown window. Use the same
+# bounded page as the ordinary hydration queries; the targeted per-type scans
+# avoid making every AlertEngine construction pay for an oversized table scan.
+_SESSION_LIMIT_HYDRATION_LIMIT = _HYDRATION_LIMIT
 
 # Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex): a
 # heterogeneous, arg-less, human-driven workload with no stable, repeatable
@@ -293,9 +294,6 @@ class AlertEngine:
             since = utcnow() - timedelta(seconds=self.cooldown.cooldown_seconds)
             recent = self.db.get_alerts(AlertFilters(since=since, limit=_HYDRATION_LIMIT))
             self.cooldown.hydrate(recent)
-            for alert in recent:
-                if alert.type in _SESSION_SCOPED_ALERT_TYPES and alert.session_id:
-                    self._session_limit_fired.add((alert.session_id, alert.type.value))
 
             # Session limits are one alert per threshold crossing for the
             # lifetime of a session, unlike ordinary alerts whose dedup state
@@ -348,8 +346,24 @@ class AlertEngine:
         alerts unreachable. Daily budgets stay end-triggered because they
         are not session-scoped.
         """
+        if not self._session_limit_thresholds_exceeded(session):
+            return
         self._check_session_budget(session)
         self._check_session_duration(session)
+
+    def _session_limit_thresholds_exceeded(self, session: SessionRecord) -> bool:
+        """Cheap pre-check before constructing active-session alert objects."""
+        if not is_interactive_coding_agent(session.agent_id):
+            duration = session.duration_seconds
+            if duration is not None and duration > _SESSION_DURATION_DEFAULT:
+                return True
+
+        budget = resolve_effective_budget(session.agent_id, self.config)
+        return (
+            budget.session_usd is not None
+            and session.total_cost_usd is not None
+            and session.total_cost_usd > budget.session_usd
+        )
 
     def fire(
         self,
@@ -673,7 +687,7 @@ class AlertEngine:
                 detail={
                     "duration_seconds": duration,
                     "threshold_seconds": _SESSION_DURATION_DEFAULT,
-                    "message": f"Session lasted {duration:.0f}s, exceeding {_SESSION_DURATION_DEFAULT}s threshold",
+                    "message": f"Session has run {duration:.0f}s, exceeding {_SESSION_DURATION_DEFAULT}s threshold",
                 },
                 agent_id=session.agent_id,
                 session_id=session.session_id,

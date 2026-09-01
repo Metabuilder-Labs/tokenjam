@@ -199,10 +199,9 @@ class IngestPipeline:
     Central ingest hub. All spans — whether from the Python SDK's TjSpanExporter
     or from the REST API — flow through here.
 
-    Post-ingest hooks run synchronously after the span is written to DB:
-      1. CostEngine.process_span() — calculates and records cost
-      2. AlertEngine.evaluate() — checks all alert rules
-      3. SchemaValidator.validate() — checks tool outputs against schema
+    Cost processing runs synchronously after the span is written to DB. Alert
+    and schema hooks run inline by default, or on the advisory worker when
+    ``config.alerts.async_hooks`` is enabled.
     """
 
     def __init__(
@@ -331,20 +330,60 @@ class IngestPipeline:
             self.db.upsert_session(session)
 
         # 6. Post-ingest hooks (never let hook errors kill the pipeline)
+        cost_before_hooks = span.cost_usd
         self._run_hooks(span)
 
         # CostEngine runs in the post-ingest hooks and may replace the span's
         # incoming cost, so evaluate active-session limits against the
         # persisted record after those hooks have completed.
-        if not self._is_session_end(span) and self.alert_engine:
-            try:
-                evaluate_progress = getattr(
-                    self.alert_engine, "evaluate_session_progress", None
+        if not self.config.alerts.async_hooks:
+            self._evaluate_session_progress(
+                span,
+                fallback_session=session,
+                span_cost_before_hooks=cost_before_hooks,
+            )
+
+    def _evaluate_session_progress(
+        self,
+        span: NormalizedSpan,
+        *,
+        fallback_session: SessionRecord | None = None,
+        span_cost_before_hooks: float | None = None,
+    ) -> None:
+        """Evaluate active-session limits after synchronous cost processing.
+
+        In async-hook mode this is called by the advisory worker, keeping all
+        alert work off the ingest thread. In sync mode the already-built
+        session is a fallback whose cost total is adjusted for any CostEngine
+        repricing; async mode reads the persisted session after cost processing.
+        """
+        if self._is_session_end(span) or self.alert_engine is None:
+            return
+        evaluate_progress = getattr(
+            self.alert_engine, "evaluate_session_progress", None
+        )
+        if evaluate_progress is None or span.session_id is None:
+            return
+        try:
+            if fallback_session is not None:
+                # CostEngine updates the stored session by the same delta that
+                # it applies to the span. Mirror that delta on the in-memory
+                # session so the common synchronous path needs no extra DB
+                # round trip per span.
+                before = span_cost_before_hooks or 0.0
+                after = span.cost_usd or 0.0
+                fallback_session.total_cost_usd = (
+                    (fallback_session.total_cost_usd or 0.0) + after - before
                 )
-                if evaluate_progress is not None:
-                    current_session = self.db.get_session(span.session_id) or session
+                evaluate_progress(fallback_session)
+            else:
+                current_session = self.db.get_session(span.session_id)
+                if current_session is not None:
                     evaluate_progress(current_session)
-            except Exception as exc:
+        except Exception as exc:
+            from tokenjam.core.db import handle_if_fatal
+
+            if not handle_if_fatal(exc, what="AlertEngine progress hook"):
                 logger.warning("AlertEngine progress hook failed: %s", exc)
 
     def _is_duplicate_observation(self, span: NormalizedSpan) -> bool:
@@ -703,6 +742,7 @@ class IngestPipeline:
 
             try:
                 self._run_deferred_hooks(span)
+                self._evaluate_session_progress(span)
             finally:
                 q.task_done()
 
