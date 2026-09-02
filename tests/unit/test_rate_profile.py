@@ -143,7 +143,10 @@ def test_single_model_input_rate_and_ratio_match_its_own_rates():
     since, until = _window()
     profile = blended_rate_profile(db.conn, since=since, until=until)
 
-    rates = get_rates("anthropic", "claude-sonnet-5")
+    # `at=start` because the profile priced the span at ITS timestamp. Reading
+    # today's rate here compares two different instants and breaks the day any
+    # dated row takes effect (claude-sonnet-5's did, on 2026-09-01).
+    rates = get_rates("anthropic", "claude-sonnet-5", at=start)
     assert profile is not None
     assert profile.input_rate_per_token == rates.input_per_mtok / 1_000_000
     assert abs(

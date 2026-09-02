@@ -1,7 +1,7 @@
 """Unit tests for the subagent right-sizing analyzer."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -17,8 +17,13 @@ from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span
 
 
-def _ctx(db: InMemoryBackend, window_cost_usd: float, config=None):
-    now = utcnow()
+def _ctx(db: InMemoryBackend, window_cost_usd: float, config=None, at=None):
+    # `at` pins the window (and so the instant every span in it prices at) for
+    # a test whose expected dollars are written out longhand. Pricing has a
+    # time axis, so a test that hardcodes an arithmetic breakdown and leaves
+    # the instant floating asserts a different rate row once a dated rate takes
+    # effect. Defaults to now for tests that do not care.
+    now = at or utcnow()
     since = now - timedelta(days=1)
     until = now + timedelta(minutes=5)
     summary = WindowSummary(
@@ -143,7 +148,9 @@ def test_over_powered_subagent_carries_quantified_estimate():
     tokens), so it can compete for a ranked slot (#101)."""
     db = InMemoryBackend()
     try:
-        ctx, now = _ctx(db, window_cost_usd=1.0)
+        # Pinned before claude-sonnet-5's 2026-09-01 standard-pricing row, so
+        # the longhand breakdown below stays the arithmetic actually performed.
+        ctx, now = _ctx(db, window_cost_usd=1.0, at=datetime(2026, 8, 1, tzinfo=timezone.utc))
         # Opus subagent, big context, tiny output -> over_powered (+over_provisioned).
         db.insert_span(make_llm_span(
             model="claude-opus-4-8", provider="anthropic",
