@@ -33,6 +33,20 @@
 # past and future figures silently incomparable. Fields a dated row omits are
 # inherited from the rate it supersedes.
 #
+# ADDING A DATED ROW SCHEDULES A TEST FAILURE unless you also pin the tests that
+# price this model. A test that hardcodes an expected dollar figure and lets the
+# pricing instant default to "now" asserts the pre-boundary row until the date
+# lands, then asserts the post-boundary row against a pre-boundary number. The
+# row above did exactly that on 2026-09-01 and turned main red with no commit to
+# blame, days after the last green run. So when you add a dated row:
+#   * give `tests/unit/test_cost.py`'s priced-models table a case on EACH side
+#     of the boundary, each passing `at=` explicitly;
+#   * check any test that prices this model for a floating instant — the rule is
+#     that the expected rate and the span must be read at the SAME instant, and
+#     both pinned, or both "now" so they move together.
+# `test_only_the_labelled_call_site_prices_at_now` enforces this for analyzers,
+# but it scans `core/optimize/` only and cannot see the test suite.
+#
 # ─── Variants (the variant axis) ───────────────────────────────────────────
 # A variant is a different way of buying the SAME model id. Two forms:
 #   * per-model, when the rate is specific to that model — a `[[...rates]]` row

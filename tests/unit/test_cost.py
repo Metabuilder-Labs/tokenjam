@@ -519,23 +519,39 @@ def test_default_cache_rates_are_nonzero_and_ratio_derived():
 
 # ─── Anthropic-priced models: byte-identical cost before/after this change ─
 
+# Every case pins the pricing instant. `calculate_cost`'s `at=None` default
+# means "now", which is documented as being for LIVE callers only — a test is
+# a backward-looking caller, and one that leans on the default silently starts
+# asserting a different row the day a dated rate takes effect. That is not
+# hypothetical: claude-sonnet-5's introductory rate expired 2026-09-01 and
+# turned this table red on a date nobody was watching. Pin the instant and a
+# row's arithmetic stays true forever; add a case to cover a new row.
+_BEFORE_SONNET_5_STANDARD = datetime(2026, 8, 1, tzinfo=timezone.utc)
+_AFTER_SONNET_5_STANDARD = datetime(2026, 9, 2, tzinfo=timezone.utc)
+
 
 @pytest.mark.parametrize(
-    "model,input_tokens,output_tokens,expected",
+    "model,input_tokens,output_tokens,at,expected",
     [
-        ("claude-haiku-4-5", 1_000_000, 1_000_000, 6.0),      # 1.00 + 5.00
-        ("claude-sonnet-4-6", 1_000_000, 1_000_000, 18.0),    # 3.00 + 15.00
-        ("claude-sonnet-5", 1_000_000, 1_000_000, 12.0),      # 2.00 + 10.00
-        ("claude-opus-4-8", 1_000_000, 1_000_000, 30.0),      # 5.00 + 25.00
-        ("claude-fable-5", 1_000_000, 1_000_000, 60.0),       # 10.00 + 50.00
-        ("claude-opus-4", 1_000_000, 1_000_000, 90.0),        # 15.00 + 75.00
+        ("claude-haiku-4-5", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 6.0),    # 1.00 + 5.00
+        ("claude-sonnet-4-6", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 18.0),  # 3.00 + 15.00
+        # Both sides of claude-sonnet-5's 2026-09-01 boundary, so each row is
+        # guarded on its own terms rather than whichever one today happens to
+        # select.
+        ("claude-sonnet-5", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 12.0),    # 2.00 + 10.00
+        ("claude-sonnet-5", 1_000_000, 1_000_000, _AFTER_SONNET_5_STANDARD, 18.0),     # 3.00 + 15.00
+        ("claude-opus-4-8", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 30.0),    # 5.00 + 25.00
+        ("claude-fable-5", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 60.0),     # 10.00 + 50.00
+        ("claude-opus-4", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 90.0),      # 15.00 + 75.00
     ],
 )
-def test_anthropic_priced_models_cost_unchanged(model, input_tokens, output_tokens, expected):
+def test_anthropic_priced_models_cost_unchanged(model, input_tokens, output_tokens, at, expected):
     """Every model already carrying a real models.toml row must cost exactly
     what it did before this fix — the fallback change only touches models
     with NO entry in the table."""
-    assert calculate_cost("anthropic", model, input_tokens, output_tokens) == pytest.approx(expected)
+    assert calculate_cost(
+        "anthropic", model, input_tokens, output_tokens, at=at
+    ) == pytest.approx(expected)
 
 
 # ─── A cache class omitted from a models.toml row is distinguishable from a
