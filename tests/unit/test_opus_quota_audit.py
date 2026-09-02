@@ -66,14 +66,16 @@ def _new_session(db, session_id, *, plan_tier="max_5x") -> None:
 
 
 def _turn(db, session_id, seq, *, model="claude-opus-4-7", input_tokens=500,
-          output_tokens=100, cache_tokens=0, cost_usd=1.0, tool_calls=0,
+          output_tokens=100, cache_tokens=0, cache_write_tokens=0, cost_usd=1.0,
+          tool_calls=0,
           delegate=False) -> None:
     """Append one assistant turn (an LLM span + optional tool/Task spans) to a
     session, at minute ``seq`` — so turns order deterministically by start_time
     and their tool spans attribute to the enclosing turn (nearest-preceding)."""
     span = make_llm_span(
         model=model, input_tokens=input_tokens, output_tokens=output_tokens,
-        cache_tokens=cache_tokens, cost_usd=cost_usd, session_id=session_id,
+        cache_tokens=cache_tokens, cache_write_tokens=cache_write_tokens,
+        cost_usd=cost_usd, session_id=session_id,
     )
     span.start_time = BASE + timedelta(minutes=seq)
     db.insert_span(span)
@@ -141,6 +143,109 @@ def test_multi_model_session_example_labels_dominant_model(db):
     assert ex.alt_model == "claude-haiku-4-5"
     # Both premium models still appear in the aggregate suggestions.
     assert set(audit.suggestions) == {"claude-fable-5", "claude-opus-4-8"}
+
+
+def test_api_counterfactual_prices_cache_write_on_alt_side(db):
+    """The audit's implied-dollar counterfactual must price cache writes on
+    the alternative model, not silently drop them during session aggregation."""
+    from tokenjam.core.cost import calculate_cost
+
+    cache_read_tokens = 10_000
+    cache_write_tokens = 50_000
+    actual_cost = calculate_cost(
+        "anthropic", "claude-opus-4-7", 500, 100,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        at=BASE,
+    )
+    _new_session(db, "cache-write")
+    _turn(
+        db, "cache-write", 0, input_tokens=500, output_tokens=100,
+        cache_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+        cost_usd=actual_cost,
+    )
+
+    audit = _audit(db)
+
+    expected_alt_cost = calculate_cost(
+        "anthropic", "claude-haiku-4-5", 500, 100,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        at=BASE,
+    )
+    broken_alt_cost = calculate_cost(
+        "anthropic", "claude-haiku-4-5", 500, 100,
+        cache_read_tokens=cache_read_tokens,
+        at=BASE,
+    )
+    assert audit.candidate_sessions == 1
+    assert audit.actual_cost_usd == pytest.approx(actual_cost, abs=1e-6)
+    assert expected_alt_cost > broken_alt_cost
+    assert audit.alternative_cost_usd == pytest.approx(expected_alt_cost, abs=1e-6)
+
+
+def test_api_counterfactual_prices_mixed_models_per_model(db):
+    """Mixed premium models must keep each model's tokens on its own downgrade.
+
+    Fable and Opus have different alternatives and cache-write rates, so pricing
+    their combined tokens at the dominant model's alternative understates the
+    counterfactual.
+    """
+    from tokenjam.core.cost import calculate_cost
+
+    fable_input, fable_output, fable_cache_write = 400, 80, 40_000
+    opus_input, opus_output, opus_cache_write = 1_500, 250, 40_000
+    actual_cost = sum((
+        calculate_cost(
+            "anthropic", "claude-fable-5", fable_input, fable_output,
+            cache_write_tokens=fable_cache_write, at=BASE,
+        ),
+        calculate_cost(
+            "anthropic", "claude-opus-4-8", opus_input, opus_output,
+            cache_write_tokens=opus_cache_write, at=BASE,
+        ),
+    ))
+    _new_session(db, "mixed-cache-write")
+    _turn(
+        db, "mixed-cache-write", 0, model="claude-fable-5",
+        input_tokens=fable_input, output_tokens=fable_output,
+        cache_write_tokens=fable_cache_write,
+        cost_usd=calculate_cost(
+            "anthropic", "claude-fable-5", fable_input, fable_output,
+            cache_write_tokens=fable_cache_write, at=BASE,
+        ),
+    )
+    _turn(
+        db, "mixed-cache-write", 1, model="claude-opus-4-8",
+        input_tokens=opus_input, output_tokens=opus_output,
+        cache_write_tokens=opus_cache_write,
+        cost_usd=calculate_cost(
+            "anthropic", "claude-opus-4-8", opus_input, opus_output,
+            cache_write_tokens=opus_cache_write, at=BASE,
+        ),
+    )
+
+    audit = _audit(db)
+
+    expected_alt_cost = sum((
+        calculate_cost(
+            "anthropic", "claude-sonnet-4-6", fable_input, fable_output,
+            cache_write_tokens=fable_cache_write, at=BASE,
+        ),
+        calculate_cost(
+            "anthropic", "claude-haiku-4-5", opus_input, opus_output,
+            cache_write_tokens=opus_cache_write, at=BASE,
+        ),
+    ))
+    broken_alt_cost = calculate_cost(
+        "anthropic", "claude-haiku-4-5",
+        fable_input + opus_input, fable_output + opus_output,
+        cache_write_tokens=fable_cache_write + opus_cache_write, at=BASE,
+    )
+    assert audit.candidate_sessions == 1
+    assert audit.actual_cost_usd == pytest.approx(actual_cost, abs=1e-6)
+    assert expected_alt_cost > broken_alt_cost
+    assert audit.alternative_cost_usd == pytest.approx(expected_alt_cost, abs=1e-6)
 
 
 # ── (b) per-span attribution: mixed-model session ───────────────────────────

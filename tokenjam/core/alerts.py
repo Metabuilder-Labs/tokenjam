@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -51,6 +52,10 @@ _FAILURE_RATE_WINDOW = 20
 _FAILURE_RATE_THRESHOLD = 0.20
 _FAILURE_RATE_CHECK_INTERVAL = 5
 _SESSION_DURATION_DEFAULT = 3600  # seconds
+_SESSION_SCOPED_ALERT_TYPES = frozenset({
+    AlertType.COST_BUDGET_SESSION,
+    AlertType.SESSION_DURATION,
+})
 
 # Row cap for the startup queries that rebuild CooldownTracker/_failure_rate_fired
 # from the alerts table (#592). Generous rather than exact: missing a stale row
@@ -63,6 +68,11 @@ _SESSION_DURATION_DEFAULT = 3600  # seconds
 # degrades to pre-#592 behavior (that key comes back unhydrated) rather than
 # suppressing wrongly.
 _HYDRATION_LIMIT = 10_000
+# Session-scoped limits are level-triggered for the lifetime of a session, so
+# their dedup state must be hydrated beyond the cooldown window. Use the same
+# bounded page as the ordinary hydration queries; the targeted per-type scans
+# avoid making every AlertEngine construction pay for an oversized table scan.
+_SESSION_LIMIT_HYDRATION_LIMIT = _HYDRATION_LIMIT
 
 # Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex): a
 # heterogeneous, arg-less, human-driven workload with no stable, repeatable
@@ -198,17 +208,23 @@ class CooldownTracker:
 
     def __init__(self, cooldown_seconds: int = 60) -> None:
         self.cooldown_seconds = cooldown_seconds
-        self._last_fired: dict[tuple[str, str], datetime] = {}
+        self._last_fired: dict[tuple[str, str, str], datetime] = {}
 
-    def is_suppressed(self, agent_id: str | None, alert_type: AlertType) -> bool:
-        key = (agent_id or "", alert_type.value)
+    def is_suppressed(
+        self, agent_id: str | None, alert_type: AlertType, session_id: str | None = None,
+    ) -> bool:
+        scope = session_id if alert_type in _SESSION_SCOPED_ALERT_TYPES else ""
+        key = (agent_id or "", alert_type.value, scope or "")
         last = self._last_fired.get(key)
         if last is None:
             return False
         return (utcnow() - last).total_seconds() < self.cooldown_seconds
 
-    def record(self, agent_id: str | None, alert_type: AlertType) -> None:
-        key = (agent_id or "", alert_type.value)
+    def record(
+        self, agent_id: str | None, alert_type: AlertType, session_id: str | None = None,
+    ) -> None:
+        scope = session_id if alert_type in _SESSION_SCOPED_ALERT_TYPES else ""
+        key = (agent_id or "", alert_type.value, scope or "")
         self._last_fired[key] = utcnow()
 
     def hydrate(self, alerts: list[Alert]) -> None:
@@ -221,7 +237,8 @@ class CooldownTracker:
         for alert in alerts:
             if alert.suppressed:
                 continue
-            key = (alert.agent_id or "", alert.type.value)
+            scope = alert.session_id if alert.type in _SESSION_SCOPED_ALERT_TYPES else ""
+            key = (alert.agent_id or "", alert.type.value, scope or "")
             existing = self._last_fired.get(key)
             if existing is None or alert.fired_at > existing:
                 self._last_fired[key] = alert.fired_at
@@ -245,6 +262,8 @@ class AlertEngine:
         # threshold re-fired (5/20, 6/20, 7/20 …), turning a few incidents into a
         # cascade of near-identical alerts.
         self._failure_rate_fired: set[str] = set()
+        self._session_limit_fired: set[tuple[str, str]] = set()
+        self._session_limit_lock = threading.Lock()
         self._hydrate_from_db()
 
     def _hydrate_from_db(self) -> None:
@@ -276,6 +295,19 @@ class AlertEngine:
             recent = self.db.get_alerts(AlertFilters(since=since, limit=_HYDRATION_LIMIT))
             self.cooldown.hydrate(recent)
 
+            # Session limits are one alert per threshold crossing for the
+            # lifetime of a session, unlike ordinary alerts whose dedup state
+            # expires with the cooldown window. Hydrate these keys separately
+            # so a restart cannot forget an older crossing.
+            for alert_type in _SESSION_SCOPED_ALERT_TYPES:
+                session_alerts = self.db.get_alerts(AlertFilters(
+                    type=alert_type,
+                    limit=_SESSION_LIMIT_HYDRATION_LIMIT,
+                ))
+                for alert in session_alerts:
+                    if alert.session_id and not alert.suppressed:
+                        self._session_limit_fired.add((alert.session_id, alert.type.value))
+
             fired = self.db.get_alerts(
                 AlertFilters(type=AlertType.FAILURE_RATE, limit=_HYDRATION_LIMIT)
             )
@@ -304,6 +336,34 @@ class AlertEngine:
         """
         self._check_cost_budgets(session)
         self._check_session_duration(session)
+
+    def evaluate_session_progress(self, session: SessionRecord) -> None:
+        """Evaluate limits for sessions that do not emit an end marker.
+
+        OTLP and transcript-based SDK integrations may emit only individual
+        ``gen_ai.llm.call`` spans. Those sessions remain active, so waiting
+        for ``evaluate_session_end`` would make session cost and duration
+        alerts unreachable. Daily budgets stay end-triggered because they
+        are not session-scoped.
+        """
+        if not self._session_limit_thresholds_exceeded(session):
+            return
+        self._check_session_budget(session)
+        self._check_session_duration(session)
+
+    def _session_limit_thresholds_exceeded(self, session: SessionRecord) -> bool:
+        """Cheap pre-check before constructing active-session alert objects."""
+        if not is_interactive_coding_agent(session.agent_id):
+            duration = session.duration_seconds
+            if duration is not None and duration > _SESSION_DURATION_DEFAULT:
+                return True
+
+        budget = resolve_effective_budget(session.agent_id, self.config)
+        return (
+            budget.session_usd is not None
+            and session.total_cost_usd is not None
+            and session.total_cost_usd > budget.session_usd
+        )
 
     def fire(
         self,
@@ -517,7 +577,17 @@ class AlertEngine:
         """
         budget = resolve_effective_budget(session.agent_id, self.config)
 
-        # Session budget (per-agent, both kinds; backward-compat only).
+        self._check_session_budget(session)
+
+        kind = classify_agent_kind(session.agent_id)
+        if kind.is_coding and kind.group:
+            self._check_coding_group_daily_budget(session, kind.group)
+        else:
+            self._check_agent_daily_budget(session, budget)
+
+    def _check_session_budget(self, session: SessionRecord) -> None:
+        """Check the per-session cost threshold for an active or ended session."""
+        budget = resolve_effective_budget(session.agent_id, self.config)
         if budget.session_usd is not None and session.total_cost_usd is not None:
             if session.total_cost_usd > budget.session_usd:
                 alert = Alert(
@@ -535,12 +605,6 @@ class AlertEngine:
                     session_id=session.session_id,
                 )
                 self._fire(alert)
-
-        kind = classify_agent_kind(session.agent_id)
-        if kind.is_coding and kind.group:
-            self._check_coding_group_daily_budget(session, kind.group)
-        else:
-            self._check_agent_daily_budget(session, budget)
 
     def _check_coding_group_daily_budget(self, session: SessionRecord, group_id: str) -> None:
         """Daily cap for a coding-tool GROUP: compares the SUM of today's
@@ -623,7 +687,7 @@ class AlertEngine:
                 detail={
                     "duration_seconds": duration,
                     "threshold_seconds": _SESSION_DURATION_DEFAULT,
-                    "message": f"Session lasted {duration:.0f}s, exceeding {_SESSION_DURATION_DEFAULT}s threshold",
+                    "message": f"Session has run {duration:.0f}s, exceeding {_SESSION_DURATION_DEFAULT}s threshold",
                 },
                 agent_id=session.agent_id,
                 session_id=session.session_id,
@@ -634,12 +698,28 @@ class AlertEngine:
 
     def _fire(self, alert: Alert) -> None:
         """Persist alert to DB and dispatch. Suppressed alerts are persisted but not dispatched."""
-        if self.cooldown.is_suppressed(alert.agent_id, alert.type):
-            alert.suppressed = True
+        if alert.type in _SESSION_SCOPED_ALERT_TYPES and alert.session_id:
+            session_key: tuple[str, str] = (alert.session_id, alert.type.value)
+            # The check and first-write marker must be one critical section:
+            # concurrent ingest evaluations must not both observe a new
+            # threshold crossing before either one records it.
+            with self._session_limit_lock:
+                if session_key in self._session_limit_fired:
+                    return
+                if self.cooldown.is_suppressed(alert.agent_id, alert.type, alert.session_id):
+                    alert.suppressed = True
+                    self.db.insert_alert(alert)
+                    return
+                self.db.insert_alert(alert)
+                self._session_limit_fired.add(session_key)
+                self.cooldown.record(alert.agent_id, alert.type, alert.session_id)
+        else:
+            if self.cooldown.is_suppressed(alert.agent_id, alert.type, alert.session_id):
+                alert.suppressed = True
+                self.db.insert_alert(alert)
+                return
             self.db.insert_alert(alert)
-            return
-        self.db.insert_alert(alert)
-        self.cooldown.record(alert.agent_id, alert.type)
+            self.cooldown.record(alert.agent_id, alert.type, alert.session_id)
         self.dispatcher.dispatch(alert)
 
 

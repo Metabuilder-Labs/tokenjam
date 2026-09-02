@@ -220,7 +220,7 @@ _lookup_downgrade = lookup_downgrade
 
 def _alt_unit_cost(provider: str, original_model: str, alt_model: str,
                    input_tokens: int, output_tokens: int, cache_tokens: int,
-                   cache_write_tokens: int = 0, *,
+                   cache_write_tokens: int, *,
                    at: datetime) -> float | None:
     """Cost of the given token mix priced at ``alt_model``, or ``None`` when the
     alternative has no pricing data at ``at``.
@@ -233,10 +233,9 @@ def _alt_unit_cost(provider: str, original_model: str, alt_model: str,
     cache-write from the alternative side while the actual side (the
     ``cost_usd`` column) already includes it; that asymmetry inflated every
     savings figure derived from this function by the full cache-write cost of
-    the candidate. ``cache_write_tokens`` defaults to 0 for the one call site
-    (the per-turn quota-audit counterfactual) whose upstream aggregation does
-    not carry a cache-write figure at all — that is unchanged behaviour, not a
-    new omission.
+    the candidate. Both callers provide cache-write tokens from
+    their respective aggregates so the alternative side cannot silently omit a
+    billed token class.
 
     ``at`` is the instant the ORIGINAL traffic ran, and is required. A
     counterfactual priced at a different date than the traffic it replaces
@@ -998,25 +997,38 @@ def _segment_counts(
     )
 
 
+class _ModelCostAgg:
+    """Per-model token/cost aggregate for a mixed-model counterfactual."""
+
+    __slots__ = ("new_input", "output", "reread", "cache_write", "cost",
+                 "first_turn_at")
+
+    def __init__(self) -> None:
+        self.new_input = 0
+        self.output = 0
+        self.reread = 0
+        self.cache_write = 0
+        self.cost = 0.0
+        self.first_turn_at: datetime | None = None
+
+
 class _SessionAgg:
     """Per-session aggregate of the flagged cheap-segment PREMIUM turns, for the
     spot-check example list (largest-quota first)."""
 
     __slots__ = ("session_id", "quota_by_model", "quota", "new_input",
-                 "output", "reread", "tool_calls", "cost", "first_turn_at")
+                 "output", "reread", "tool_calls", "cost", "pricing_by_model")
 
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
-        # Earliest flagged turn in this session — the instant the counterfactual
-        # below is priced at. Carried on the aggregate because the aggregate is
-        # what gets priced: without it the dollar figure would fall back to
-        # today's rate for traffic that ran weeks ago.
-        self.first_turn_at: datetime | None = None
         # (provider, model) -> flagged premium quota, so the example reports the
         # model that actually carried the most misallocated quota in this session
         # rather than freezing on whichever premium turn happened to appear first
         # (a mixed-model session could otherwise mislabel the routing suggestion).
         self.quota_by_model: dict[tuple[str | None, str], float] = {}
+        # Keep token classes separated by original model. A mixed-model session
+        # cannot be priced by applying one model's downgrade to every turn.
+        self.pricing_by_model: dict[tuple[str | None, str], _ModelCostAgg] = {}
         self.quota = 0.0
         self.new_input = 0
         self.output = 0
@@ -1121,11 +1133,20 @@ def audit_opus_quota(
                 agg.reread += t.reread_tokens
                 agg.tool_calls += t.tool_fanout
                 agg.cost += t.cost_usd
-                if t.start_time is not None and (
-                    agg.first_turn_at is None or t.start_time < agg.first_turn_at
-                ):
-                    agg.first_turn_at = t.start_time
                 key = (t.provider, t.model)
+                pricing_agg = agg.pricing_by_model.setdefault(
+                    key, _ModelCostAgg(),
+                )
+                pricing_agg.new_input += t.new_input_tokens
+                pricing_agg.output += t.output_tokens
+                pricing_agg.reread += t.reread_tokens
+                pricing_agg.cache_write += t.cache_write_tokens
+                pricing_agg.cost += t.cost_usd
+                if t.start_time is not None and (
+                    pricing_agg.first_turn_at is None
+                    or t.start_time < pricing_agg.first_turn_at
+                ):
+                    pricing_agg.first_turn_at = t.start_time
                 agg.quota_by_model[key] = (
                     agg.quota_by_model.get(key, 0.0) + t.quota_weighted_tokens
                 )
@@ -1139,26 +1160,27 @@ def audit_opus_quota(
         if session_flagged:
             audit.candidate_sessions += 1
 
-    # Secondary API-only implied-dollar counterfactual, aggregated over the
-    # flagged premium turns and priced at each session's dominant premium model's
-    # cheaper alternative (never the headline). Deliberately never folded into
-    # `analyze_model_downgrade`'s `DowngradeFinding.past_overspend_usd`
-    # (the `tj optimize` downsize card) — see the comment on that assignment
-    # for why the two stay separate.
+    # Secondary API-only implied-dollar counterfactual, priced per original
+    # premium model at that model's cheaper alternative (never the headline).
+    # Deliberately never folded into `analyze_model_downgrade`'s
+    # `DowngradeFinding.past_overspend_usd` (the `tj optimize` downsize card) —
+    # see the comment on that assignment for why the two stay separate.
     for agg in aggs.values():
-        provider, model = agg.dominant_model()
-        alt = lookup_downgrade(provider, model) if provider else None
-        if not alt:
-            continue
-        # ``alt`` is only set when ``provider`` was truthy above.
-        assert provider is not None
-        alt_unit = _alt_unit_cost(
-            provider, model, alt, agg.new_input, agg.output, agg.reread,
-            at=span_instant(agg.first_turn_at, window_start=since),
-        )
-        if alt_unit is not None:
-            actual_cost += agg.cost
-            alt_cost += alt_unit
+        for (provider, model), pricing_agg in agg.pricing_by_model.items():
+            alt = lookup_downgrade(provider, model) if provider else None
+            if not alt:
+                continue
+            # ``alt`` is only set when ``provider`` was truthy above.
+            assert provider is not None
+            alt_unit = _alt_unit_cost(
+                provider, model, alt,
+                pricing_agg.new_input, pricing_agg.output, pricing_agg.reread,
+                cache_write_tokens=pricing_agg.cache_write,
+                at=span_instant(pricing_agg.first_turn_at, window_start=since),
+            )
+            if alt_unit is not None:
+                actual_cost += pricing_agg.cost
+                alt_cost += alt_unit
 
     audit.opus_tokens = int(round(premium_quota))
     audit.candidate_tokens = int(round(misallocated_quota))

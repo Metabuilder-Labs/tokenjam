@@ -1,15 +1,13 @@
 """Synthetic tests for alert rules — uses span factories + mock StorageBackend."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import timedelta
 from unittest.mock import MagicMock
 
 from tokenjam.core.alerts import (
-    AlertDispatcher,
     AlertEngine,
     FileChannel,
     StdoutChannel,
-    WebhookChannel,
     _alert_to_dict,
     _strip_sensitive,
     SENSITIVE_DETAIL_KEYS,
@@ -218,6 +216,36 @@ def test_cost_budget_session_does_not_fire_under_budget():
     session = make_session(agent_id="test-agent", total_cost_usd=1.00)
     engine.evaluate_session_end(session)
     db.insert_alert.assert_not_called()
+
+
+def test_cost_budget_session_fires_during_session_progress():
+    config = _make_config(agents={
+        "test-agent": AgentConfig(budget=BudgetConfig(session_usd=1.00)),
+    })
+    engine, db = _make_engine(config)
+    session = make_session(
+        agent_id="test-agent", total_cost_usd=1.50, status="active", ended_at=None
+    )
+    engine.evaluate_session_progress(session)
+    db.insert_alert.assert_called_once()
+    assert db.insert_alert.call_args[0][0].type == AlertType.COST_BUDGET_SESSION
+
+
+def test_session_duration_fires_during_session_progress():
+    config = _make_config(agents={
+        "test-agent": AgentConfig(budget=BudgetConfig(session_usd=5.00)),
+    })
+    engine, db = _make_engine(config)
+    now = utcnow()
+    session = make_session(
+        agent_id="test-agent",
+        started_at=now - timedelta(seconds=4000),
+        ended_at=now,
+        status="active",
+    )
+    engine.evaluate_session_progress(session)
+    db.insert_alert.assert_called_once()
+    assert db.insert_alert.call_args[0][0].type == AlertType.SESSION_DURATION
 
 
 def test_cost_budget_daily_fires_when_exceeded():
