@@ -970,8 +970,13 @@ def test_single_timestamp_corpus_floors_the_window_to_one_day(tmp_path):
     assert cluster.past_overspend_tokens == cluster.occurrences * 1_500
 
 
-#: The instant a fake rate bucket is priced at. Inside the current rate era for
-#: every model these tests use, so the blend is that model's plain rate.
+#: The instant a fake rate bucket is priced at, and the instant every assertion
+#: about the resulting blend must read its expected rate at. It used to be
+#: described as "the current rate era", which stopped being true when
+#: claude-sonnet-5's introductory rate expired on 2026-09-01: the blend priced
+#: at this fixed instant while the assertions read `get_rates()` at "now", and
+#: the two silently diverged. A fixed instant on both sides is the point — do
+#: not reach for the live rate here.
 _RATE_BUCKET_AT = datetime(2026, 7, 1, tzinfo=timezone.utc)
 
 
@@ -1017,7 +1022,9 @@ def test_blended_rate_profile_names_the_models_it_derived_from():
     conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000)])
     profile = blended_rate_profile(conn, session_ids={"s1", "s2"})
 
-    rates = get_rates("anthropic", "claude-sonnet-5")
+    # `at=_RATE_BUCKET_AT` — the instant the fake rate rows carry, and so the
+    # one the profile priced at. See the note on the constant.
+    rates = get_rates("anthropic", "claude-sonnet-5", at=_RATE_BUCKET_AT)
     assert profile.input_rate_per_token == pytest.approx(rates.input_per_mtok / 1_000_000)
     assert profile.cache_read_ratio == pytest.approx(
         rates.cache_read_per_mtok / rates.input_per_mtok
@@ -1055,7 +1062,9 @@ def test_past_overspend_usd_derived_when_conn_has_priced_spans(tmp_path):
     finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False, conn=conn)
 
     cluster = finding.clusters[0]
-    expected_rate = get_rates("anthropic", "claude-sonnet-5").input_per_mtok / 1_000_000
+    expected_rate = get_rates(
+        "anthropic", "claude-sonnet-5", at=_RATE_BUCKET_AT
+    ).input_per_mtok / 1_000_000
     assert cluster.past_overspend_usd == round(cluster.past_overspend_tokens * expected_rate, 6)
     assert cluster.past_overspend_basis
     assert finding.past_overspend_usd == pytest.approx(cluster.past_overspend_usd)
