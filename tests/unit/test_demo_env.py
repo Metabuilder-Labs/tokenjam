@@ -55,6 +55,16 @@ def test_demo_env_trace_count_matches_injected():
     assert len(env.db.get_traces(TraceFilters())) == 2
 
 
+def test_demo_env_trace_count_not_capped_by_default_query_limit():
+    from tokenjam.demo.env import DemoEnvironment
+    from tokenjam.core.models import TraceFilters
+    env = DemoEnvironment()
+    n = TraceFilters().limit + 5
+    for _ in range(n):
+        env.process(make_llm_span(agent_id="test-agent", trace_id=new_trace_id()))
+    assert env.trace_count() == n
+
+
 def test_demo_result_fields():
     from tokenjam.demo.env import DemoEnvironment, DemoResult
     env = DemoEnvironment()

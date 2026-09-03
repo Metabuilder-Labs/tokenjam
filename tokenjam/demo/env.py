@@ -99,7 +99,7 @@ class DemoEnvironment:
 
     def trace_count(self) -> int:
         from tokenjam.core.models import TraceFilters
-        return len(self.db.get_traces(TraceFilters()))
+        return self.db.count_traces(TraceFilters())
 
     def build_result(self, agent_id: str) -> DemoResult:
         alerts = self.get_alerts()
