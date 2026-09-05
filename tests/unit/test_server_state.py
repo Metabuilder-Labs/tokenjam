@@ -11,6 +11,8 @@ shape so a regression back to substring matching is caught for real.
 """
 from __future__ import annotations
 
+import pytest
+
 from tokenjam.core.server_state import _looks_like_serve
 
 
@@ -54,3 +56,75 @@ class TestDoesNotMatchUnrelatedProcesses:
         # "tj" must be a bare token (or a path basename), not a substring
         # of some unrelated word.
         assert _looks_like_serve("/usr/bin/notjserve --serve") is False
+
+
+class TestUnavailableProcessIdentity:
+    @pytest.mark.parametrize("error", [FileNotFoundError, PermissionError, OSError])
+    def test_unavailable_ps_does_not_identify_a_serve_process(self, monkeypatch, error):
+        from unittest.mock import Mock
+
+        from tokenjam.core import server_state
+
+        monkeypatch.setattr(server_state.Path, "exists", lambda path: False)
+        monkeypatch.setattr(server_state.subprocess, "run", Mock(side_effect=error))
+
+        assert server_state.is_serve_process(42424242) is False
+
+    def test_stop_does_not_signal_a_live_pid_without_identity(self, tmp_path, monkeypatch):
+        import json
+        from unittest.mock import Mock
+
+        from tokenjam.cli import cmd_stop
+        from tokenjam.core import server_state
+
+        state_path = tmp_path / ".local/share/tj/server.state"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(json.dumps({"pid": 42424242, "port": 7391, "config_path": None}))
+        monkeypatch.setattr(server_state.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(server_state.Path, "exists", lambda path: False)
+        monkeypatch.setattr(server_state.subprocess, "run", Mock(side_effect=FileNotFoundError))
+        monkeypatch.setattr(cmd_stop, "_DISCOVERY_MAX_MISSES", 1)
+        monkeypatch.setattr(cmd_stop, "_DISCOVERY_RETRY_S", 0)
+        probes = []
+
+        def no_termination(pid, sig):
+            probes.append((pid, sig))
+            assert sig == 0, "An unverified PID must never receive a termination signal"
+
+        monkeypatch.setattr(server_state.os, "kill", no_termination)
+
+        assert server_state.find_own_serve_pid() is None
+        assert cmd_stop.stop_tj_serve(quiet=True) == (False, [])
+        assert probes and all(pid == 42424242 and sig == 0 for pid, sig in probes)
+
+    @pytest.mark.parametrize("command, expected", [
+        ("/usr/local/bin/tj --config /tmp/config.toml serve", True),
+        ("/usr/bin/python worker.py", False),
+        ("", False),
+    ])
+    def test_ps_fallback_requires_matching_identity(self, monkeypatch, command, expected):
+        from subprocess import CompletedProcess
+        from unittest.mock import Mock
+
+        from tokenjam.core import server_state
+
+        monkeypatch.setattr(server_state.Path, "exists", lambda path: False)
+        probe = Mock(return_value=CompletedProcess([], 0, stdout=command))
+        monkeypatch.setattr(server_state.subprocess, "run", probe)
+        assert server_state.is_serve_process(42424242) is expected
+        probe.assert_called_once_with(
+            ["ps", "-ww", "-p", "42424242", "-o", "command="],
+            capture_output=True, text=True,
+        )
+
+    def test_readable_proc_identity_does_not_require_ps(self, monkeypatch):
+        from unittest.mock import Mock
+
+        from tokenjam.core import server_state
+
+        monkeypatch.setattr(server_state.Path, "exists", lambda path: True)
+        monkeypatch.setattr(server_state.Path, "read_bytes", lambda path: b"tj\0serve\0")
+        probe = Mock(side_effect=AssertionError("ps should not be needed"))
+        monkeypatch.setattr(server_state.subprocess, "run", probe)
+        assert server_state.is_serve_process(42424242) is True
+        probe.assert_not_called()

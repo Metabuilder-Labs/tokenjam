@@ -439,6 +439,10 @@ Metrics: `http://127.0.0.1:7391/metrics`
 
 Stop the background daemon or `tj serve` process.
 
+PID-file discovery requires a matching command line from `/proc` or `ps`. If
+neither can establish the process identity, TokenJam leaves that PID alone;
+a live PID by itself is not proof that it still belongs to the daemon.
+
 ```bash
 tj stop
 ```
