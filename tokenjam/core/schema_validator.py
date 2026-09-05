@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import jsonschema
-from genson import SchemaBuilder
 
 from tokenjam.core.models import SchemaValidationResult, AlertType, Severity
 from tokenjam.otel.semconv import GenAIAttributes
@@ -29,11 +28,10 @@ class SchemaValidator:
     Only runs when ALL of these are true:
     1. span.name == "gen_ai.tool.call"
     2. span has gen_ai.tool.output in its attributes (capture.tool_outputs = true)
-    3. The agent has an output_schema configured, OR an inferred schema exists in baseline
+    3. The agent has an output_schema configured
 
     If output_schema is a file path in config, load the JSON Schema from that file.
-    If no schema is declared, use inferred schema from drift baseline.
-    If neither exists yet, silently skip.
+    If no schema is declared, silently skip.
     """
 
     def __init__(self, db: StorageBackend, alert_engine: AlertEngine, config: TjConfig):
@@ -90,7 +88,7 @@ class SchemaValidator:
     def _get_schema(self, agent_id: str | None) -> dict | None:
         """
         Return the JSON Schema for this agent, or None if unavailable.
-        Priority: 1) declared schema file in config, 2) inferred schema in baseline.
+        Priority: 1) declared schema file in config.
         Caches loaded schemas in-memory.
         """
         if agent_id is None:
@@ -106,12 +104,6 @@ class SchemaValidator:
             if schema is not None:
                 self._schema_cache[agent_id] = schema
                 return schema
-
-        # 2. Fall back to inferred schema from drift baseline
-        baseline = self.db.get_baseline(agent_id)
-        if baseline and baseline.output_schema_inferred:
-            self._schema_cache[agent_id] = baseline.output_schema_inferred
-            return baseline.output_schema_inferred
 
         return None
 
@@ -136,21 +128,3 @@ class SchemaValidator:
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Failed to load schema file %s: %s", path, exc)
             return None
-
-    def infer_schema_from_outputs(self, tool_outputs: list[Any]) -> dict | None:
-        """
-        Use genson to infer a JSON Schema from a list of tool outputs.
-        Returns None if the list is empty.
-        """
-        if not tool_outputs:
-            return None
-
-        builder = SchemaBuilder()
-        for output in tool_outputs:
-            if isinstance(output, str):
-                try:
-                    output = json.loads(output)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            builder.add_object(output)
-        return builder.to_schema()

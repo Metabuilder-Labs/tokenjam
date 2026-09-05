@@ -62,16 +62,25 @@ def _is_ephemeral_runner() -> bool:
     return is_uv_cache or "/pipx/.cache/" in exe
 
 
-def _package_uninstall_hint() -> str:
+def _package_uninstall_hint(manager: str | None = None) -> str:
     """Return the right uninstall command for how the user installed.
 
     pipx and `uv tool` are both isolated, canonical install paths (per
     README and docs/installation.md); otherwise fall back to `pip uninstall`
-    for venv / pip installs.
+    for venv / pip installs. When ``manager`` is supplied, it overrides
+    current-process detection so environment-wide install discovery can use the
+    same command mapping even when `tj` is running from an ephemeral runner.
     """
-    if _installed_via_pipx():
+    if manager is None:
+        if _installed_via_pipx():
+            manager = "pipx"
+        elif _installed_via_uv_tool():
+            manager = "uv-tool"
+        else:
+            manager = "pip"
+    if manager == "pipx":
         return "pipx uninstall tokenjam"
-    if _installed_via_uv_tool():
+    if manager == "uv-tool":
         return "uv tool uninstall tokenjam"
     return "pip uninstall tokenjam"
 
@@ -255,13 +264,13 @@ def _find_persistent_install() -> list[PersistentInstall]:
         installs.append(PersistentInstall(
             manager="pipx", auto=True,
             argv=["pipx", "uninstall", "tokenjam"],
-            display="pipx uninstall tokenjam",
+            display=_package_uninstall_hint("pipx"),
         ))
     if _uv_tool_has_tokenjam():
         installs.append(PersistentInstall(
             manager="uv-tool", auto=True,
             argv=["uv", "tool", "uninstall", "tokenjam"],
-            display="uv tool uninstall tokenjam",
+            display=_package_uninstall_hint("uv-tool"),
         ))
     # The realpath resolution in `_pip_tj_on_path` is what fixes the double-count:
     # a pipx / uv shim now resolves into its managed venv and is excluded there,
@@ -273,7 +282,7 @@ def _find_persistent_install() -> list[PersistentInstall]:
     if _pip_tj_on_path():
         installs.append(PersistentInstall(
             manager="pip", auto=False, argv=None,
-            display="pip uninstall tokenjam",
+            display=_package_uninstall_hint("pip"),
         ))
     return installs
 

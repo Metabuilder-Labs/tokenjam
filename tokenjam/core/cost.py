@@ -275,12 +275,11 @@ class CostEngine:
         # This used to be a boolean skip: pre-priced spans got no session update
         # at all, on the reasoning that ingest had already handled them. But we
         # then OVERWRITE `spans.cost_usd` with tj's own figure below, so the
-        # session kept the upstream number while the span row carried ours, and
-        # `SUM(spans.cost_usd)` — which `recompute_session_totals_from_spans`
-        # documents as the source of truth — permanently disagreed with
-        # `sessions.total_cost_usd`. Incrementing by the DELTA instead makes the
-        # session follow the span row under every combination (unpriced,
-        # pre-priced, or re-priced) with no special case and no extra read.
+        # session kept the upstream number while the span row carried ours.
+        # Incrementing by the DELTA keeps the live session total aligned with
+        # the post-hook span cost under every combination (unpriced, pre-priced,
+        # or re-priced) with no special case and no extra read. Repair and late
+        # attribution paths recompute from canonical logical observations.
         prior_cost = span.cost_usd or 0.0
 
         cost = calculate_cost(
@@ -316,10 +315,11 @@ class CostEngine:
             return
         update(span.span_id, cost, span.pricing_source)
 
-        # Move the session total by exactly what this span's stored cost moved,
-        # so `sessions.total_cost_usd` tracks `SUM(spans.cost_usd)` for the
-        # session. A zero delta (we agreed with the incoming figure, or the span
-        # is being reprocessed with the same rates) writes nothing.
+        # Move the session total by exactly what this span's stored cost moved.
+        # A zero delta (we agreed with the incoming figure, or the span is being
+        # reprocessed with the same rates) writes nothing. Repair and late
+        # attribution paths use canonical logical observations instead of a raw
+        # span sum.
         delta = cost - prior_cost
         if span.session_id and delta:
             self.db.increment_session_cost(span.session_id, delta)

@@ -38,7 +38,7 @@ from tokenjam.otel.semconv import GenAIAttributes
 from tokenjam.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
 from tokenjam.utils.time_parse import utcnow
 import tokenjam.sdk.agent as agent_mod
-from tests.factories import make_llm_span
+from tests.factories import make_invoke_agent_span, make_llm_span
 
 
 
@@ -387,6 +387,97 @@ def test_conversation_id_propagated_through_pipeline(full_stack):
     spans = _all_spans(full_stack.db)
     conv_spans = [s for s in spans if s.conversation_id == "my-conv-42"]
     assert len(conv_spans) >= 1
+
+
+def test_real_pipeline_leaves_shared_trace_cost_unattributed(full_stack):
+    """A shared trace must not charge trace-only cost to its first marker."""
+    trace_id = "real-shared-trace"
+    full_stack.pipeline.process(make_invoke_agent_span(session_id="w1", trace_id=trace_id))
+    full_stack.pipeline.process(make_invoke_agent_span(session_id="w2", trace_id=trace_id))
+
+    cost_span = make_llm_span(trace_id=trace_id, input_tokens=123, output_tokens=45)
+    cost_span.session_id = None
+    cost_span.conversation_id = None
+    full_stack.pipeline.process(cost_span)
+
+    stored = full_stack.db.get_trace_spans(trace_id)
+    cost_rows = [s for s in stored if s.name == GenAIAttributes.SPAN_LLM_CALL]
+    assert len(cost_rows) == 1
+    assert cost_rows[0].session_id is None
+    assert full_stack.db.get_session("w1").input_tokens == 0
+    assert full_stack.db.get_session("w2").input_tokens == 0
+
+
+def test_real_pipeline_uses_parent_for_shared_trace_cost(full_stack):
+    """A stored parent identifies a child despite another trace marker."""
+    trace_id = "real-parent-trace"
+    first = make_invoke_agent_span(session_id="w2", trace_id=trace_id)
+    full_stack.pipeline.process(first)
+    parent = make_invoke_agent_span(session_id="w1", trace_id=trace_id)
+    full_stack.pipeline.process(parent)
+
+    cost_span = make_llm_span(trace_id=trace_id, input_tokens=20, output_tokens=5)
+    cost_span.session_id = None
+    cost_span.conversation_id = None
+    cost_span.parent_span_id = parent.span_id
+    full_stack.pipeline.process(cost_span)
+
+    stored = full_stack.db.get_trace_spans(trace_id)
+    cost_row = next(s for s in stored if s.name == GenAIAttributes.SPAN_LLM_CALL)
+    assert cost_row.session_id == "w1"
+    assert full_stack.db.get_session("w1").input_tokens == 20
+    assert full_stack.db.get_session("w2").input_tokens == 0
+
+
+def test_real_pipeline_reparents_reverse_arrival_and_reconciles_totals(full_stack):
+    """A late marker moves provisional cost and removes its empty session."""
+    trace_id = "real-reverse-trace"
+    cost_span = make_llm_span(trace_id=trace_id, input_tokens=77, output_tokens=11)
+    cost_span.session_id = None
+    cost_span.conversation_id = None
+    full_stack.pipeline.process(cost_span)
+    provisional = full_stack.db.get_trace_spans(trace_id)[0]
+    provisional_session_id = provisional.session_id
+    assert provisional_session_id is not None
+    expected_cost = provisional.cost_usd
+
+    full_stack.pipeline.process(make_invoke_agent_span(
+        session_id="late-marker", trace_id=trace_id,
+    ))
+
+    stored = full_stack.db.get_trace_spans(trace_id)
+    assert {s.session_id for s in stored} == {"late-marker"}
+    assert full_stack.db.get_session(provisional_session_id) is None
+    session = full_stack.db.get_session("late-marker")
+    assert session is not None
+    assert session.input_tokens == 77
+    assert session.output_tokens == 11
+    assert session.total_cost_usd == expected_cost
+
+
+def test_real_pipeline_reconciliation_rolls_back_on_refresh_failure(full_stack, monkeypatch):
+    """A failed aggregate refresh must not leave attribution partially moved."""
+    trace_id = "real-reconcile-rollback"
+    cost_span = make_llm_span(trace_id=trace_id, input_tokens=77, output_tokens=11)
+    cost_span.session_id = None
+    cost_span.conversation_id = None
+    full_stack.pipeline.process(cost_span)
+    provisional = full_stack.db.get_trace_spans(trace_id)[0]
+    provisional_session_id = provisional.session_id
+    assert provisional_session_id is not None
+
+    def fail_refresh(_session_ids):
+        raise RuntimeError("refresh failed")
+
+    monkeypatch.setattr(full_stack.db, "recompute_session_totals_from_spans", fail_refresh)
+    with pytest.raises(RuntimeError, match="refresh failed"):
+        full_stack.pipeline.process(make_invoke_agent_span(
+            session_id="rollback-marker", trace_id=trace_id,
+        ))
+
+    stored = full_stack.db.get_trace_spans(trace_id)
+    cost_row = next(s for s in stored if s.name == GenAIAttributes.SPAN_LLM_CALL)
+    assert cost_row.session_id == provisional_session_id
 
 
 # ── Mock agent scenario integration ──────────────────────────────────────

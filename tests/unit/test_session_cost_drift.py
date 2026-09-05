@@ -109,6 +109,31 @@ def test_recompute_clears_the_drift_it_reports(backend):
     assert session_cost_drift(backend.conn)[0] == 0
 
 
+def test_recompute_uses_one_cross_source_observation_but_keeps_same_source_calls(
+    backend,
+):
+    """Repair canonicalizes duplicates without collapsing real repeats."""
+    _session(backend, "cross-source", 0.0)
+    _span(backend, "live-call", "cross-source", 3.0)
+    duplicate = make_llm_span(
+        session_id="cross-source",
+        cost_usd=9.0,
+        extra_attributes={"source": "backfill.claude_code"},
+    )
+    duplicate.span_id = "backfill-call"
+    backend.insert_span(duplicate)
+
+    _session(backend, "same-source", 0.0)
+    _span(backend, "repeat-a", "same-source", 2.0)
+    _span(backend, "repeat-b", "same-source", 2.0)
+
+    backend.recompute_session_totals_from_spans(["cross-source", "same-source"])
+
+    assert backend.get_session("cross-source").total_cost_usd == pytest.approx(3.0)
+    assert backend.get_session("same-source").total_cost_usd == pytest.approx(4.0)
+    assert session_cost_drift(backend.conn)[0] == 0
+
+
 def test_doctor_reports_drift_and_offers_the_repair(backend):
     from tokenjam.cli.cmd_doctor import _check_cost_integrity
 

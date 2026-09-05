@@ -229,6 +229,11 @@ class TjAttributes:
     """tj-specific span attributes (non-standard extensions)."""
     COST_USD         = "tokenjam.cost_usd"
     SESSION_ID       = "session.id"
+    # Internal write-time provenance for session resolution. It is not supplied
+    # by callers and is used to re-parent provisional/trace-derived spans when
+    # a late session marker arrives without treating an ambiguous trace as one
+    # session.
+    SESSION_ATTRIBUTION = "tokenjam.session_attribution"
     ALERT_TYPE       = "tokenjam.alert.type"
     ALERT_SEVERITY   = "tokenjam.alert.severity"
 

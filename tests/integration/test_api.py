@@ -32,6 +32,57 @@ from tests.factories import (
 INGEST_SECRET = "test-secret-token"
 
 
+async def test_session_readers_share_canonical_totals(client, db):
+    session = make_session(
+        agent_id="reader-agent",
+        session_id="reader-session",
+        input_tokens=11,
+        output_tokens=22,
+        cache_tokens=33,
+        cache_write_tokens=44,
+        total_cost_usd=1.25,
+        status="completed",
+    )
+    db.upsert_session(session)
+
+    listed = (await client.get("/api/v1/sessions", params={"agent_id": "reader-agent"})).json()
+    detail = (await client.get("/api/v1/sessions/reader-session")).json()
+    status = (await client.get("/api/v1/status", params={"agent_id": "reader-agent"})).json()
+
+    list_row = listed["sessions"][0]
+    detail_row = detail["session"]
+    archive_row = status["archived"][0]
+    for row in (list_row, detail_row, archive_row):
+        assert row["total_cost_usd"] == pytest.approx(1.25)
+        assert (
+            row["input_tokens"],
+            row["output_tokens"],
+            row["cache_tokens"],
+            row["cache_write_tokens"],
+        ) == (11, 22, 33, 44)
+
+
+async def test_status_archive_keeps_cache_only_session(client, db):
+    session = make_session(
+        agent_id="cache-only-agent",
+        session_id="cache-only-session",
+        cache_tokens=7,
+        cache_write_tokens=8,
+        total_cost_usd=0.0,
+        status="completed",
+    )
+    db.upsert_session(session)
+
+    data = (await client.get(
+        "/api/v1/status", params={"agent_id": "cache-only-agent"}
+    )).json()
+
+    assert data["archived_total"] == 1
+    assert data["archived"][0]["session_id"] == "cache-only-session"
+    assert data["archived"][0]["cache_tokens"] == 7
+    assert data["archived"][0]["cache_write_tokens"] == 8
+
+
 @pytest.fixture
 def db():
     backend = InMemoryBackend()

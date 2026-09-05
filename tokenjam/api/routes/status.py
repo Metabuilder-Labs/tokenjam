@@ -174,9 +174,10 @@ def _build_archive(
         s = _row_to_session(r, cols)
         namespace = s.service_namespace or _project_for(config, s.agent_id)
         # Drop 0-signal zombies: a terminal that opened and did nothing (no
-        # tokens, no tool calls, no cost) carries no method worth reviewing.
+        # token bucket, no tool calls, no cost) carries no method worth reviewing.
         total_cost_usd = float(s.total_cost_usd) if s.total_cost_usd is not None else 0.0
         if (s.input_tokens == 0 and s.output_tokens == 0
+                and s.cache_tokens == 0 and s.cache_write_tokens == 0
                 and s.tool_call_count == 0 and total_cost_usd == 0):
             continue
         archived.append({
@@ -195,6 +196,8 @@ def _build_archive(
             "status": s.status_at(idle_threshold),
             "input_tokens": s.input_tokens,
             "output_tokens": s.output_tokens,
+            "cache_tokens": s.cache_tokens,
+            "cache_write_tokens": s.cache_write_tokens,
             "tool_call_count": s.tool_call_count,
             "total_cost_usd": (
                 float(s.total_cost_usd) if s.total_cost_usd is not None else 0.0
@@ -238,6 +241,8 @@ def _count_archived(
     )
     zero_signal = (
         "COALESCE(input_tokens, 0) = 0 AND COALESCE(output_tokens, 0) = 0 "
+        "AND COALESCE(cache_tokens, 0) = 0 "
+        "AND COALESCE(cache_write_tokens, 0) = 0 "
         "AND COALESCE(tool_call_count, 0) = 0 AND COALESCE(total_cost_usd, 0) = 0"
     )
     sql = f"SELECT COUNT(*) FROM sessions WHERE ({clause}) AND NOT ({zero_signal})"
@@ -462,6 +467,8 @@ async def get_status(
                 ),
                 "input_tokens": session.input_tokens,
                 "output_tokens": session.output_tokens,
+                "cache_tokens": session.cache_tokens,
+                "cache_write_tokens": session.cache_write_tokens,
                 "tool_call_count": session.tool_call_count,
                 "error_count": session.error_count,
                 "active_alerts": sess_alerts,

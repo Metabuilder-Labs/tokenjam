@@ -1,9 +1,6 @@
 """Tests for tokenjam.core.ingest — sanitizer, pipeline, session resolution, capture stripping."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime
-
 import pytest
 
 from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig, AgentConfig
@@ -11,9 +8,8 @@ from tokenjam.core.ingest import (
     IngestPipeline,
     SpanRejectedError,
     SpanSanitizer,
-    strip_captured_content,
 )
-from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
+from tokenjam.core.models import NormalizedSpan, SessionRecord
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tests.factories import (
     make_invoke_agent_span,
@@ -59,6 +55,45 @@ class _StubBackend:
             if s.trace_id == trace_id and s.session_id:
                 return s.session_id
         return None
+
+    def get_session_ids_for_trace(self, trace_id: str) -> list[str]:
+        return list(dict.fromkeys(
+            s.session_id for s in self.spans
+            if s.trace_id == trace_id and s.session_id
+        ))
+
+    def get_marker_session_ids_for_trace(self, trace_id: str) -> list[str]:
+        return list(dict.fromkeys(
+            s.session_id for s in self.spans
+            if s.trace_id == trace_id
+            and s.name == "invoke_agent"
+            and s.session_id
+            and s.attributes.get("tokenjam.session_attribution")
+            in {None, "explicit", "conversation"}
+        ))
+
+    def reconcile_trace_session_attribution(self, trace_id: str) -> None:
+        trace_spans = [s for s in self.spans if s.trace_id == trace_id]
+        marker_ids = list(dict.fromkeys(
+            s.session_id for s in trace_spans
+            if s.name == "invoke_agent"
+            and s.session_id
+            and s.attributes.get("tokenjam.session_attribution")
+            in {None, "explicit", "conversation"}
+        ))
+        derived = {"generated", "trace", "parent_generated"}
+        if len(marker_ids) == 1:
+            target = marker_ids[0]
+            for span in trace_spans:
+                if span.attributes.get("tokenjam.session_attribution") in derived:
+                    span.session_id = target
+        elif len(marker_ids) > 1:
+            for span in trace_spans:
+                if span.attributes.get("tokenjam.session_attribution") in derived:
+                    span.session_id = None
+        for session_id in list(self.sessions):
+            if not any(s.session_id == session_id for s in self.spans):
+                del self.sessions[session_id]
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +289,44 @@ class TestSessionResolution:
         # No new session should have been created.
         assert len(db.sessions) == 1
 
+    def test_shared_trace_does_not_choose_an_arbitrary_session(self):
+        """Ambiguous trace membership must not assign one session's cost to
+        another session merely because its marker arrived first.
+        """
+        trace_id = "trace-shared-by-two-sessions"
+        pipeline, db = _make_pipeline()
+
+        pipeline.process(make_invoke_agent_span(session_id="w1", trace_id=trace_id))
+        pipeline.process(make_invoke_agent_span(session_id="w2", trace_id=trace_id))
+
+        cost_span = make_llm_span(trace_id=trace_id)
+        cost_span.session_id = None
+        cost_span.conversation_id = None
+        pipeline.process(cost_span)
+
+        assert db.spans[-1].session_id is None
+        assert len(db.sessions) == 2
+
+    def test_parent_session_wins_when_trace_has_multiple_sessions(self):
+        """A parent marker identifies the child even when another session's
+        marker was inserted first on the same trace.
+        """
+        trace_id = "trace-parent-disambiguates"
+        pipeline, db = _make_pipeline()
+
+        w2 = make_invoke_agent_span(session_id="w2", trace_id=trace_id)
+        pipeline.process(w2)
+        w1 = make_invoke_agent_span(session_id="w1", trace_id=trace_id)
+        pipeline.process(w1)
+
+        cost_span = make_llm_span(trace_id=trace_id)
+        cost_span.session_id = None
+        cost_span.conversation_id = None
+        cost_span.parent_span_id = w1.span_id
+        pipeline.process(cost_span)
+
+        assert db.spans[-1].session_id == "w1"
+
     def test_spans_on_different_traces_get_independent_sessions(self):
         """Spans on different traces are not accidentally merged (#326 guard).
 
@@ -279,16 +352,9 @@ class TestSessionResolution:
         assert session_id_a != session_id_b
         assert len(db.sessions) == 2
 
-    def test_cost_span_before_marker_gets_own_session(self):
-        """Ordering caveat: if a cost span arrives before the session-marker on
-        the same trace, the trace lookup finds no session-bearing sibling yet
-        and a fresh session is minted.
-
-        This is a known, documented limitation of the step-3 resolution in
-        _resolve_session (#326).  On every real ingestion path the marker span
-        is emitted first, so this ordering does not occur in practice.  The
-        test exists to lock in the behaviour and flag it clearly if the code
-        ever attempts to retroactively re-parent such spans.
+    def test_cost_span_before_marker_is_reparented_when_marker_arrives(self):
+        """A late marker must not leave a trace-only cost span in a permanent
+        throwaway session.
         """
         trace_id = "trace-reverse-order"
         pipeline, db = _make_pipeline()
@@ -299,18 +365,44 @@ class TestSessionResolution:
         cost_span.conversation_id = None
         pipeline.process(cost_span)
 
-        minted_session_id = db.spans[0].session_id
-        assert minted_session_id is not None
+        provisional_session_id = db.spans[0].session_id
+        assert provisional_session_id is not None
         assert len(db.sessions) == 1
 
         # 2. Marker span arrives second with its own session_id.
         marker = make_invoke_agent_span(session_id="s-marker", trace_id=trace_id)
         pipeline.process(marker)
 
-        # The marker keeps its own session; cost span keeps the minted one.
-        assert db.spans[0].session_id == minted_session_id
+        # The late marker absorbs the provisional trace-only span.
+        assert db.spans[0].session_id == "s-marker"
         assert db.spans[1].session_id == "s-marker"
-        assert len(db.sessions) == 2
+        assert provisional_session_id not in db.sessions
+        assert len(db.sessions) == 1
+
+    def test_parent_derived_span_is_reparented_with_provisional_parent(self):
+        """Children of a provisional span must follow its late marker
+        reconciliation instead of retaining the throwaway session.
+        """
+        trace_id = "trace-parent-reverse-order"
+        pipeline, db = _make_pipeline()
+
+        parent = make_llm_span(trace_id=trace_id)
+        parent.session_id = None
+        parent.conversation_id = None
+        pipeline.process(parent)
+        child = make_llm_span(trace_id=trace_id)
+        child.session_id = None
+        child.conversation_id = None
+        child.parent_span_id = parent.span_id
+        pipeline.process(child)
+        provisional_session_id = db.spans[0].session_id
+        assert provisional_session_id is not None
+
+        pipeline.process(make_invoke_agent_span(session_id="s-marker", trace_id=trace_id))
+
+        assert db.spans[0].session_id == "s-marker"
+        assert db.spans[1].session_id == "s-marker"
+        assert provisional_session_id not in db.sessions
 
 
 # ===========================================================================

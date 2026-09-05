@@ -282,6 +282,9 @@ class _HttpDB:
                 session_id=a.get("session_id"),
                 input_tokens=a.get("input_tokens", 0),
                 output_tokens=a.get("output_tokens", 0),
+                cache_tokens=a.get("cache_tokens", 0),
+                cache_write_tokens=a.get("cache_write_tokens", 0),
+                total_cost_usd=a.get("total_cost_usd", 0.0),
                 tool_call_count=a.get("tool_call_count", 0),
                 duration_seconds=a.get("duration_seconds"),
             ))
@@ -592,6 +595,8 @@ def _tool_list_active_sessions(conn) -> dict:
                 "total_cost_usd": float(s.get("total_cost_usd", 0.0)),
                 "input_tokens": s.get("input_tokens", 0),
                 "output_tokens": s.get("output_tokens", 0),
+                "cache_tokens": s.get("cache_tokens", 0),
+                "cache_write_tokens": s.get("cache_write_tokens", 0),
                 "tool_call_count": s.get("tool_call_count", 0),
                 "error_count": s.get("error_count", 0),
             }
@@ -601,7 +606,8 @@ def _tool_list_active_sessions(conn) -> dict:
 
     rows = conn.execute(
         "SELECT session_id, agent_id, started_at, total_cost_usd, "
-        "input_tokens, output_tokens, tool_call_count, error_count "
+        "input_tokens, output_tokens, cache_tokens, cache_write_tokens, "
+        "tool_call_count, error_count "
         "FROM sessions WHERE status = 'active' ORDER BY started_at DESC"
     ).fetchall()
     sessions = [
@@ -612,8 +618,10 @@ def _tool_list_active_sessions(conn) -> dict:
             "total_cost_usd": float(r[3]) if r[3] else 0.0,
             "input_tokens": r[4] or 0,
             "output_tokens": r[5] or 0,
-            "tool_call_count": r[6] or 0,
-            "error_count": r[7] or 0,
+            "cache_tokens": r[6] or 0,
+            "cache_write_tokens": r[7] or 0,
+            "tool_call_count": r[8] or 0,
+            "error_count": r[9] or 0,
         }
         for r in rows
     ]

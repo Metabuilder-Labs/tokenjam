@@ -102,3 +102,18 @@ def test_command_hints_for_plain_pip():
         assert uninstall_mod._package_uninstall_hint() == "pip uninstall tokenjam"
         assert uninstall_mod._package_reinstall_hint() == "pip install --upgrade tokenjam"
         assert uninstall_mod._package_fresh_install_hint() == "pip install tokenjam"
+
+
+def test_persistent_install_detection_uses_uninstall_hint_for_display():
+    with patch.object(uninstall_mod, "_pipx_has_tokenjam", return_value=True), \
+         patch.object(uninstall_mod, "_uv_tool_has_tokenjam", return_value=False), \
+         patch.object(uninstall_mod, "_pip_tj_on_path", return_value=None), \
+         patch.object(
+             uninstall_mod,
+             "_package_uninstall_hint",
+             return_value="pipx uninstall tokenjam",
+         ) as hint:
+        installs = uninstall_mod._find_persistent_install()
+
+    assert installs[0].display == "pipx uninstall tokenjam"
+    hint.assert_called_once_with("pipx")

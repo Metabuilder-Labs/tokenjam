@@ -120,6 +120,12 @@ def cmd_status(
             "daily_limit": daily_limit,
             "input_tokens": session.input_tokens if session else 0,
             "output_tokens": session.output_tokens if session else 0,
+            "cache_tokens": session.cache_tokens if session else 0,
+            "cache_write_tokens": session.cache_write_tokens if session else 0,
+            "total_cost_usd": (
+                float(session.total_cost_usd)
+                if session and session.total_cost_usd is not None else 0.0
+            ),
             "tool_call_count": session.tool_call_count if session else 0,
             "error_count": session.error_count if session else 0,
             "active_alerts": len(active_alerts),

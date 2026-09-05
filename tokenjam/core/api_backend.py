@@ -308,8 +308,8 @@ class ApiBackend:
             total_cost_usd=a.get("total_cost_usd"),
             input_tokens=a.get("input_tokens", 0) or 0,
             output_tokens=a.get("output_tokens", 0) or 0,
-            cache_tokens=0,
-            cache_write_tokens=0,
+            cache_tokens=a.get("cache_tokens", 0) or 0,
+            cache_write_tokens=a.get("cache_write_tokens", 0) or 0,
             tool_call_count=a.get("tool_call_count", 0) or 0,
             error_count=a.get("error_count", 0) or 0,
         )][:limit]

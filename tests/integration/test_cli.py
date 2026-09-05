@@ -166,6 +166,25 @@ def test_status_exits_0_when_no_alerts(runner, db, config):
     assert data["has_active_alerts"] is False
 
 
+def test_status_json_exposes_canonical_session_buckets(runner, db, config):
+    session = _seed_agent_and_session(db)
+    session.input_tokens = 11
+    session.output_tokens = 22
+    session.cache_tokens = 33
+    session.cache_write_tokens = 44
+    session.total_cost_usd = 1.25
+    db.upsert_session(session)
+
+    result = _invoke(runner, db, config, ["status", "--json"])
+    assert result.exit_code == 0, result.output
+    row = json.loads(result.output)["agents"][0]
+    assert row["total_cost_usd"] == pytest.approx(1.25)
+    assert (
+        row["input_tokens"], row["output_tokens"],
+        row["cache_tokens"], row["cache_write_tokens"],
+    ) == (11, 22, 33, 44)
+
+
 def test_status_json_stdout_is_byte_clean_under_a_live_spinner(runner, db, config, monkeypatch):
     """`status` declares a status_message (`cmd_status.py`), so `--json` must
     route it to stderr and leave stdout as pure JSON -- see
@@ -592,7 +611,7 @@ def _duckdb_with_dropped_migration_7(tmp_path):
     backend = DuckDBBackend(StorageConfig(path=str(tmp_path / "telemetry.duckdb")))
     for idx in (
         "idx_spans_trace_id", "idx_spans_agent_id", "idx_spans_start_time",
-        "idx_spans_tool_name", "idx_spans_conv_id",
+        "idx_spans_tool_name", "idx_spans_conv_id", "idx_spans_session_id",
     ):
         backend.conn.execute(f"DROP INDEX IF EXISTS {idx}")
     backend.conn.execute("ALTER TABLE spans DROP COLUMN request_params")

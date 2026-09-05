@@ -291,6 +291,19 @@ class IngestPipeline:
         # 5. Session upsert (update running totals)
         session = self._build_or_update_session(span)
 
+        # A marker can arrive after trace-only spans. Reconcile provisional or
+        # trace-derived ownership now that the marker is durable, before the
+        # session lifecycle hooks inspect the totals.
+        if self._is_session_marker(span):
+            reconcile = getattr(self.db, "reconcile_trace_session_attribution", None)
+            if reconcile is not None:
+                if session is not None:
+                    self.db.upsert_session(session)
+                reconcile(span.trace_id)
+                refreshed = self.db.get_session(span.session_id) if span.session_id else None
+                if refreshed is not None:
+                    session = refreshed
+
         # 5b. Session lifecycle.
         #
         # A session is "completed" only when we see a *real* session-wrapping
@@ -305,7 +318,7 @@ class IngestPipeline:
         # was force-completed on its first prompt (so the dashboard showed
         # active work as "completed" with 0 duration), and the drift/alert
         # session-end hooks fired on every single turn.
-        if self._is_session_end(span):
+        if session is not None and self._is_session_end(span):
             session.status = "completed"
             self.db.upsert_session(session)
             if self.drift_detector and span.agent_id:
@@ -318,7 +331,7 @@ class IngestPipeline:
                     self.alert_engine.evaluate_session_end(session)
                 except Exception as exc:
                     logger.warning("AlertEngine session-end hook failed: %s", exc)
-        else:
+        elif session is not None:
             # Any other span is ongoing activity. Streaming telemetry (the logs
             # path) never sends an explicit end event, so a session that keeps
             # receiving spans is still alive — re-activate a record that was
@@ -485,6 +498,57 @@ class IngestPipeline:
             and span.end_time > span.start_time
         )
 
+    @staticmethod
+    def _is_session_marker(span: NormalizedSpan) -> bool:
+        """True when an invoke span carries an explicit session identity.
+
+        A generated session for a marker without an identity is provisional,
+        not evidence that the trace belongs to that session. Only explicit or
+        conversation-derived markers participate in late trace reconciliation.
+        """
+        return (
+            span.name == GenAIAttributes.SPAN_INVOKE_AGENT
+            and span.session_id is not None
+            and span.attributes.get(TjAttributes.SESSION_ATTRIBUTION)
+            in {"explicit", "conversation"}
+        )
+
+    def _session_from_parent_chain(
+        self, span: NormalizedSpan,
+    ) -> tuple[str, bool] | None:
+        """Return one parent session and whether its ownership is provisional."""
+        if not span.parent_span_id or not span.trace_id:
+            return None
+        stored = {s.span_id: s for s in self.db.get_trace_spans(span.trace_id)}
+        session_ids: set[str] = set()
+        derived = False
+        seen: set[str] = set()
+        parent_id: str | None = span.parent_span_id
+        for _ in range(128):
+            if parent_id is None:
+                break
+            if parent_id in seen:
+                return None
+            seen.add(parent_id)
+            parent = stored.get(parent_id)
+            if parent is None:
+                break
+            if parent.session_id:
+                session_ids.add(parent.session_id)
+                if parent.attributes.get(TjAttributes.SESSION_ATTRIBUTION) in {
+                    "generated", "trace", "parent_generated", "parent_trace",
+                }:
+                    derived = True
+            parent_id = parent.parent_span_id
+        if len(session_ids) != 1:
+            return None
+        return next(iter(session_ids)), derived
+
+    @staticmethod
+    def _stamp_session_attribution(span: NormalizedSpan, source: str) -> None:
+        """Record non-user provenance for later trace reconciliation."""
+        span.attributes[TjAttributes.SESSION_ATTRIBUTION] = source
+
     def _resolve_session(self, span: NormalizedSpan) -> NormalizedSpan:
         """
         Resolve or create a session_id for the span.
@@ -492,31 +556,56 @@ class IngestPipeline:
         Resolution order:
         1. Span already carries a session_id — keep it.
         2. Span carries a conversation_id that matches an existing session — use that.
-        3. Span carries a trace_id that matches spans already written for a known
-           session — attach to that session (#326).
-        4. None of the above — mint a fresh session_id.
+        3. A parent chain resolves to one stored session.
+        4. A trace has exactly one explicit session marker — attach to it.
+        5. An ambiguous trace remains unattributed rather than selecting one
+           session; otherwise mint a fresh session for a standalone span.
         """
         if span.session_id:
+            self._stamp_session_attribution(span, "explicit")
             return span
 
         if span.conversation_id:
             existing = self.db.get_session_by_conversation(span.conversation_id)
             if existing is not None:
                 span.session_id = existing.session_id
+                self._stamp_session_attribution(span, "conversation")
                 return span
 
-        # Look up session via trace_id sibling.
+        parent_resolution = self._session_from_parent_chain(span)
+        if parent_resolution:
+            parent_session_id, parent_is_derived = parent_resolution
+            span.session_id = parent_session_id
+            self._stamp_session_attribution(
+                span, "parent_generated" if parent_is_derived else "parent"
+            )
+            return span
+
+        # Look up session via an explicit trace marker, never an arbitrary
+        # session-bearing sibling. Shared traces are intentionally left
+        # unattributed because the trace alone cannot partition their cost.
         if span.trace_id:
-            session_id = self.db.get_session_id_for_trace(span.trace_id)
-            if session_id:
-                span.session_id = session_id
+            marker_lookup = getattr(self.db, "get_marker_session_ids_for_trace", None)
+            marker_ids = (
+                marker_lookup(span.trace_id) if marker_lookup is not None else []
+            )
+            if len(marker_ids) == 1:
+                span.session_id = marker_ids[0]
+                self._stamp_session_attribution(span, "trace")
+                return span
+            if len(marker_ids) > 1:
+                self._stamp_session_attribution(span, "unattributed")
+                span.session_id = None
                 return span
 
         # No existing session found — create a new session_id
         span.session_id = new_uuid()
+        self._stamp_session_attribution(
+            span, "conversation" if span.conversation_id else "generated"
+        )
         return span
 
-    def _build_or_update_session(self, span: NormalizedSpan) -> SessionRecord:
+    def _build_or_update_session(self, span: NormalizedSpan) -> SessionRecord | None:
         """
         Fetch the current session record and update its running totals
         from this span's token counts, cost, error status, etc.
@@ -526,7 +615,8 @@ class IngestPipeline:
         only update plan_tier if it's currently 'unknown' (e.g. tool spans
         arrived before an LLM span on a fresh session).
         """
-        assert span.session_id is not None
+        if span.session_id is None:
+            return None
 
         existing = self.db.get_session(span.session_id)
         if existing is not None:

@@ -36,7 +36,7 @@ flowchart TD
 
     Ingest --> Cost["CostEngine\npricing.toml"]
     Ingest --> Alerts["AlertEngine\n13 types · 6 channels"]
-    Ingest --> Schema["SchemaValidator\nJSON Schema + genson infer"]
+    Ingest --> Schema["SchemaValidator\nexplicit JSON Schema"]
 
     Cost --> DB["DuckDB\nlocal · embedded"]
     Alerts --> DB
@@ -78,7 +78,7 @@ After each span is written to the database, three hooks run synchronously:
 
 2. **AlertEngine** — Evaluates per-span rules: sensitive action match, retry loop detection (4+ identical tool calls in last 6 spans), failure rate (>20% errors in last 20 spans), NemoClaw sandbox events. Also evaluates per-session rules at session end: cost budgets and session duration.
 
-3. **SchemaValidator** — If the span is a `gen_ai.tool.call` with captured `gen_ai.tool.output`, validates against declared JSON Schema (from agent config) or inferred schema (from drift baseline). Fires `SCHEMA_VIOLATION` alert on failure.
+3. **SchemaValidator** — If the span is a `gen_ai.tool.call` with captured `gen_ai.tool.output` and the agent has an explicit JSON Schema configured, validates the output and fires a `SCHEMA_VIOLATION` alert on failure. Without an explicit schema, it skips validation.
 
 Hooks are error-tolerant — if any hook fails, the error is logged and the next hook still runs. A hook failure never prevents the span from being stored.
 
@@ -202,9 +202,14 @@ Drift detection is purely statistical — no LLM calls required. It uses Z-score
 3. Subsequent sessions are compared against the baseline
 4. If any dimension's Z-score exceeds the threshold (default 2.0), or tool sequence Jaccard similarity drops below the threshold, a `DRIFT_DETECTED` alert fires
 
-### Schema inference
+### Schema validation
 
-When no explicit `output_schema` is declared in agent config, the `SchemaValidator` can use genson to infer a JSON Schema from tool outputs observed in past sessions. This inferred schema is stored in `DriftBaseline.output_schema_inferred`.
+Schema validation is explicit and opt-in: it runs only for captured tool output
+when the agent configuration declares an `output_schema` file. Tool output is
+stripped at the ingest boundary when capture is disabled, so it cannot reach
+the validator. Automatic schema inference is not enabled. The nullable
+`drift_baselines.output_schema_inferred` column remains only for reading older
+database files and is never used to activate validation.
 
 ---
 

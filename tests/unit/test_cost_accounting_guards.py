@@ -40,6 +40,7 @@ from tokenjam.core.optimize.analyzers import (
     subagent_rightsizing,
     workflow_restructure,
 )
+from tokenjam.api.routes import sessions as sessions_route
 from tests.factories import make_llm_span
 from tests.token_aggregate_guard import (
     TOKEN_COLUMNS,
@@ -276,6 +277,23 @@ def test_the_canonical_sum_names_every_token_type():
 def test_four_type_total_counts_both_cache_buckets():
     row = {"input_tokens": 1, "output_tokens": 2, "cache_tokens": 4, "cache_write_tokens": 8}
     assert accounting.four_type_token_total(row) == 15
+
+
+def test_session_subagents_delegates_token_total_to_canonical_helper(db, monkeypatch):
+    db.insert_span(make_llm_span(
+        agent_id="svc-a", session_id="sess-1", sub_agent_id="worker-1",
+        input_tokens=1, output_tokens=2, cache_tokens=4, cache_write_tokens=8,
+    ))
+    monkeypatch.setattr(
+        sessions_route,
+        "four_type_token_total",
+        lambda row: 99,
+        raising=False,
+    )
+
+    result = sessions_route._session_subagents(db, "sess-1")
+
+    assert result["tokens"] == 99
 
 
 def test_the_guard_catches_the_bug_shape_that_shipped_three_times():

@@ -129,7 +129,11 @@ def test_list_agents_empty():
 
 def test_list_active_sessions_one_per_session():
     db = InMemoryBackend()
-    s1 = make_session(agent_id="proj-a", status="active")
+    s1 = make_session(
+        agent_id="proj-a", status="active", total_cost_usd=1.25,
+        input_tokens=11, output_tokens=22, cache_tokens=33,
+        cache_write_tokens=44,
+    )
     s2 = make_session(agent_id="proj-a", status="active")
     s3 = make_session(agent_id="proj-b", status="active")
     s4 = make_session(agent_id="proj-b", status="completed")
@@ -144,6 +148,12 @@ def test_list_active_sessions_one_per_session():
     assert s2.session_id in session_ids
     assert s3.session_id in session_ids
     assert s4.session_id not in session_ids
+    row = next(r for r in result["sessions"] if r["session_id"] == s1.session_id)
+    assert row["total_cost_usd"] == pytest.approx(1.25)
+    assert (
+        row["input_tokens"], row["output_tokens"],
+        row["cache_tokens"], row["cache_write_tokens"],
+    ) == (11, 22, 33, 44)
 
 
 def test_list_active_sessions_empty():

@@ -105,6 +105,9 @@ class StorageBackend(Protocol):
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
     def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None: ...
     def get_trace_cost_stats(self, filters: TraceFilters) -> TraceCostStats: ...
+    def get_session_ids_for_trace(self, trace_id: str) -> list[str]: ...
+    def get_marker_session_ids_for_trace(self, trace_id: str) -> list[str]: ...
+    def reconcile_trace_session_attribution(self, trace_id: str) -> None: ...
     def get_session_id_for_trace(self, trace_id: str) -> str | None: ...
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]: ...
     def get_alerts(self, filters: AlertFilters) -> list[Alert]: ...
@@ -208,6 +211,7 @@ SPANS_INDEXES: tuple[tuple[str, str], ...] = (
     ("idx_spans_start_time", "start_time"),
     ("idx_spans_tool_name",  "tool_name"),
     ("idx_spans_conv_id",    "conversation_id"),
+    ("idx_spans_session_id", "session_id"),
 )
 
 # Secondary indexes on sessions. Single-sourced for the same reason as the spans
@@ -615,7 +619,8 @@ MIGRATIONS: list[tuple[int, str]] = [
         "DROP INDEX IF EXISTS idx_spans_agent_id;\n"
         "DROP INDEX IF EXISTS idx_spans_start_time;\n"
         "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
-        "DROP INDEX IF EXISTS idx_spans_conv_id"
+        "DROP INDEX IF EXISTS idx_spans_conv_id;\n"
+        "DROP INDEX IF EXISTS idx_spans_session_id"
     )),
     (3, SPANS_INDEX_SQL),
     # Migration 4: billing_account on spans, plan_tier on sessions.
@@ -927,6 +932,10 @@ MIGRATIONS: list[tuple[int, str]] = [
     # survive between analysis runs and be invalidated by the spec hash rather
     # than re-taken on a schedule.
     (22, AGENT_CONFIG_FILES_TABLE_SQL + ";\n" + AGENT_CONFIG_INDEX_SQL),
+    # Migration 23: session-scoped span reconciliation index. The ingest-time
+    # trace repair groups affected rows by session_id; keep that lookup bounded
+    # on stores with a large cross-trace history. Additive and idempotent.
+    (23, "CREATE INDEX IF NOT EXISTS idx_spans_session_id ON spans(session_id)"),
 ]
 
 
@@ -1194,15 +1203,14 @@ def session_cost_drift(
     tolerance_usd: float = SESSION_COST_DRIFT_TOLERANCE_USD,
     limit: int = 20,
 ) -> tuple[int, float, list[tuple[str, float, float]]]:
-    """Find sessions whose ``total_cost_usd`` disagrees with ``SUM(spans.cost_usd)``.
+    """Find sessions whose stored cost disagrees with canonical span cost.
 
-    ``recompute_session_totals_from_spans`` documents the span sum as the source
-    of truth, so any gap is a stale session row — written by a path that moved
-    one side without the other (a pre-priced span the cost hook re-priced, a
-    per-file backfill upsert that replaced rather than accumulated, a repricing
-    pass that never touched sessions). Two figures the UI can show side by side
-    then differ, which is the defect: a published total that excludes rows it
-    should include.
+    ``recompute_session_totals_from_spans`` uses the deduplicated logical-call
+    total as the source of truth, so any gap is a stale session row — written by
+    a path that moved one side without the other. Cross-source restatements are
+    excluded using the same winner rule as recomputation; same-source repeats
+    remain real calls. Two figures the UI can show side by side then differ,
+    which is the defect: a published total that excludes rows it should include.
 
     Returns ``(session_count, total_abs_drift_usd, worst)`` where ``worst`` is up
     to ``limit`` ``(session_id, stored_usd, span_sum_usd)`` triples ordered by
@@ -1210,23 +1218,31 @@ def session_cost_drift(
 
     A NULL ``total_cost_usd`` is NOT drift when the session's spans carry no cost
     either: sessions whose spans are all tool/marker spans (or LLM calls with no
-    usage attached) genuinely have nothing to price, and ``SUM`` over an
-    all-NULL column is itself NULL. ``COALESCE`` on both sides makes the
-    comparison treat NULL and 0.0 as the same "no priced spans" statement, which
-    is also how ``recompute_session_totals_from_spans`` writes it.
+    usage attached) genuinely have nothing to price. ``COALESCE`` on both sides
+    makes the comparison treat NULL and 0.0 as the same "no priced spans"
+    statement, which is also how recomputation writes it.
     """
+    redundant_sql = _duplicate_observation_sql("obs.span_id")
     rows = conn.execute(
-        """
+        f"""
+        WITH redundant AS (
+            {redundant_sql}
+        ), canonical AS (
+            SELECT session_id, cost_usd
+            FROM spans
+            WHERE session_id IS NOT NULL
+              AND span_id NOT IN (SELECT span_id FROM redundant)
+        ),
+        agg AS (
+            SELECT session_id, SUM(cost_usd) AS span_cost
+            FROM canonical
+            GROUP BY session_id
+        )
         SELECT s.session_id,
                COALESCE(s.total_cost_usd, 0.0)  AS stored,
                COALESCE(agg.span_cost, 0.0)     AS span_sum
         FROM sessions AS s
-        LEFT JOIN (
-            SELECT session_id, SUM(cost_usd) AS span_cost
-            FROM spans
-            WHERE session_id IS NOT NULL
-            GROUP BY session_id
-        ) AS agg ON agg.session_id = s.session_id
+        LEFT JOIN agg ON agg.session_id = s.session_id
         WHERE ABS(COALESCE(agg.span_cost, 0.0) - COALESCE(s.total_cost_usd, 0.0)) > $1
         ORDER BY ABS(COALESCE(agg.span_cost, 0.0) - COALESCE(s.total_cost_usd, 0.0)) DESC
         """,
@@ -1460,7 +1476,9 @@ def duplicate_call_observations(
     return total_spans, total_cost, worst
 
 
-def _duplicate_observation_sql(select_list: str) -> str:
+def _duplicate_observation_sql(
+    select_list: str, *, scope_sql: str | None = None,
+) -> str:
     """Rows that are a second observer's restatement of an already-observed call.
 
     For each call, the number of times it really happened is the count the most
@@ -1471,13 +1489,14 @@ def _duplicate_observation_sql(select_list: str) -> str:
     from tokenjam.core.optimize import accounting
 
     fingerprint = ", ".join(_FINGERPRINT_COLUMNS)
+    scope = f" AND ({scope_sql})" if scope_sql else ""
     return f"""
         WITH obs AS (
             SELECT span_id, session_id, cost_usd,
                    {_ingest_source_sql()} AS src,
                    MD5(CONCAT_WS('|', {fingerprint})) AS call_key
             FROM spans
-            WHERE {_LLM_SPAN_PREDICATE} AND session_id IS NOT NULL
+            WHERE {_LLM_SPAN_PREDICATE} AND session_id IS NOT NULL{scope}
         ),
         per_source AS (
             SELECT call_key, src, COUNT(*) AS n FROM obs GROUP BY 1, 2
@@ -1523,7 +1542,8 @@ def purge_duplicate_call_observations(conn: duckdb.DuckDBPyConnection) -> tuple[
         "DROP INDEX IF EXISTS idx_spans_agent_id;\n"
         "DROP INDEX IF EXISTS idx_spans_start_time;\n"
         "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
-        "DROP INDEX IF EXISTS idx_spans_conv_id"
+        "DROP INDEX IF EXISTS idx_spans_conv_id;\n"
+        "DROP INDEX IF EXISTS idx_spans_session_id"
     )
     try:
         chunk = 5000
@@ -1692,76 +1712,6 @@ def session_active_seconds(conn, session_id: str) -> float | None:
     if not row or row[0] is None:
         return None
     return float(row[0]) / 1000.0
-
-
-# Token/cost rollup for a single session, joining cost spans onto the session via
-# the trace(s) the session's own spans carry. The keys mirror the denormalized
-# `sessions` aggregate columns so callers can splice the result straight in.
-_SESSION_ROLLUP_KEYS = (
-    "input_tokens", "output_tokens", "cache_tokens", "cache_write_tokens",
-    "total_cost_usd", "tool_call_count",
-)
-
-
-def session_token_cost_rollup(conn, session_id: str) -> dict | None:
-    """True per-session token/cost rollup, joining trace-keyed cost spans (#18).
-
-    The denormalized `sessions` aggregate columns are accumulated per span keyed
-    by `span.session_id` (see `IngestPipeline._build_or_update_session`). That is
-    correct for telemetry that stamps the session id on its cost spans (the
-    `/v1/logs` Claude Code/Codex path, and the on-disk backfill). But a fan-out
-    harness posting raw OTLP to `/api/v1/spans` can emit the zero-cost
-    `invoke_agent` marker span WITH `session.id` while its cost-bearing
-    `gen_ai.llm.call` spans carry only `agent_id` + `traceId` (no `session.id`).
-    Those cost spans never accumulate onto the marker's session row, so the
-    per-session rollup reads 0 even though the spend is real and surfaces fine on
-    Cost/Traces (which key by agent_id / trace, never session_id).
-
-    The defensible association is the **trace**: the marker span (which carries
-    the session_id) and the cost spans share a `trace_id`, exactly the join
-    `/traces` already uses to attribute the same spans. So this rolls up every
-    span whose `session_id` matches OR whose `trace_id` appears on a span that
-    carries this session_id. Each span is counted once (a span matching both
-    predicates isn't double-counted — the WHERE is a disjunction over distinct
-    rows, not a self-join). When the cost spans DO carry the session_id (the
-    common case), the trace clause is redundant and the result equals the plain
-    `session_id` sum, so this is a strict superset that never under- or
-    over-counts the already-correct paths.
-
-    Returns a dict keyed by `_SESSION_ROLLUP_KEYS`, or None when the session has
-    no spans at all (caller keeps the stored row's values).
-    """
-    if conn is None or session_id is None:
-        return None
-    row = conn.execute(
-        """
-        SELECT
-            COALESCE(SUM(input_tokens), 0),
-            COALESCE(SUM(output_tokens), 0),
-            COALESCE(SUM(cache_tokens), 0),
-            COALESCE(SUM(cache_write_tokens), 0),
-            COALESCE(SUM(cost_usd), 0.0),
-            COUNT(*) FILTER (WHERE tool_name IS NOT NULL),
-            COUNT(*)
-        FROM spans
-        WHERE session_id = $1
-           OR trace_id IN (
-                SELECT DISTINCT trace_id FROM spans
-                WHERE session_id = $1 AND trace_id IS NOT NULL
-           )
-        """,
-        [session_id],
-    ).fetchone()
-    if not row or row[6] == 0:
-        return None
-    return {
-        "input_tokens": int(row[0] or 0),
-        "output_tokens": int(row[1] or 0),
-        "cache_tokens": int(row[2] or 0),
-        "cache_write_tokens": int(row[3] or 0),
-        "total_cost_usd": float(row[4] or 0.0),
-        "tool_call_count": int(row[5] or 0),
-    }
 
 
 def _resolve_conn(db_or_conn):
@@ -3137,29 +3087,34 @@ class DuckDBBackend:
             )
 
     def recompute_session_totals_from_spans(self, session_ids: list[str]) -> None:
-        """Reconcile the given session rows' token + cost aggregates to the SUM
-        of their spans (the source of truth).
+        """Reconcile session aggregates to canonical logical-call observations.
 
         Backfill upserts a session row once per on-disk file, but a Claude Code
         session is split across files that share one session_id (the main-thread
         transcript plus each subagents/agent-<id>.jsonl). Because upsert_session
         uses replace semantics, the per-file upserts would otherwise leave the
-        row holding only the last-processed file's totals. Scoped to the given
-        ids so it never touches live-ingested sessions. Idempotent.
+        the row holding only the last-processed file's totals. Cross-source
+        restatements are counted once using the duplicate-observation winner
+        rule; same-source repeats remain real calls. Scoped to the given ids so
+        it never touches unrelated sessions. Idempotent.
         """
         if not session_ids:
             return
         with self._write_lock:
             self.conn.execute(
-                """
-                UPDATE sessions AS s SET
-                    input_tokens       = agg.input_tokens,
-                    output_tokens      = agg.output_tokens,
-                    cache_tokens       = agg.cache_tokens,
-                    cache_write_tokens = agg.cache_write_tokens,
-                    total_cost_usd     = agg.total_cost_usd,
-                    tool_call_count    = agg.tool_call_count
-                FROM (
+                f"""
+                WITH redundant AS (
+                    {_duplicate_observation_sql(
+                        "obs.span_id",
+                        scope_sql="session_id IN (SELECT unnest($1))",
+                    )}
+                ), canonical AS (
+                    SELECT session_id, input_tokens, output_tokens,
+                           cache_tokens, cache_write_tokens, cost_usd, tool_name
+                    FROM spans
+                    WHERE session_id IN (SELECT unnest($1))
+                      AND span_id NOT IN (SELECT span_id FROM redundant)
+                ), agg AS (
                     SELECT session_id,
                            COALESCE(SUM(input_tokens), 0)       AS input_tokens,
                            COALESCE(SUM(output_tokens), 0)      AS output_tokens,
@@ -3167,10 +3122,17 @@ class DuckDBBackend:
                            COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
                            COALESCE(SUM(cost_usd), 0.0)         AS total_cost_usd,
                            COUNT(*) FILTER (WHERE tool_name IS NOT NULL) AS tool_call_count
-                    FROM spans
-                    WHERE session_id IN (SELECT unnest($1))
+                    FROM canonical
                     GROUP BY session_id
-                ) AS agg
+                )
+                UPDATE sessions AS s SET
+                    input_tokens       = agg.input_tokens,
+                    output_tokens      = agg.output_tokens,
+                    cache_tokens       = agg.cache_tokens,
+                    cache_write_tokens = agg.cache_write_tokens,
+                    total_cost_usd     = agg.total_cost_usd,
+                    tool_call_count    = agg.tool_call_count
+                FROM agg
                 WHERE s.session_id = agg.session_id
                 """,
                 [list(session_ids)],
@@ -3235,7 +3197,8 @@ class DuckDBBackend:
                 "DROP INDEX IF EXISTS idx_spans_agent_id;\n"
                 "DROP INDEX IF EXISTS idx_spans_start_time;\n"
                 "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
-                "DROP INDEX IF EXISTS idx_spans_conv_id"
+                "DROP INDEX IF EXISTS idx_spans_conv_id;\n"
+                "DROP INDEX IF EXISTS idx_spans_session_id"
             )
             try:
                 chunk = 5000
@@ -3563,12 +3526,102 @@ class DuckDBBackend:
         row = self.conn.execute(sql, params).fetchone()
         return int(row[0] or 0) if row else 0
 
+    def get_session_ids_for_trace(self, trace_id: str) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT session_id FROM spans "
+            "WHERE trace_id = $1 AND session_id IS NOT NULL "
+            "ORDER BY session_id",
+            [trace_id],
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def get_marker_session_ids_for_trace(self, trace_id: str) -> list[str]:
+        """Return distinct session ids from explicit session marker spans.
+
+        A trace can contain several sessions during fan-out. The old
+        ``LIMIT 1`` lookup silently selected whichever row happened to come
+        first, so a trace-only span could be charged to the wrong session.
+        Marker identity is narrower than arbitrary span membership and lets
+        ingest distinguish an unambiguous trace from a shared one.
+        """
+        from tokenjam.otel.semconv import GenAIAttributes
+
+        rows = self.conn.execute(
+            "SELECT DISTINCT session_id FROM spans "
+            "WHERE trace_id = $1 AND name = $2 AND session_id IS NOT NULL "
+            "AND (json_extract_string(attributes, '$.\"tokenjam.session_attribution\"') "
+            "IS NULL OR json_extract_string(attributes, '$.\"tokenjam.session_attribution\"') "
+            "IN ('explicit', 'conversation')) "
+            "ORDER BY session_id",
+            [trace_id, GenAIAttributes.SPAN_INVOKE_AGENT],
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def reconcile_trace_session_attribution(self, trace_id: str) -> None:
+        """Reconcile provisional trace-derived spans after a marker arrives.
+
+        A span that arrived before its marker may have been placed in a
+        provisional session, while a span after the marker may have used a
+        trace-derived session. If the trace has one marker, those derived
+        spans can be moved to it. If the trace has multiple markers, derived
+        spans are cleared rather than charged to every session. Explicit and
+        parent-derived assignments based on an explicit identity are never
+        rewritten here.
+        """
+        with self._write_lock:
+            marker_ids = self.get_marker_session_ids_for_trace(trace_id)
+            if not marker_ids:
+                return
+
+            derived_path = (
+                "json_extract_string(attributes, '$.\"tokenjam.session_attribution\"') "
+                "IN ('generated', 'trace', 'parent_generated')"
+            )
+            old_rows = self.conn.execute(
+                "SELECT DISTINCT session_id FROM spans "
+                "WHERE trace_id = $1 AND session_id IS NOT NULL AND "
+                f"{derived_path}",
+                [trace_id],
+            ).fetchall()
+            old_session_ids = {str(row[0]) for row in old_rows}
+            if not old_session_ids:
+                return
+
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                if len(marker_ids) == 1:
+                    self.conn.execute(
+                        "UPDATE spans SET session_id = $1 "
+                        "WHERE trace_id = $2 AND "
+                        f"{derived_path}",
+                        [marker_ids[0], trace_id],
+                    )
+                    affected = old_session_ids | set(marker_ids)
+                else:
+                    self.conn.execute(
+                        "UPDATE spans SET session_id = NULL "
+                        "WHERE trace_id = $1 AND "
+                        f"{derived_path}",
+                        [trace_id],
+                    )
+                    affected = old_session_ids
+
+                self.recompute_session_totals_from_spans(sorted(affected))
+                for session_id in old_session_ids - set(marker_ids):
+                    self.conn.execute(
+                        "DELETE FROM sessions WHERE session_id = $1 "
+                        "AND NOT EXISTS (SELECT 1 FROM spans WHERE session_id = $1)",
+                        [session_id],
+                    )
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
+
     def get_session_id_for_trace(self, trace_id: str) -> str | None:
-        row = self.conn.execute(
-            "SELECT session_id FROM spans WHERE trace_id = $1 AND session_id IS NOT NULL LIMIT 1",
-            [trace_id]
-        ).fetchone()
-        return row[0] if row else None
+        """Return the trace session only when the trace is unambiguous."""
+        session_ids = self.get_session_ids_for_trace(trace_id)
+        return session_ids[0] if len(session_ids) == 1 else None
 
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
         cur = self.conn.execute(
