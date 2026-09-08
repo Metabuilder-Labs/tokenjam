@@ -26,24 +26,83 @@ from tokenjam.core.optimize import relearn_apply as pa
 from tests.factories import make_session
 
 
+#: Every process-global compute flag the routes exercised in this file can read.
+#: ``relearn_store`` and ``cost_proposals`` each own their own ``threading.Event``,
+#: and ``report_store`` owns a third. They are DISTINCT objects — clearing one
+#: does nothing to the others, which is the whole reason the fixture below was
+#: silently inert. ``test_relearn_store_and_report_store_flags_are_distinct``
+#: pins that, so collapsing these back to a single import fails loudly.
+_COMPUTE_FLAG_SOURCES = (
+    ("tokenjam.core.optimize.relearn_store", "_COMPUTING"),
+    ("tokenjam.core.optimize.cost_proposals", "_COST_COMPUTING"),
+    ("tokenjam.core.optimize.report_store", "_COMPUTING"),
+)
+
+
+def _clear_compute_flags() -> None:
+    import importlib
+
+    for module_name, attr in _COMPUTE_FLAG_SOURCES:
+        getattr(importlib.import_module(module_name), attr).clear()
+
+
 @pytest.fixture(autouse=True)
 def _quiescent_relearn_computing_flag():
-    """Isolate each test from the process-global ``relearn`` compute flag.
+    """Isolate each test from the process-global compute flags these routes read.
 
-    ``report_store.is_computing()`` reads a module-level ``threading.Event``
-    (``_COMPUTING``). An earlier test that triggers a background recompute sets
-    it and does not join the worker thread, so whether the event is still set
-    when a later test runs depends on thread scheduling — which is exactly why
+    An earlier test that triggers a background recompute sets one of these
+    Events and does not join the worker thread, so whether it is still set when
+    a later test runs depends on thread scheduling — which is why
     ``test_relearn_proposals_carries_persona_when_never_run`` flaked on one
-    matrix leg (``computing``) while the others saw ``never_run``. Clear it
-    around every test so each starts from a quiescent store. Test-isolation
-    only; it changes no production behavior.
-    """
-    from tokenjam.core.optimize.report_store import _COMPUTING
+    matrix leg (``computing``) while the others saw ``never_run``.
 
-    _COMPUTING.clear()
+    This fixture used to clear ``report_store._COMPUTING`` alone. The route it
+    was written to protect (``GET /api/v1/relearn/proposals``) reads
+    ``relearn_store.is_computing()``, and those are two different Event objects,
+    so the isolation cleared a flag nothing under test consults and the flake it
+    named in its own docstring kept happening. Clear every flag these routes can
+    actually read, and see ``_COMPUTE_FLAG_SOURCES`` above. Test-isolation only;
+    it changes no production behavior.
+    """
+    _clear_compute_flags()
     yield
-    _COMPUTING.clear()
+    _clear_compute_flags()
+
+
+def test_relearn_store_and_report_store_flags_are_distinct():
+    """The compute flags are per-module, so isolation must clear each one.
+
+    This is the inverse of the defect: the fixture above cleared
+    ``report_store._COMPUTING`` while ``GET /api/v1/relearn/proposals`` read
+    ``relearn_store._COMPUTING``. Nothing failed, because a fixture that clears
+    the wrong object is indistinguishable from one that works until the race it
+    was meant to prevent actually fires. If these ever become one shared Event,
+    delete this test and simplify the fixture deliberately — do not let them
+    merge by accident.
+    """
+    from tokenjam.core.optimize import cost_proposals, relearn_store, report_store
+
+    assert relearn_store._COMPUTING is not report_store._COMPUTING
+    assert relearn_store._COMPUTING is not cost_proposals._COST_COMPUTING
+    assert report_store._COMPUTING is not cost_proposals._COST_COMPUTING
+
+
+def test_isolation_fixture_clears_the_flag_the_relearn_route_reads():
+    """A leaked flag must not survive into the next test.
+
+    Sets every flag, then asserts the autouse fixture's teardown+setup pair has
+    left the store quiescent for the *next* test by clearing them here and
+    checking the public accessors agree. Guards the wiring, not the values.
+    """
+    from tokenjam.core.optimize import cost_proposals, relearn_store
+
+    relearn_store._COMPUTING.set()
+    cost_proposals._COST_COMPUTING.set()
+    _clear_compute_flags()
+
+    assert relearn_store.is_computing() is False
+    assert cost_proposals.is_computing_cost_proposals() is False
+
 
 
 @pytest.fixture
