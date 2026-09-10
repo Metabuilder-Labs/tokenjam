@@ -79,7 +79,14 @@ class DriverStatus:
 
 
 def _cache_path() -> Path:
-    """Resolved lazily (not at import) so tests can patch ``Path.home``."""
+    """Resolved lazily (not at import) so it can be redirected in tests.
+
+    THIS function is the seam every test uses — patched directly (the
+    statusline tests) or sidestepped by passing an explicit ``path=`` to the
+    readers and writers (the cache tests). Patch it rather than ``Path.home``:
+    one function to redirect, and it holds even if the location stops being
+    derived from the home directory.
+    """
     return Path.home() / ".local" / "share" / "tj" / "attribution_cache.json"
 
 
@@ -144,22 +151,21 @@ def _read_usable(path: Path | None) -> tuple[dict[str, Any], float] | None:
 
 
 def read_attribution_cache(
-    *, path: Path | None = None, max_age_seconds: int | None = MAX_CACHE_AGE_SECONDS
+    *, path: Path | None = None, max_age_seconds: int = MAX_CACHE_AGE_SECONDS
 ) -> dict[str, Any] | None:
     """Read the cached top driver, or ``None`` if missing/stale/corrupt.
 
     Fail-safe for the statusline hook: any error (missing file, malformed
-    JSON, an aged-out entry) degrades to ``None`` rather than raising.
-    ``max_age_seconds=None`` drops the age check for a caller that wants the
-    entry whatever its age (it is :func:`resolve_driver`, which reports the age
-    instead of discarding it).
+    JSON, an aged-out entry) degrades to ``None`` rather than raising. A caller
+    that wants the entry whatever its age calls :func:`resolve_driver`, which
+    reports the age rather than discarding the entry.
     """
     try:
         usable = _read_usable(path)
         if usable is None:
             return None
         data, age = usable
-        if max_age_seconds is not None and age > max_age_seconds:
+        if age > max_age_seconds:
             return None
         return data
     except Exception:  # fail-safe read for the statusline hook

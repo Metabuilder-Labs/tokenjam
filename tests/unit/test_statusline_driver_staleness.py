@@ -128,6 +128,40 @@ def test_the_daemon_pass_refreshes_the_attribution_cache(monkeypatch, tmp_path):
     assert capture is cfg.capture, "the refresh must be handed the [capture] flags"
 
 
+def test_the_refresh_survives_an_analyzer_leg_raising(monkeypatch, tmp_path):
+    """The cheapest, most user-visible leg must not be hostage to the most
+    fragile ones. While it sat last inside the job's `try`, a raise from the
+    report / relearn / cost legs skipped it — and the cache then aged out
+    exactly as it did before the leg existed, which is the defect this PR is
+    about, reappearing whenever an analyzer has a bad day."""
+    cfg = TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")))
+    backend = type("_B", (), {"conn": object(), "close": lambda self: None})()
+    calls: list = []
+
+    monkeypatch.setattr(report_store, "is_computing", lambda: False)
+    monkeypatch.setattr(
+        report_store, "recompute_now",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("analyzer boom")),
+    )
+    monkeypatch.setattr(
+        "tokenjam.core.attribution_cache.refresh_attribution_cache",
+        lambda conn, capture, path=None: calls.append(conn),
+    )
+
+    threads: list = []
+
+    def _fake_thread(target=None, name=None, daemon=None):
+        return type("_T", (), {"start": lambda _s: threads.append(target)})()
+
+    monkeypatch.setattr(scan_cycle.threading, "Thread", _fake_thread)
+    scan_cycle._trigger_analyzer_pass(lambda: backend, cfg, None)
+    threads[0]()
+
+    assert calls == [backend.conn], (
+        "a failed analyzer leg must not take the driver refresh down with it"
+    )
+
+
 def test_a_backend_without_a_connection_is_skipped_not_crashed(monkeypatch):
     """An in-memory / API backend has no `conn`; the leg is a no-op, and a
     no-op must not become an exception on the daemon's only scan thread."""
