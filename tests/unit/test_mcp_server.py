@@ -185,6 +185,42 @@ def test_get_cost_summary_empty():
     assert result["rows"] == []
 
 
+def test_get_cost_summary_serializes_the_complete_cost_row():
+    db = InMemoryBackend()
+    db.insert_span(make_llm_span(
+        agent_id="a",
+        input_tokens=100,
+        output_tokens=20,
+        cache_tokens=30,
+        cache_write_tokens=40,
+        cost_usd=1.25,
+    ))
+
+    result = _tool_get_cost_summary(db, agent_id="a", since=None, group_by="day")
+
+    assert len(result["rows"]) == 1
+    row = result["rows"][0]
+    assert row["input_tokens"] == 100
+    assert row["output_tokens"] == 20
+    assert row["cache_tokens"] == 30
+    assert row["cache_write_tokens"] == 40
+    assert row["call_count"] == 1
+
+
+def test_get_cost_summary_by_tool_reports_call_counts():
+    db = InMemoryBackend()
+    for tool_name in ["Read", "Read", "Write"]:
+        db.insert_span(make_tool_span(agent_id="a", tool_name=tool_name))
+
+    result = _tool_get_cost_summary(db, agent_id="a", since=None, group_by="tool")
+
+    assert {row["group"]: row["call_count"] for row in result["rows"]} == {
+        "Read": 2,
+        "Write": 1,
+    }
+    assert all(row["cost_usd"] == 0 for row in result["rows"])
+
+
 # --- list_alerts ---
 
 def test_list_alerts_returns_alerts():
@@ -542,6 +578,23 @@ def test_get_status_http_mode():
         assert "cost_today_usd" in result
         assert abs(result["cost_today_usd"] - 1.23) < 0.01
         assert "cost_today" not in result
+    finally:
+        _set_serve_url(None)
+
+
+def test_get_cost_summary_http_mode_preserves_complete_rows():
+    fake_response = {
+        "rows": [{
+            "group": "tool.read", "agent_id": "alpha", "model": None,
+            "input_tokens": 10, "output_tokens": 5, "cache_tokens": 4,
+            "cache_write_tokens": 3, "cost_usd": 0.02, "call_count": 7,
+        }],
+    }
+    _set_serve_url("http://127.0.0.1:7391")
+    try:
+        with patch("tokenjam.mcp.server._http_get", return_value=fake_response):
+            result = _tool_get_cost_summary(_srv._HttpDB(), "alpha", None, "tool")
+        assert result["rows"] == fake_response["rows"]
     finally:
         _set_serve_url(None)
 

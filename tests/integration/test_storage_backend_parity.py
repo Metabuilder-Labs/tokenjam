@@ -211,6 +211,7 @@ def _proj_cost(rows) -> list:
             r.cache_tokens,
             r.cache_write_tokens,
             round(r.cost_usd, 6),
+            r.call_count,
         )
         for r in rows
     )

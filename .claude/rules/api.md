@@ -64,6 +64,11 @@ channels with `engine.dispatcher.channels = []`.
 `summarize_undo`; see `core/summarize/`). It uses either a read-only DuckDB connection or an HTTP
 proxy to `tj serve`, and is initialized via `init()` from `cli/cmd_mcp.py`.
 
+`get_cost_summary` serializes the complete `CostRow` contract, including both cache-token fields
+and `call_count`. Tool grouping is supported and `call_count` is its meaningful measure: tool-call
+spans carry no cost or token counts because those belong to their LLM completion spans. Keep the
+MCP row shape aligned with the REST cost route and the storage-backend parity projection.
+
 `tj mcp` starts the server. The connection mode is chosen at startup by `cmd_mcp.py`:
 1. If `tj serve` is reachable on `config.api.{host,port}`, MCP proxies to it via HTTP (live ingest visible).
 2. Otherwise it tries to spawn `tj serve` in the background and waits for the port up to `_start_and_wait`'s `timeout` default (`cmd_mcp.py`).

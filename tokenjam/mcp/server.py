@@ -141,7 +141,10 @@ class _HttpDB:
                     model=r.get("model"),
                     input_tokens=r.get("input_tokens", 0),
                     output_tokens=r.get("output_tokens", 0),
+                    cache_tokens=r.get("cache_tokens", 0),
+                    cache_write_tokens=r.get("cache_write_tokens", 0),
                     cost_usd=r.get("cost_usd", 0.0),
+                    call_count=r.get("call_count", 0),
                 )
                 for r in data.get("rows", [])
             ]
@@ -648,7 +651,10 @@ def _tool_get_cost_summary(
                 "model": r.model,
                 "input_tokens": r.input_tokens,
                 "output_tokens": r.output_tokens,
+                "cache_tokens": r.cache_tokens,
+                "cache_write_tokens": r.cache_write_tokens,
                 "cost_usd": r.cost_usd,
+                "call_count": r.call_count,
             }
             for r in rows
         ],
@@ -1130,10 +1136,12 @@ def get_cost_summary(
     group_by: str = "day",
 ) -> dict:
     """
-    Return a cost breakdown grouped by day, agent, or model — equivalent to `tj cost`.
+    Return a cost breakdown grouped by day, agent, model, or tool — equivalent to `tj cost`.
     Use this when the user asks about spending, cost trends, which model is most expensive,
     or wants a breakdown over a time period. since accepts relative values like '24h', '7d'
-    or an absolute date like '2026-04-01'. group_by accepts 'day', 'agent', or 'model'.
+    or an absolute date like '2026-04-01'. group_by accepts 'day', 'agent', 'model', or 'tool'.
+    Tool rows carry call_count; their token and cost fields are zero because those values belong
+    to the LLM completion span rather than the separate tool-call span.
     """
     if _ro_db is None:
         return _no_config()
