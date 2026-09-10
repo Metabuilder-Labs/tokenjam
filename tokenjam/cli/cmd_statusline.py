@@ -54,6 +54,12 @@ _BADGE_CRIT = "\U0001f573️"  # 🕳️ re-read dominating
 # second.
 _STATIC_DRIVERS = frozenset({"file_read", "search"})
 
+# Age marker for a driver past the cache's freshness window. Terse (it's a
+# statusline: ~10 characters, and only in the degraded case) and only ever
+# appended to a driver we actually have — see :func:`_top_driver` on why a
+# stale driver is shown dated rather than dropped.
+_DRIVER_STALE_MARK = "· {days}d old"
+
 # Driver-conditional remedies. Terse (it's a statusline), no em dashes (tokenjam
 # copy rule); the ``→`` arrow and punctuation match the shipped nudge style.
 _NUDGE_NEAR_LIMIT = "→ /compact now (window near full)"
@@ -213,14 +219,35 @@ def format_status_line(
 def _top_driver() -> tuple[str | None, str | None]:
     """The cached top driver as ``(display_label, inclusion_type)``.
 
-    Thin wrapper over ``attribution_cache.format_driver`` — the single reader of
-    the cache's JSON schema, shared with the resume-brief — so this zero-token
+    Reads ``attribution_cache.resolve_driver`` — the single reader of the
+    cache's JSON schema, shared with the resume-brief — so this zero-token
     surface never issues a DuckDB query. The label feeds the "<label> ×<count>"
-    suffix; the type makes the nudge driver-conditional. Fail-safe: any error or
-    a missing/stale cache degrades to ``(None, None)``.
+    suffix; the type makes the nudge driver-conditional.
+
+    A cache past its TTL is rendered, not hidden. Dropping it was a SILENT
+    degradation: the percentage stayed correct, so nothing looked broken, and
+    the reader had no way to know a richer line existed — while we held a
+    perfectly good driver and simply chose not to show it. So a stale driver
+    is named with an explicit age marker (``CLAUDE.md ×14 · 20d old``) and its
+    inclusion type is dropped: the label is worth showing dated, but a remedy
+    is not worth CONDITIONING on a figure we have just told the user is old,
+    so the nudge falls back to its driver-agnostic default.
+
+    Fail-safe: a missing / malformed / unprovable-age cache is nothing to show,
+    and any error degrades to ``(None, None)``.
     """
-    from tokenjam.core.attribution_cache import format_driver
-    return format_driver()
+    from tokenjam.core.attribution_cache import (
+        DRIVER_FRESH,
+        DRIVER_STALE,
+        resolve_driver,
+    )
+
+    status = resolve_driver()
+    if status.state == DRIVER_FRESH:
+        return status.label, status.inclusion_type
+    if status.state == DRIVER_STALE and status.label:
+        return f"{status.label} {_DRIVER_STALE_MARK.format(days=status.age_days)}", None
+    return None, None
 
 
 def _context_limit(model_name: str) -> int:

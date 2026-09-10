@@ -334,6 +334,7 @@ def _trigger_analyzer_pass(
                 backend, config, report=report, provenance=record,
             )
             _refresh_rule_presence(config)
+            _refresh_attribution_cache(backend, config)
         except Exception as exc:  # noqa: BLE001 - classified, then swallowed
             # "Never crash a thread" is right for an analyzer that failed and
             # wrong for a DuckDB fatal, which invalidates the whole database
@@ -373,6 +374,31 @@ def _trigger_analyzer_pass(
         _CYCLE_COMPUTING.clear()
         raise
     return True
+
+
+def _refresh_attribution_cache(backend: Any, config: Any) -> None:
+    """Re-cache the top recurring-inclusion driver the statusline names.
+
+    Last leg of the cycle, and here rather than anywhere else for the reason
+    ``core/attribution_cache`` documents: the statusline is zero-token and
+    must never open the database, so SOMETHING that already holds a
+    connection and the ``[capture]`` flags has to compute the driver and hand
+    it over as a file. A backfill was the only writer, which meant the suffix
+    went dark for good on a machine that never runs one; this pass holds both
+    every time it runs, so the display stays current on its own.
+
+    Cheap next to the analyzer pass it follows (one windowed query against the
+    connection already open) and placed AFTER every store is written, so it
+    cannot delay a figure a surface is waiting on. ``refresh_attribution_cache``
+    is best-effort and swallows its own failures — including classifying a
+    DuckDB fatal — so nothing here can sink the cycle either.
+    """
+    conn = getattr(backend, "conn", None)
+    if conn is None:  # an in-memory / API backend has no DuckDB connection
+        return
+    from tokenjam.core.attribution_cache import refresh_attribution_cache
+
+    refresh_attribution_cache(conn, getattr(config, "capture", None))
 
 
 def _refresh_rule_presence(config: Any) -> None:

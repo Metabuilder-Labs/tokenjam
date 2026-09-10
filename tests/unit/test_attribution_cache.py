@@ -13,10 +13,14 @@ from datetime import timedelta
 import pytest
 
 from tokenjam.core.attribution_cache import (
+    DRIVER_ABSENT,
+    DRIVER_FRESH,
+    DRIVER_STALE,
     format_driver,
     format_driver_label,
     read_attribution_cache,
     refresh_attribution_cache,
+    resolve_driver,
     write_attribution_cache,
 )
 from tokenjam.core.config import CaptureConfig
@@ -232,3 +236,64 @@ def test_format_driver_type_none_for_pre_upgrade_cache(tmp_path):
 
 def test_format_driver_none_when_no_cache(tmp_path):
     assert format_driver(path=tmp_path / "missing.json") == (None, None)
+
+
+# --- resolve_driver (fresh vs stale vs absent, the display seam) -------------
+
+
+def test_resolve_driver_reports_fresh_with_label_and_type(tmp_path):
+    path = tmp_path / "cache.json"
+    write_attribution_cache("CLAUDE.md", 14, 3, "file_read", path=path)
+    status = resolve_driver(path=path)
+    assert status.state == DRIVER_FRESH
+    assert status.label == "CLAUDE.md ×14"
+    assert status.inclusion_type == "file_read"
+    assert status.age_days == 0
+
+
+def test_resolve_driver_reports_stale_rather_than_nothing(tmp_path):
+    # THE DEFECT: the entry is perfectly good and simply dated, and the old
+    # reader collapsed it into the same "nothing" as a missing file — so the
+    # surface could not tell it was showing a reduced view.
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({
+        "top_label": "CLAUDE.md", "occurrences": 33, "sessions": 2,
+        "inclusion_type": "prompt",
+        "computed_at": (utcnow() - timedelta(days=20)).isoformat(),
+    }))
+    status = resolve_driver(path=path)
+    assert status.state == DRIVER_STALE
+    assert status.label == "CLAUDE.md ×33"
+    assert status.age_days == 20
+
+
+@pytest.mark.parametrize("payload", [
+    None,                                                       # no file at all
+    "{not json",
+    json.dumps([1, 2, 3]),
+    json.dumps({"computed_at": "2026-01-01T00:00:00+00:00"}),   # no label/count
+    json.dumps({"top_label": "CLAUDE.md", "occurrences": 14}),  # no computed_at
+    json.dumps({"top_label": "C", "occurrences": 1, "computed_at": "nope"}),
+])
+def test_resolve_driver_reports_absent_for_every_unusable_cache(tmp_path, payload):
+    # An entry whose age cannot be PROVEN is absent, not stale: we can neither
+    # present it as current nor say how dated it is.
+    path = tmp_path / "cache.json"
+    if payload is not None:
+        path.write_text(payload)
+    status = resolve_driver(path=path)
+    assert status.state == DRIVER_ABSENT
+    assert status.label is None
+
+
+def test_format_driver_stays_fresh_only(tmp_path):
+    # The fresh-only contract the resume-brief relies on is unchanged by the
+    # stale state existing: a stale entry is still (None, None) here.
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({
+        "top_label": "CLAUDE.md", "occurrences": 14, "sessions": 3,
+        "computed_at": (utcnow() - timedelta(days=20)).isoformat(),
+    }))
+    assert resolve_driver(path=path).state == DRIVER_STALE
+    assert format_driver(path=path) == (None, None)
+    assert format_driver_label(path=path) is None
