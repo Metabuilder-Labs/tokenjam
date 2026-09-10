@@ -216,7 +216,7 @@ Analyzer names: `downsize`, `cache`, `cache-recommend`, `resend`, `trim`, `reuse
 
 `relearn` finds failure signatures that recur across three or more sessions, the blockers an agent silently re-hits. Act on what it finds with `tj relearn`.
 
-Key flags: `--since`, `--agent`, `--budget`, `--budget-usd`, `--compare`, `--export-config`, `--export-templates`, `--json`.
+Key flags: `--since`, `--agent`, `--budget`, `--budget-usd`, `--compare`, `--expand`, `--export-config`, `--export-templates`, `--json`.
 
 ### `tj relearn`
 

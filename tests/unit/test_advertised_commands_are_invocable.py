@@ -168,6 +168,26 @@ def test_every_command_the_optimize_scoreboard_advertises_runs(capsys):
         assert_invocable(command)
 
 
+def test_every_minor_finding_pointer_advertises_an_invocable_escape_hatch(capsys):
+    from tokenjam.cli.cmd_optimize import _render_report
+
+    since, until = datetime(2026, 5, 1, tzinfo=UTC), datetime(2026, 5, 30, tzinfo=UTC)
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=since, until=until, days=29.0, sessions=12, spans=100,
+            total_tokens=5_000_000, total_cost_usd=0.0, thin_data=False,
+        ),
+        findings={"cache": SimpleNamespace(past_overspend_tokens=1)},
+    )
+    _render_report(report, agent=None, pricing_mode="local")
+    rendered = capsys.readouterr().out
+
+    commands = advertised_commands(rendered)
+    assert "tj optimize cache --expand" in commands
+    for command in commands:
+        assert_invocable(command)
+
+
 @pytest.mark.parametrize("command", [
     "tj status -v",
     "tj -v status",
@@ -175,6 +195,7 @@ def test_every_command_the_optimize_scoreboard_advertises_runs(capsys):
     "tj optimize -v",
     "tj -v optimize",
     "tj optimize <analyzer>",
+    "tj optimize <analyzer> --expand",
     "tj relearn cost-proposals",
 ])
 def test_both_verbose_positions_and_every_drill_down_parse(command):

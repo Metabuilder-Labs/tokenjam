@@ -167,6 +167,8 @@ def _guard_export_templates(selected: set[str], persona: str) -> None:
               help="Skip the --validate cost-estimate confirmation prompt.")
 @click.option("-v", "--verbose", "verbose_flag", is_flag=True, default=False,
               help="Print every finding card in full instead of the scoreboard.")
+@click.option("--expand", is_flag=True, default=False,
+              help="Render full cards for findings below the 1% significance threshold.")
 @json_option
 @click.pass_context
 def cmd_optimize(
@@ -183,6 +185,7 @@ def cmd_optimize(
     samples: int | None,
     assume_yes: bool,
     verbose_flag: bool,
+    expand: bool,
     output_json_flag: bool,
 ) -> None:
     """Find cost-saving opportunities."""
@@ -525,13 +528,14 @@ def cmd_optimize(
     # flag. Both copies are booleans meaning the same thing, so OR is the
     # entire resolution rule.
     verbose = verbose_flag or bool(ctx.obj.get("verbose"))
-    if verbose or requested:
+    if verbose or requested or expand:
         _render_report(
             report, agent=agent, plan_mix=plan_mix,
             dominant_plan=dominant, pricing_mode=pricing_mode,
             declared_plan=declared_plan,
             requested=requested,
             persona=persona,
+            expand=expand,
         )
     else:
         _render_scoreboard(
@@ -850,6 +854,7 @@ def _render_report(
     declared_plan: str | None = None,
     requested: list[str] | None = None,
     persona: str = "unknown",
+    expand: bool = False,
 ) -> None:
     w = report.window
     scope_tag = f", {agent}" if agent else ""
@@ -990,10 +995,17 @@ def _render_report(
     #              spans in this window") never disappears.
     #   minor    — real but de-minimis share: collapsed to a one-line pointer
     #              so it can't crowd out a finding that actually matters.
+    # --expand moves every quantified minor finding into the full-render bucket
+    # for this invocation. The default ranking and visibility remain unchanged.
     ranked = _rank_findings(report, requested)
-    major = [item for item in ranked if item[1] is not None and item[1] >= DE_MINIMIS_SHARE]
+    major = [
+        item for item in ranked
+        if item[1] is not None and (expand or item[1] >= DE_MINIMIS_SHARE)
+    ]
     unranked = [item for item in ranked if item[1] is None]
-    minor = [item for item in ranked if item[1] is not None and item[1] < DE_MINIMIS_SHARE]
+    minor = [] if expand else [
+        item for item in ranked if item[1] is not None and item[1] < DE_MINIMIS_SHARE
+    ]
 
     def _render_finding(name: str, marker: str) -> None:
         if name == "downsize":
@@ -1096,12 +1108,12 @@ def _render_report(
                     f"     [dim]• {label} — "
                     f"{report.downgrade.percent_of_sessions:.0f}% of sessions "
                     f"match, but only ~{share * 100:.1f}% of window tokens. "
-                    f"Run [bold]tj optimize downsize[/bold] for detail.[/dim]"
+                    f"Run [bold]tj optimize downsize --expand[/bold] for detail.[/dim]"
                 )
             else:
                 console.print(
                     f"     [dim]• {label} — ~{share * 100:.1f}% of window "
-                    f"tokens. Run [bold]tj optimize {name}[/bold] for "
+                    f"tokens. Run [bold]tj optimize {name} --expand[/bold] for "
                     f"detail.[/dim]"
                 )
         console.print()
