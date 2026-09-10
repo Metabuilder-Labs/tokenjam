@@ -199,7 +199,9 @@ def test_every_command_the_statusline_nudges_advertise_runs():
     from tokenjam.cli.cmd_statusline import format_status_line
 
     commands: list[str] = []
-    for driver_type in (None, "file_read", "search", "tool_output", "prompt"):
+    driver_types = (None, "file_read", "search", "tool_output", "prompt",
+                    "some_future_type")
+    for driver_type in driver_types:
         for near_limit in (False, True):
             rendered = format_status_line(
                 "Opus 4.8", 1_000_000, 95.0, "CLAUDE.md ×14",

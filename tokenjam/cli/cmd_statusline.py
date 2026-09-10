@@ -53,6 +53,12 @@ _BADGE_CRIT = "\U0001f573️"  # 🕳️ re-read dominating
 # carries the thread) where ``/compact`` is lossy — so that leads, ``/compact``
 # second.
 _STATIC_DRIVERS = frozenset({"file_read", "search"})
+# The history-bloat types, enumerated rather than left as "everything that is
+# not static". A type this build doesn't recognise (a future INCLUSION_* tag, a
+# cache written by a newer tj, an empty string) is something we do NOT know how
+# to remedy, so it routes to the unknown nudge instead of inheriting an offer of
+# ``/compact`` we can't justify.
+_HISTORY_DRIVERS = frozenset({"prompt", "tool_output"})
 
 # Driver-conditional remedies. Terse (it's a statusline), no em dashes (tokenjam
 # copy rule); the ``→`` arrow and punctuation match the shipped nudge style.
@@ -147,25 +153,36 @@ def _nudge_for(driver_type: str | None, near_limit: bool) -> str:
     near full makes ``/compact`` urgent, it does not make it sufficient.
       * near limit + static driver -> both, ``/compact`` now and ``tj context``
         after (the re-reads survive the compaction);
-      * near limit, driver not static -> a direct ``/compact`` (a user-chosen
-        compaction beats a forced auto-compact);
-      * static driver -> a STRUCTURAL remedy only, never ``/compact``;
-      * history-bloat driver (repeated prompts / large tool outputs) -> a
-        memory-preserving fresh session first, ``/compact`` as the blunt second;
-      * driver unknown (no backfill yet / capture off) -> the memory-preserving
-        fresh session, pointing at ``tj context`` to diagnose; no ``/compact``,
-        since an unknown driver may be one compaction cannot reach.
+      * near limit, driver not static or not known -> a direct ``/compact``
+        (a user-chosen compaction beats a forced auto-compact). This is the ONE
+        place an unknown driver is still offered ``/compact``: the window being
+        about to force an auto-compact is true whatever the driver, and the
+        user-chosen one is strictly better than the forced one;
+      * static driver, window not near full -> a STRUCTURAL remedy only, never
+        ``/compact``;
+      * history-bloat driver (repeated prompts / large tool outputs), window not
+        near full -> a memory-preserving fresh session first, ``/compact`` as
+        the blunt second;
+      * driver unknown or unrecognised (no backfill yet / capture off / a cache
+        from a newer tj), window not near full -> the memory-preserving fresh
+        session, pointing at ``tj context`` to diagnose, and no ``/compact``:
+        the driver may be one compaction cannot reach.
     """
-    static = driver_type in _STATIC_DRIVERS
     if near_limit:
-        return _NUDGE_NEAR_LIMIT_STATIC if static else _NUDGE_NEAR_LIMIT
-    if static:
+        return (
+            _NUDGE_NEAR_LIMIT_STATIC if driver_type in _STATIC_DRIVERS
+            else _NUDGE_NEAR_LIMIT
+        )
+    if driver_type in _STATIC_DRIVERS:
         return _NUDGE_STATIC
-    if driver_type is None:
-        return _NUDGE_UNKNOWN
-    # History-bloat driver: compaction CAN reach it, but a fresh session
-    # preserves memory, so that leads and /compact is the blunt second.
-    return _NUDGE_HISTORY
+    if driver_type in _HISTORY_DRIVERS:
+        # Compaction CAN reach this one, but a fresh session preserves memory,
+        # so that leads and /compact is the blunt second.
+        return _NUDGE_HISTORY
+    # None, or a type this build doesn't recognise. Both are "we don't know",
+    # and the /compact we can't justify for an unknown driver is exactly as
+    # unjustified for an unrecognised one.
+    return _NUDGE_UNKNOWN
 
 
 def _badge_and_nudge(
@@ -272,10 +289,19 @@ def render_line(data: dict) -> str:
 
     Always returns at least the model segment; appends token count, the re-read
     badge, and the driver-conditional nudge only when a transcript is found and
-    readable. Past the WARN threshold, also names the top cached re-read driver
-    (e.g. ``"CLAUDE.md ×14"``) when one is available, and uses its classified
-    type — plus the live window fullness — to pick a remedy that ``/compact`` can
-    actually deliver. Never raises — any failure degrades to the model-only line.
+    readable. Whenever the line carries a nudge at all, it also names the top
+    cached re-read driver (e.g. ``"CLAUDE.md ×14"``) when one is available, and
+    uses its classified type — plus the live window fullness — to pick a remedy
+    that ``/compact`` can actually deliver. Never raises — any failure degrades
+    to the model-only line.
+
+    The driver lookup is gated on the SAME condition as the badge escalation in
+    :func:`_badge_and_nudge` (past WARN **or** near the window limit), not on
+    the re-read share alone. Gating it on the share alone left the composed
+    near-limit remedy unreachable for the case it exists for: a short session
+    with a large CLAUDE.md can sit at 170K of a 200K window with a cumulative
+    re-read share under WARN, and it would then be handed a bare ``/compact``
+    the module documents as unable to touch its re-reads.
     """
     model_name = _model_name(data)
     path = find_transcript(data)
@@ -285,11 +311,11 @@ def render_line(data: dict) -> str:
         total, reread_pct, window_tokens = _session_figures(path)
     except Exception:
         return format_status_line(model_name, None, None)
+    near_limit = _window_near_limit(window_tokens, model_name)
     top_driver: str | None = None
     driver_type: str | None = None
-    if reread_pct >= REREAD_WARN:
+    if reread_pct >= REREAD_WARN or near_limit:
         top_driver, driver_type = _top_driver()
-    near_limit = _window_near_limit(window_tokens, model_name)
     return format_status_line(
         model_name, total, reread_pct, top_driver,
         driver_type=driver_type, near_limit=near_limit,

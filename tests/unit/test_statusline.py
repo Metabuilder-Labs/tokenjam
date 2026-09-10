@@ -308,6 +308,34 @@ def test_near_limit_window_composes_with_static_driver(tmp_path):
     assert "tj context" in line
 
 
+def test_near_limit_below_warn_still_loads_the_driver(tmp_path):
+    """The composed remedy has to be REACHABLE from the production caller.
+
+    `render_line` used to look up the cached driver only past REREAD_WARN, so a
+    near-limit session with a modest cumulative re-read share got
+    `_nudge_for(None, True)` and a bare `/compact` however static its driver
+    was. That is the exact user this fix exists for: a short session with a big
+    CLAUDE.md sits at 170K of a 200K window (85%) with re-read well under 70%.
+    Every other test in this file drives `_nudge_for`/`_badge_and_nudge`
+    directly, so none of them can see this gate (Critical Rule 24a: check the
+    path the caller actually takes, not just the function).
+    """
+    _cache(tmp_path, "CLAUDE.md", "file_read")
+    line = _line_with_window(tmp_path, REREAD_WARN - 20, window_tokens=190_000)
+    assert "tj context" in line
+    assert "/compact now" in line
+    assert "CLAUDE.md ×14" in line
+
+
+def test_driver_still_absent_when_neither_gate_fires(tmp_path):
+    """The widened gate is an OR, not a removal: a healthy session below WARN
+    with a roomy window still shows no driver and no nudge."""
+    _cache(tmp_path, "CLAUDE.md", "file_read")
+    line = _line_with_window(tmp_path, REREAD_WARN - 20, window_tokens=20_000)
+    assert "CLAUDE.md" not in line
+    assert "→" not in line
+
+
 def test_near_limit_window_with_history_driver_stays_bare_compact(tmp_path):
     # Non-static driver near the limit: /compact CAN reach it, so the bare
     # near-limit string stands and the line does not grow a second remedy.
@@ -355,6 +383,12 @@ _NUDGE_TABLE = [
     ("prompt", True, _NUDGE_NEAR_LIMIT),
     (None, False, _NUDGE_UNKNOWN),
     (None, True, _NUDGE_NEAR_LIMIT),
+    # A type this build doesn't recognise (a future INCLUSION_* tag, a cache
+    # written by a newer tj, an empty string) is "we don't know" just as much
+    # as None is, and must not inherit the /compact offer.
+    ("some_future_type", False, _NUDGE_UNKNOWN),
+    ("some_future_type", True, _NUDGE_NEAR_LIMIT),
+    ("", False, _NUDGE_UNKNOWN),
 ]
 
 
@@ -381,10 +415,20 @@ def test_a_static_driver_is_never_told_only_to_compact():
             assert "tj context" in nudge
 
 
-def test_every_nudge_that_names_no_driver_points_at_the_diagnostic():
-    """Unknown driver: the user has no idea what is being re-read, so the
-    diagnostic pointer is the one thing the nudge must carry."""
-    assert "tj context" in _nudge_for(None, False)
+def test_no_driver_and_a_roomy_window_points_at_the_diagnostic():
+    """Unknown or unrecognised driver, window not near full: the user has no
+    idea what is being re-read, so the diagnostic pointer is the one thing the
+    nudge must carry, and `/compact` is advice we cannot justify.
+
+    Scoped to the not-near-limit branch on purpose. Near the limit the bare
+    `/compact now` stands whatever the driver (the forced auto-compact is
+    coming regardless), which is what `_nudge_for`'s docstring says and what
+    the table above pins.
+    """
+    for driver_type in (None, "some_future_type", ""):
+        nudge = _nudge_for(driver_type, False)
+        assert "tj context" in nudge
+        assert "/compact" not in nudge
 
 
 def test_nudges_carry_no_em_dash():
