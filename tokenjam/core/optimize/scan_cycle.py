@@ -348,8 +348,18 @@ def _trigger_analyzer_pass(
             # several broad handlers on its way here and any of them can absorb
             # it, so recovery keys off the process-wide record rather than off
             # this frame having seen the exception.
-            from tokenjam.core.db import recover_if_fatal_noted
+            from tokenjam.core.db import fatal_db_error, recover_if_fatal_noted
 
+            # In the `finally`, not at the end of the try, so the driver the
+            # statusline names does not depend on every analyzer having
+            # succeeded. It is the cheapest leg of the pass and the most
+            # user-visible, and leaving it last inside the try made it hostage
+            # to the three most fragile ones — a raise anywhere above skipped
+            # it entirely and the cache aged out exactly as it did before this
+            # was wired up at all. Skipped after a FATAL: the instance is dead,
+            # so the query could only fail, and it is already recorded.
+            if fatal_db_error() is None:
+                _refresh_attribution_cache(backend, config)
             recover_if_fatal_noted(what="analyzer scan cycle")
             # Cleared here and NOWHERE else on the success path: the flag has to
             # outlive the report write, since the two stores built after it are
@@ -373,6 +383,40 @@ def _trigger_analyzer_pass(
         _CYCLE_COMPUTING.clear()
         raise
     return True
+
+
+def _refresh_attribution_cache(backend: Any, config: Any) -> None:
+    """Re-cache the top recurring-inclusion driver the statusline names.
+
+    Last leg of the cycle, and here rather than anywhere else for the reason
+    ``core/attribution_cache`` documents: the statusline is zero-token and
+    must never open the database, so SOMETHING that already holds a
+    connection and the ``[capture]`` flags has to compute the driver and hand
+    it over as a file. A backfill was the only writer, which meant the suffix
+    went dark for good on a machine that never runs one; this pass holds both
+    every time it runs, so the display stays current on its own.
+
+    Cheap next to the analyzer pass it follows (one windowed query against the
+    connection already open) and run AFTER every store is written, so it cannot
+    delay a figure a surface is waiting on — but from the job's ``finally``
+    rather than the end of its ``try``, so the driver does not depend on every
+    analyzer having succeeded. The three legs above it are the most fragile
+    things in the product and this is the cheapest and most user-visible; a
+    raise anywhere above skipped it entirely and left the cache to age out
+    exactly as it did before any of this was wired up. That also means it runs
+    on the declined-overlap path, which is correct: the driver is independent
+    of whether this particular pass had a report to write.
+
+    ``refresh_attribution_cache`` is best-effort and swallows its own failures
+    — including classifying a DuckDB fatal — so nothing here can sink the
+    cycle either.
+    """
+    conn = getattr(backend, "conn", None)
+    if conn is None:  # an in-memory / API backend has no DuckDB connection
+        return
+    from tokenjam.core.attribution_cache import refresh_attribution_cache
+
+    refresh_attribution_cache(conn, getattr(config, "capture", None))
 
 
 def _refresh_rule_presence(config: Any) -> None:
