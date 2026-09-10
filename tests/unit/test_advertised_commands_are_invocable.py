@@ -188,6 +188,35 @@ def test_every_minor_finding_pointer_advertises_an_invocable_escape_hatch(capsys
         assert_invocable(command)
 
 
+def test_every_command_the_statusline_nudges_advertise_runs():
+    """The statusline is the densest advertising surface we have: it renders
+    every turn, and the nudge is the ONLY place the product asks the user to
+    type something. It was not covered by this guard, so a `tj ...` string in
+    a nudge could rot unnoticed. Every nudge string is rendered through the
+    real line builder and every command in it checked, rather than reading the
+    constants directly, so a command introduced by composition is caught too.
+    """
+    from tokenjam.cli.cmd_statusline import format_status_line
+
+    commands: list[str] = []
+    for driver_type in (None, "file_read", "search", "tool_output", "prompt"):
+        for near_limit in (False, True):
+            rendered = format_status_line(
+                "Opus 4.8", 1_000_000, 95.0, "CLAUDE.md ×14",
+                driver_type=driver_type, near_limit=near_limit,
+            )
+            for command in advertised_commands(rendered):
+                if command not in commands:
+                    commands.append(command)
+
+    assert "tj context" in commands, (
+        "the statusline no longer points at any tj command; if that is "
+        "deliberate, this guard should be deleted deliberately too"
+    )
+    for command in commands:
+        assert_invocable(command)
+
+
 @pytest.mark.parametrize("command", [
     "tj status -v",
     "tj -v status",

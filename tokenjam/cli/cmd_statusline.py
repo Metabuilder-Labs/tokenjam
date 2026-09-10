@@ -58,10 +58,22 @@ _STATIC_DRIVERS = frozenset({"file_read", "search"})
 # copy rule); the ``→`` arrow and punctuation match the shipped nudge style.
 _NUDGE_NEAR_LIMIT = "→ /compact now (window near full)"
 _NUDGE_STATIC = "→ trim re-reads: see tj context"
+# Near-full window AND a static driver: both remedies, COMPOSED from the bare
+# near-limit string so the two can't drift. ``/compact`` is still the right
+# immediate move (a user-chosen compaction beats a forced auto-compact) but it
+# cannot touch statically re-injected content, so the structural remedy has to
+# ride along instead of being displaced by it.
+_NUDGE_NEAR_LIMIT_STATIC = f"{_NUDGE_NEAR_LIMIT}, then tj context"
 # Memory-preserving default: a fresh session (the resume-brief carries the
-# thread) beats a lossy /compact. Used for history-bloat drivers AND when the
-# driver is unknown — in neither case is a bare /compact the right lead.
+# thread) beats a lossy /compact. Used for history-bloat drivers, where we know
+# compaction can reach the driver.
 _NUDGE_HISTORY = "→ fresh session (resume-brief) or /compact"
+# Driver UNKNOWN (no backfill yet / capture off / a cache written before the
+# type was recorded). We can't offer /compact here: the driver may well be a
+# static one, and recommending a remedy that might not be able to work is the
+# same fault as recommending it when we know it can't. So: the always-safe
+# memory-preserving option, plus the diagnostic that names the actual driver.
+_NUDGE_UNKNOWN = "→ fresh session (resume-brief) or see tj context"
 
 # Context-window limits used to decide "genuinely near the limit". Claude Code
 # runs a 200K window by default; the 1M-context beta stamps "[1m]" onto the
@@ -130,22 +142,29 @@ def _nudge_for(driver_type: str | None, near_limit: bool) -> str:
 
     ``/compact`` shrinks conversation history only, so suggesting it for a
     statically re-injected driver (CLAUDE.md, @file, re-run searches) is
-    factually wrong — it cannot reduce those re-reads. The remedy is therefore
-    driver-conditional:
-      * window genuinely near its limit -> a direct ``/compact`` (a user-chosen
-        compaction beats a forced auto-compact), whatever the driver;
+    factually wrong — it cannot reduce those re-reads. Near-limit therefore
+    COMPOSES with the driver rather than short-circuiting it: the window being
+    near full makes ``/compact`` urgent, it does not make it sufficient.
+      * near limit + static driver -> both, ``/compact`` now and ``tj context``
+        after (the re-reads survive the compaction);
+      * near limit, driver not static -> a direct ``/compact`` (a user-chosen
+        compaction beats a forced auto-compact);
       * static driver -> a STRUCTURAL remedy only, never ``/compact``;
       * history-bloat driver (repeated prompts / large tool outputs) -> a
         memory-preserving fresh session first, ``/compact`` as the blunt second;
-      * driver unknown (no backfill yet / capture off) -> the same
-        memory-preserving default, pointing at ``tj context`` to diagnose.
+      * driver unknown (no backfill yet / capture off) -> the memory-preserving
+        fresh session, pointing at ``tj context`` to diagnose; no ``/compact``,
+        since an unknown driver may be one compaction cannot reach.
     """
+    static = driver_type in _STATIC_DRIVERS
     if near_limit:
-        return _NUDGE_NEAR_LIMIT
-    if driver_type in _STATIC_DRIVERS:
+        return _NUDGE_NEAR_LIMIT_STATIC if static else _NUDGE_NEAR_LIMIT
+    if static:
         return _NUDGE_STATIC
-    # History-bloat driver, or driver unknown (no backfill yet / capture off):
-    # the same memory-preserving default — never a bare "just /compact".
+    if driver_type is None:
+        return _NUDGE_UNKNOWN
+    # History-bloat driver: compaction CAN reach it, but a fresh session
+    # preserves memory, so that leads and /compact is the blunt second.
     return _NUDGE_HISTORY
 
 
@@ -160,8 +179,9 @@ def _badge_and_nudge(
     The BADGE stays purely threshold-based (severity), except that a genuinely
     near-full window always earns at least a WARN badge — a session about to be
     force-auto-compacted is urgent regardless of its re-read share. The NUDGE is
-    driver-conditional (see :func:`_nudge_for`) so the statusline never suggests
-    ``/compact`` for a re-read class compaction can't touch. Below WARN, with the
+    driver-conditional (see :func:`_nudge_for`) so the statusline never offers
+    ``/compact`` as the ONLY remedy for a re-read class compaction can't touch.
+    Below WARN, with the
     window not near its limit, there's no nudge at all.
     """
     if reread_pct >= REREAD_CRIT:

@@ -22,6 +22,13 @@ from tokenjam.cli.cmd_statusline import (
     cmd_statusline,
     format_status_line,
     render_line,
+    _NUDGE_HISTORY,
+    _NUDGE_NEAR_LIMIT,
+    _NUDGE_NEAR_LIMIT_STATIC,
+    _NUDGE_STATIC,
+    _NUDGE_UNKNOWN,
+    _badge_and_nudge,
+    _nudge_for,
     _session_figures,
 )
 
@@ -133,27 +140,32 @@ def test_healthy_session_has_check_badge_and_no_nudge(tmp_path):
 
 def test_warn_threshold_adds_nudge(tmp_path):
     # Past WARN with no cached driver (driver unknown): the ⚠ badge plus the
-    # memory-preserving default remedy — a fresh session first, /compact offered
-    # as a secondary, never as the sole "just /compact" it used to be.
+    # memory-preserving default remedy AND the diagnostic pointer. These
+    # assertions used to require "/compact" here (Critical Rule 23: a test can
+    # ENFORCE the defect) — with the driver unknown we can't know compaction
+    # would reach it, so the pin is inverted rather than dropped.
     line = _line_for_reread(tmp_path, REREAD_WARN + 1)  # just past warn
     assert "⚠" in line
     assert "resume-brief" in line
-    assert "/compact" in line
+    assert "tj context" in line
+    assert "/compact" not in line
 
 
 def test_crit_threshold_adds_nudge(tmp_path):
     line = _line_for_reread(tmp_path, REREAD_CRIT + 1)  # just past crit
     assert "re-read" in line
     # Even at CRIT, with the driver unknown we don't blindly command /compact —
-    # we lead with the memory-preserving option.
+    # we lead with the memory-preserving option and point at the diagnostic.
     assert "resume-brief" in line
-    assert "/compact" in line
+    assert "tj context" in line
+    assert "/compact" not in line
 
 
 def test_warn_boundary_is_inclusive(tmp_path):
-    # Exactly at the warn threshold should already nudge.
+    # Exactly at the warn threshold should already nudge (the arrow is the
+    # nudge's marker; the old pin on "/compact" is inverted above).
     line = _line_for_reread(tmp_path, REREAD_WARN)
-    assert "/compact" in line
+    assert "→" in line
 
 
 # --- top re-read driver (cached attribution) ---------------------------------
@@ -260,15 +272,17 @@ def test_prompt_driver_leads_with_fresh_session(tmp_path):
 
 
 def test_unknown_driver_falls_back_to_memory_preserving_default(tmp_path):
-    # No cached driver at all (no backfill yet) — still never a bare /compact.
+    # No cached driver at all (no backfill yet, or a cache gone stale) — the
+    # memory-preserving option plus the diagnostic that names the real driver.
     line = _line_for_reread(tmp_path, REREAD_CRIT + 1)
     assert "resume-brief" in line
-    assert "/compact" in line
+    assert "tj context" in line
+    assert "/compact" not in line
 
 
 def test_pre_upgrade_cache_without_type_is_driver_agnostic(tmp_path):
     # A cache written before this change carries no inclusion_type: label still
-    # renders, and the nudge degrades to the driver-agnostic default.
+    # renders, and the nudge degrades to the unknown-driver default.
     from tokenjam.core.attribution_cache import write_attribution_cache
 
     write_attribution_cache(
@@ -277,15 +291,30 @@ def test_pre_upgrade_cache_without_type_is_driver_agnostic(tmp_path):
     line = _line_for_reread(tmp_path, REREAD_CRIT + 1)
     assert "CLAUDE.md ×14" in line
     assert "resume-brief" in line
+    assert "tj context" in line
 
 
-def test_near_limit_window_overrides_static_driver_to_compact(tmp_path):
+def test_near_limit_window_composes_with_static_driver(tmp_path):
     # Case (c): when the window is genuinely near full, a user-chosen /compact
-    # beats a forced auto-compact — even for a static driver.
+    # beats a forced auto-compact. But for a STATIC driver it is not the whole
+    # remedy — compaction cannot reduce re-injected content — so the structural
+    # pointer rides along instead of being displaced. This assertion used to
+    # stop at "/compact now" and so ENFORCED the displacement (Critical Rule
+    # 23); it is inverted here rather than deleted.
     _cache(tmp_path, "CLAUDE.md", "file_read")
     line = _line_with_window(tmp_path, REREAD_CRIT + 1, window_tokens=190_000)
     assert "/compact now" in line
     assert "window near full" in line
+    assert "tj context" in line
+
+
+def test_near_limit_window_with_history_driver_stays_bare_compact(tmp_path):
+    # Non-static driver near the limit: /compact CAN reach it, so the bare
+    # near-limit string stands and the line does not grow a second remedy.
+    _cache(tmp_path, "Bash → …", "tool_output")
+    line = _line_with_window(tmp_path, REREAD_CRIT + 1, window_tokens=190_000)
+    assert "/compact now (window near full)" in line
+    assert "tj context" not in line
 
 
 def test_window_below_limit_keeps_structural_remedy(tmp_path):
@@ -304,6 +333,68 @@ def test_one_million_context_not_flagged_near_limit_at_200k_scale(tmp_path):
     )
     assert "/compact now" not in line
     assert "tj context" in line
+
+
+# --- the nudge table: every (driver_type, near_limit) combination -----------
+#
+# `_nudge_for` documents four cases in prose and returns strings; nothing tied
+# the two together, and they drifted (the docstring promised `tj context` in
+# the unknown case and the string didn't carry it). This table pins the whole
+# cross-product against the constants, so a docstring case with no matching
+# string, or a string change that silently drops a remedy, fails here.
+
+_NUDGE_TABLE = [
+    # (driver_type, near_limit, expected constant)
+    ("file_read", False, _NUDGE_STATIC),
+    ("file_read", True, _NUDGE_NEAR_LIMIT_STATIC),
+    ("search", False, _NUDGE_STATIC),
+    ("search", True, _NUDGE_NEAR_LIMIT_STATIC),
+    ("tool_output", False, _NUDGE_HISTORY),
+    ("tool_output", True, _NUDGE_NEAR_LIMIT),
+    ("prompt", False, _NUDGE_HISTORY),
+    ("prompt", True, _NUDGE_NEAR_LIMIT),
+    (None, False, _NUDGE_UNKNOWN),
+    (None, True, _NUDGE_NEAR_LIMIT),
+]
+
+
+@pytest.mark.parametrize("driver_type,near_limit,expected", _NUDGE_TABLE)
+def test_nudge_table(driver_type, near_limit, expected):
+    assert _nudge_for(driver_type, near_limit) == expected
+
+
+@pytest.mark.parametrize("driver_type,near_limit,expected", _NUDGE_TABLE)
+def test_badge_and_nudge_carries_the_same_table_past_warn(
+    driver_type, near_limit, expected
+):
+    """`_badge_and_nudge` must not re-derive a remedy of its own."""
+    _, nudge = _badge_and_nudge(REREAD_CRIT + 1, driver_type, near_limit)
+    assert nudge == expected
+
+
+def test_a_static_driver_is_never_told_only_to_compact():
+    """The defect in one line: whatever the window, a static driver always gets
+    the structural remedy, and never `/compact` as its only advice."""
+    for driver_type in ("file_read", "search"):
+        for near_limit in (False, True):
+            nudge = _nudge_for(driver_type, near_limit)
+            assert "tj context" in nudge
+
+
+def test_every_nudge_that_names_no_driver_points_at_the_diagnostic():
+    """Unknown driver: the user has no idea what is being re-read, so the
+    diagnostic pointer is the one thing the nudge must carry."""
+    assert "tj context" in _nudge_for(None, False)
+
+
+def test_nudges_carry_no_em_dash():
+    """Repo copy rule, and the statusline is width-constrained prose."""
+    for nudge in (
+        _NUDGE_NEAR_LIMIT, _NUDGE_NEAR_LIMIT_STATIC, _NUDGE_STATIC,
+        _NUDGE_HISTORY, _NUDGE_UNKNOWN,
+    ):
+        assert "—" not in nudge
+        assert nudge.startswith("→")
 
 
 def test_line_reports_model_and_tokens(tmp_path):
