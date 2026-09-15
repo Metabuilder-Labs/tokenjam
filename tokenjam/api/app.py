@@ -131,7 +131,7 @@ def create_app(
     _index_html = ""
     index_path = _UI_DIR / "index.html"
     if index_path.exists():
-        _index_html = index_path.read_text()
+        _index_html = index_path.read_text(encoding="utf-8")
 
     def _serve_ui() -> HTMLResponse:
         html = _index_html

@@ -282,6 +282,34 @@ class ApiBackend:
         data = self._get("/api/v1/cost", params)
         return data.get("total_cost_usd", 0.0)
 
+    def get_unattributed_spend(
+        self,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch unattributed spend summary from tj serve.
+
+        Queries /api/v1/cost with params so daemon mode (tj serve) supports
+        `tj doctor` check #22 and `tj cost` / `tj status` footnotes (#749).
+        """
+        params: dict[str, str] = {}
+        if since is not None:
+            params["since"] = since.isoformat() if isinstance(since, datetime) else str(since)
+        if until is not None:
+            params["until"] = until.isoformat() if isinstance(until, datetime) else str(until)
+        if agent_id:
+            params["agent_id"] = agent_id
+        data = self._get("/api/v1/cost", params)
+        unatt = data.get("unattributed_spend")
+        if isinstance(unatt, dict):
+            return unatt
+        return {
+            "cost_usd": 0.0,
+            "trace_count": 0,
+            "span_count": 0,
+        }
+
     def get_completed_sessions(self, agent_id: str, limit: int) -> list[SessionRecord]:
         # Use /api/v1/status which already returns the latest session per agent
         # with token counts and tool_call_count populated. Without this,
@@ -600,6 +628,7 @@ def _dict_to_span(d: dict) -> NormalizedSpan:
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),
         billing_account=d.get("billing_account"),
+        attribution_step=d.get("attribution_step"),
     )
 
 

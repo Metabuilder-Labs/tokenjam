@@ -136,6 +136,9 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     #     backfilled history predates that and never got the content.
     checks.append(_check_content_capture_backfill_gap(config, ctx.obj["db"]))
 
+    # 22. Unattributed spend — shared traces without unambiguous parentage (#749)
+    checks.append(_check_unattributed_spend(ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -1995,6 +1998,44 @@ def _check_onboarding_first_signal(config: object, db: object) -> dict:
         "message": (
             "Onboarded but no spans have been recorded yet. "
             + not_confirmed_cause(persona)
+        ),
+    }
+
+
+def _check_unattributed_spend(db: object) -> dict:
+    """Report spend not assigned to a named session (#749)."""
+    name = "Unattributed spend"
+    get_unatt = getattr(db, "get_unattributed_spend", None)
+    if get_unatt is None:
+        return {
+            "name": name,
+            "level": "info",
+            "message": "Skipped — storage backend does not support unattributed spend reporting.",
+        }
+    try:
+        data = get_unatt()
+    except Exception as e:
+        return {"name": name, "level": "info", "message": f"Skipped — could not query unattributed spend: {e}"}
+
+    cost_usd = float(data.get("cost_usd") or 0.0)
+    span_count = int(data.get("span_count") or 0)
+    trace_count = int(data.get("trace_count") or 0)
+
+    if cost_usd <= 0.0 and span_count == 0:
+        return {
+            "name": name,
+            "level": "ok",
+            "message": "All spend is attributed to named sessions.",
+        }
+
+    from tokenjam.utils.formatting import format_cost
+    return {
+        "name": name,
+        "level": "info",
+        "message": (
+            f"{format_cost(cost_usd)} across {span_count} span(s) on {trace_count} trace(s) "
+            "is in the unattributed bucket (not assigned to a named session). "
+            "Inspect it with tj cost --group-by session."
         ),
     }
 

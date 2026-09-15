@@ -514,7 +514,7 @@ def plan_tier_mix(
     # Built by concatenating static fragments (never f-string SQL, per CLAUDE.md
     # Critical Rule 7). Placeholder indices are appended as the params list grows;
     # every value is bound through a $N parameter, never interpolated.
-    clauses: list[str] = []
+    clauses: list[str] = ["(status IS NULL OR status != 'superseded')"]
     params: list[Any] = []
     if since is not None:
         params.append(since)

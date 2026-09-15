@@ -12,7 +12,7 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("--since", default="7d", help="Time window (e.g. 1h, 7d, 2026-03-01)")
 @click.option("--group-by", "group_by",
-              type=click.Choice(["agent", "model", "day", "tool"]),
+              type=click.Choice(["agent", "model", "day", "tool", "session"]),
               default="day")
 @click.option("--compare", "compare", default=None,
               help="Compare to a prior window. Accepts 'previous', 'last-week', "
@@ -77,11 +77,21 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
     total_in = sum(r.input_tokens for r in rows)
     total_out = sum(r.output_tokens for r in rows)
 
+    unattributed = None
+    if hasattr(db, "get_unattributed_spend"):
+        try:
+            unattributed = db.get_unattributed_spend(since=since_dt, agent_id=agent)
+        except Exception:
+            unattributed = None
+
     if output_json:
-        click.echo(json.dumps({
+        payload = {
             "rows": [vars(r) for r in rows],
             "total_cost_usd": total,
-        }, default=str))
+        }
+        if unattributed:
+            payload["unattributed_spend"] = unattributed
+        click.echo(json.dumps(payload, default=str))
         return
 
     if not rows:
@@ -132,6 +142,18 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
         table.add_row("", format_tokens(total_in), format_tokens(total_out),
                       format_tokens(cache_r), format_tokens(cache_w),
                       f"[bold]{_cost(total)}[/bold]")
+    elif group_by == "session":
+        table = make_table("SESSION", "TOKENS IN", "TOKENS OUT", "CACHE R", "CACHE W", "COST")
+        for r in rows:
+            table.add_row(
+                r.group,
+                format_tokens(r.input_tokens), format_tokens(r.output_tokens),
+                format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
+                _cost(r.cost_usd),
+            )
+        table.add_row("", format_tokens(total_in), format_tokens(total_out),
+                      format_tokens(cache_r), format_tokens(cache_w),
+                      f"[bold]{_cost(total)}[/bold]")
     elif group_by == "tool":
         # Tool-call spans carry no cost or tokens of their own — cost is
         # attributed to the LLM completion span the tool call accompanied,
@@ -150,6 +172,16 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
                       f"[bold]{sum(r.call_count for r in rows)}[/bold]")
 
     console.print(table)
+    if unattributed and float(unattributed.get("cost_usd") or 0.0) > 0.0:
+        cost_val = float(unattributed["cost_usd"])
+        span_cnt = int(unattributed.get("span_count") or 0)
+        trace_cnt = int(unattributed.get("trace_count") or 0)
+        console.print()
+        console.print(
+            f"[yellow]Note: {format_cost(cost_val)} across {span_cnt} span(s) "
+            f"({trace_cnt} trace(s)) is unattributed (not assigned to a named session).[/yellow]"
+        )
+        console.print("Inspect the breakdown with [accent]tj cost --group-by session[/accent].")
     _print_pricing_coverage(db, agent, since, since_dt)
 
 

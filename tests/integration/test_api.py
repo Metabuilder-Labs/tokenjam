@@ -1443,6 +1443,25 @@ async def test_sessions_filter_by_agent_id(client, db):
     assert {s["session_id"] for s in data["sessions"]} == {"s1"}
 
 
+async def test_sessions_list_filters_out_superseded_by_default(client, db):
+    """GET /api/v1/sessions filters out status='superseded' when status param is not specified,
+    but returns it when explicitly queried with ?status=superseded."""
+    db.upsert_session(make_session(agent_id="alpha", session_id="s_active", status="active"))
+    db.upsert_session(make_session(agent_id="alpha", session_id="s_super", status="superseded"))
+
+    resp = await client.get("/api/v1/sessions")
+    assert resp.status_code == 200
+    ids = {s["session_id"] for s in resp.json()["sessions"]}
+    assert "s_active" in ids
+    assert "s_super" not in ids
+
+    resp_super = await client.get("/api/v1/sessions", params={"status": "superseded"})
+    assert resp_super.status_code == 200
+    super_ids = {s["session_id"] for s in resp_super.json()["sessions"]}
+    assert "s_super" in super_ids
+    assert "s_active" not in super_ids
+
+
 # ── Budget ─────────────────────────────────────────────────────────────────
 
 async def test_post_budget_zero_clears_limit(db):

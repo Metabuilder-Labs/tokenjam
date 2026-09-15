@@ -138,6 +138,28 @@ def test_get_session_by_conversation_returns_none_for_unknown(db):
     assert result is None
 
 
+def test_get_session_by_conversation_skips_superseded_rows(db):
+    _insert_agent(db)
+    conversation_id = new_uuid()
+    current = make_session(
+        conversation_id=conversation_id,
+        status="active",
+        started_at=utcnow(),
+    )
+    superseded = make_session(
+        conversation_id=conversation_id,
+        status="superseded",
+        started_at=utcnow() + timedelta(minutes=1),
+    )
+    db.upsert_session(current)
+    db.upsert_session(superseded)
+
+    found = db.get_session_by_conversation(conversation_id)
+
+    assert found is not None
+    assert found.session_id == current.session_id
+
+
 # -- Cost queries --
 
 def test_get_daily_cost_sums_correctly(db):

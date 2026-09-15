@@ -203,3 +203,41 @@ async def test_analytics_group_by_tenant():
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         d = (await c.get("/api/v1/analytics?since=30d&metric=spend&group_by=tenant")).json()
     assert "acme-corp" in d["groups"]
+
+
+@pytest.mark.asyncio
+async def test_cost_group_by_session_with_unattributed():
+    """GET /cost?group_by=session surfaces named sessions and unattributed bucket."""
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    session = make_session(session_id="s1")
+    db.upsert_session(session)
+    db.insert_span(make_llm_span(
+        session_id="s1", model="claude-haiku-4-5", cost_usd=2.5,
+    ))
+    db.insert_span(make_llm_span(
+        session_id=None, model="claude-haiku-4-5", cost_usd=1.5,
+    ))
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/cost?since=30d&group_by=session")).json()
+    groups = {r["group"]: r["cost_usd"] for r in d["rows"]}
+    assert groups["s1"] == pytest.approx(2.5)
+    assert groups["unattributed"] == pytest.approx(1.5)
+    assert d["unattributed_spend"] is not None
+    assert d["unattributed_spend"]["cost_usd"] == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
+async def test_status_discloses_unattributed_spend_when_nonzero():
+    """GET /status includes unattributed_spend when spans with session_id=NULL exist."""
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    db.insert_span(make_llm_span(
+        session_id=None, model="claude-haiku-4-5", cost_usd=3.0,
+    ))
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/status")).json()
+    assert d["unattributed_spend"] is not None
+    assert d["unattributed_spend"]["cost_usd"] == pytest.approx(3.0)

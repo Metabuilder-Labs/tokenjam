@@ -611,7 +611,7 @@ def _duckdb_with_dropped_migration_7(tmp_path):
     backend = DuckDBBackend(StorageConfig(path=str(tmp_path / "telemetry.duckdb")))
     for idx in (
         "idx_spans_trace_id", "idx_spans_agent_id", "idx_spans_start_time",
-        "idx_spans_tool_name", "idx_spans_conv_id",
+        "idx_spans_tool_name", "idx_spans_conv_id", "idx_spans_session_id",
     ):
         backend.conn.execute(f"DROP INDEX IF EXISTS {idx}")
     backend.conn.execute("ALTER TABLE spans DROP COLUMN request_params")
@@ -2002,6 +2002,57 @@ def test_cost_compare_invalid_keyword_rejected(runner, db, config):
     result = _invoke(runner, db, config, ["cost", "--compare", "yesterday"])
     assert result.exit_code != 0
     assert "Unknown --compare" in result.output
+
+
+def test_cost_group_by_session_cli(runner, db, config):
+    """`tj cost --group-by session` displays SESSION column and unattributed disclosure."""
+    from tests.factories import make_llm_span, make_session
+    s = make_session(session_id="sess-named-1")
+    db.upsert_session(s)
+    db.insert_span(make_llm_span(session_id="sess-named-1", cost_usd=1.23))
+    db.insert_span(make_llm_span(session_id=None, trace_id="tr-unatt-cli", cost_usd=0.88))
+
+    result = _invoke(runner, db, config, ["cost", "--group-by", "session", "--since", "30d"])
+    assert result.exit_code == 0
+    assert "SESSION" in result.output
+    assert "sess-named-1" in result.output
+    assert "unattributed" in result.output
+    assert "is unattributed" in result.output
+    assert "not assigned" in result.output
+    assert "unambiguous parentage" not in result.output
+
+
+def test_cost_group_by_session_json_cli(runner, db, config):
+    """`tj cost --group-by session --json` includes rows and unattributed_spend."""
+    from tests.factories import make_llm_span, make_session
+    s = make_session(session_id="sess-named-json")
+    db.upsert_session(s)
+    db.insert_span(make_llm_span(session_id="sess-named-json", cost_usd=2.50))
+    db.insert_span(make_llm_span(session_id=None, trace_id="tr-unatt-json", cost_usd=1.10))
+
+    result = _invoke(runner, db, config, ["cost", "--group-by", "session", "--since", "30d", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    groups = {r["group"]: r["cost_usd"] for r in data["rows"]}
+    assert "sess-named-json" in groups
+    assert "unattributed" in groups
+    assert "unattributed_spend" in data
+    assert data["unattributed_spend"]["cost_usd"] == pytest.approx(1.10)
+
+
+def test_status_unattributed_disclosure_cli(runner, db, config):
+    """`tj status` discloses unattributed spend when present."""
+    from tests.factories import make_llm_span, make_session
+    s = make_session(session_id="sess-active", agent_id="agent-active")
+    db.upsert_session(s)
+    db.insert_span(make_llm_span(session_id="sess-active", agent_id="agent-active", cost_usd=1.0))
+    db.insert_span(make_llm_span(session_id=None, trace_id="tr-orphan", cost_usd=0.50))
+
+    result = _invoke(runner, db, config, ["status"])
+    assert result.exit_code == 0
+    assert "is unattributed" in result.output
+    assert "not assigned" in result.output
+    assert "unambiguous parentage" not in result.output
 
 
 def test_optimize_compare_appends_window_diff(runner, db, config):

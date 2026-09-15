@@ -4,6 +4,7 @@ and migration runner. DuckDB only — never import sqlite3.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 import functools
 import json
 import logging
@@ -105,6 +106,9 @@ class StorageBackend(Protocol):
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
     def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None: ...
     def get_trace_cost_stats(self, filters: TraceFilters) -> TraceCostStats: ...
+    def get_session_ids_for_trace(self, trace_id: str) -> list[str]: ...
+    def get_marker_session_ids_for_trace(self, trace_id: str) -> list[str]: ...
+    def reconcile_trace_session_attribution(self, trace_id: str) -> None: ...
     def get_session_id_for_trace(self, trace_id: str) -> str | None: ...
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]: ...
     def get_alerts(self, filters: AlertFilters) -> list[Alert]: ...
@@ -139,6 +143,12 @@ class StorageBackend(Protocol):
         prev_since: datetime, prev_until: datetime, top_n: int,
         persona: str | None = None,
     ) -> list[dict]: ...
+    def get_unattributed_spend(
+        self,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]: ...
     def delete_spans_before(
         self,
         cutoff: datetime,
@@ -208,6 +218,7 @@ SPANS_INDEXES: tuple[tuple[str, str], ...] = (
     ("idx_spans_start_time", "start_time"),
     ("idx_spans_tool_name",  "tool_name"),
     ("idx_spans_conv_id",    "conversation_id"),
+    ("idx_spans_session_id", "session_id"),
 )
 
 # Secondary indexes on sessions. Single-sourced for the same reason as the spans
@@ -255,7 +266,7 @@ _SPAN_BULK_COLUMNS: tuple[str, ...] = (
     "cache_write_tokens", "request_params", "request_tools", "sub_agent_id",
     "tenant_id", "feature", "environment", "service_version", "commit_sha",
     "prompt_template_id", "prompt_template_version", "pricing_source",
-    "sub_agent_type",
+    "sub_agent_type", "attribution_step",
 )
 
 # read_json column -> type. Timestamps are read as VARCHAR and cast to TIMESTAMPTZ
@@ -277,6 +288,7 @@ _SPAN_BULK_READ_TYPES: dict[str, str] = {
     "service_version": "VARCHAR", "commit_sha": "VARCHAR",
     "prompt_template_id": "VARCHAR", "prompt_template_version": "VARCHAR",
     "pricing_source": "VARCHAR", "sub_agent_type": "VARCHAR",
+    "attribution_step": "VARCHAR",
 }
 
 # Columns that need a cast in the SELECT (read as VARCHAR, stored as TIMESTAMPTZ).
@@ -463,6 +475,7 @@ def _span_to_json_obj(span: NormalizedSpan) -> dict:
         "prompt_template_version": span.prompt_template_version,
         "pricing_source": span.pricing_source,
         "sub_agent_type": span.sub_agent_type,
+        "attribution_step": span.attribution_step,
     }
 
 
@@ -615,7 +628,8 @@ MIGRATIONS: list[tuple[int, str]] = [
         "DROP INDEX IF EXISTS idx_spans_agent_id;\n"
         "DROP INDEX IF EXISTS idx_spans_start_time;\n"
         "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
-        "DROP INDEX IF EXISTS idx_spans_conv_id"
+        "DROP INDEX IF EXISTS idx_spans_conv_id;\n"
+        "DROP INDEX IF EXISTS idx_spans_session_id"
     )),
     (3, SPANS_INDEX_SQL),
     # Migration 4: billing_account on spans, plan_tier on sessions.
@@ -927,6 +941,15 @@ MIGRATIONS: list[tuple[int, str]] = [
     # survive between analysis runs and be invalidated by the spec hash rather
     # than re-taken on a schedule.
     (22, AGENT_CONFIG_FILES_TABLE_SQL + ";\n" + AGENT_CONFIG_INDEX_SQL),
+    # Migration 23: session-scoped span reconciliation index. The ingest-time
+    # trace repair groups affected rows by session_id; keep that lookup bounded
+    # on stores with a large cross-trace history. Additive and idempotent.
+    (23, "CREATE INDEX IF NOT EXISTS idx_spans_session_id ON spans(session_id)"),
+    # Migration 24: span attribution resolution step (Ownership 3-step ladder).
+    # Records the ownership ladder step at ingest ('explicit', 'conversation',
+    # 'step1_parent', 'step2_marker', 'step3_unattributed', 'provisional')
+    # directly as a typed column rather than contaminating the OTel attributes JSON.
+    (24, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS attribution_step TEXT"),
 ]
 
 
@@ -963,6 +986,7 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("sessions", "source",                  "TEXT"),               # migration 21
     ("sessions", "task_statement_hash",     "TEXT"),               # migration 21
     ("sessions", "dominant_model",          "TEXT"),               # migration 21
+    ("spans",    "attribution_step",        "TEXT"),               # migration 24
 ]
 
 
@@ -1242,6 +1266,46 @@ def session_cost_drift(
     total = sum(abs(float(r[2]) - float(r[1])) for r in rows)
     worst = [(str(r[0]), float(r[1]), float(r[2])) for r in rows[:limit]]
     return len(rows), total, worst
+
+
+def get_unattributed_spend_summary(
+    conn: duckdb.DuckDBPyConnection,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Summary of spend not assigned to a named session."""
+    clauses = ["session_id IS NULL"]
+    params: list[Any] = []
+    if since:
+        clauses.append(f"start_time >= ${len(params) + 1}")
+        params.append(since)
+    if until:
+        clauses.append(f"start_time <= ${len(params) + 1}")
+        params.append(until)
+    if agent_id:
+        clauses.append(f"agent_id = ${len(params) + 1}")
+        params.append(agent_id)
+    where = " AND ".join(clauses)
+    # This intentionally sums stored sessionless observations. The
+    # session-keyed duplicate-observation winner rule cannot apply without a
+    # session key; revisit this query if sessionless cross-source deduplication
+    # is introduced.
+    row = conn.execute(
+        f"SELECT COALESCE(SUM(cost_usd), 0.0), "
+        f"COUNT(DISTINCT trace_id), "
+        f"COUNT(*) "
+        f"FROM spans WHERE {where}",
+        params,
+    ).fetchone()
+    cost = float(row[0] or 0.0) if row else 0.0
+    traces = int(row[1] or 0) if row else 0
+    spans = int(row[2] or 0) if row else 0
+    return {
+        "cost_usd": round(cost, 8),
+        "trace_count": traces,
+        "span_count": spans,
+    }
 
 
 # --- Duplicate call observations --------------------------------------------
@@ -1533,7 +1597,8 @@ def purge_duplicate_call_observations(conn: duckdb.DuckDBPyConnection) -> tuple[
         "DROP INDEX IF EXISTS idx_spans_agent_id;\n"
         "DROP INDEX IF EXISTS idx_spans_start_time;\n"
         "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
-        "DROP INDEX IF EXISTS idx_spans_conv_id"
+        "DROP INDEX IF EXISTS idx_spans_conv_id;\n"
+        "DROP INDEX IF EXISTS idx_spans_session_id"
     )
     try:
         chunk = 5000
@@ -1654,6 +1719,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         prompt_template_id=d.get("prompt_template_id"),
         prompt_template_version=d.get("prompt_template_version"),
         pricing_source=d.get("pricing_source"),
+        attribution_step=d.get("attribution_step"),
     )
 
 
@@ -2739,10 +2805,10 @@ class DuckDBBackend:
                 "cache_write_tokens, request_params, request_tools, sub_agent_id, "
                 "tenant_id, feature, environment, service_version, commit_sha, "
                 "prompt_template_id, prompt_template_version, pricing_source, "
-                "sub_agent_type"
+                "sub_agent_type, attribution_step"
                 ") VALUES "
                 "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,"
-                "$29,$30,$31,$32,$33,$34,$35,$36,$37)",
+                "$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)",
                 [
                     span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                     span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -2756,7 +2822,7 @@ class DuckDBBackend:
                     span.sub_agent_id,
                     span.tenant_id, span.feature, span.environment, span.service_version,
                     span.commit_sha, span.prompt_template_id, span.prompt_template_version,
-                    span.pricing_source, span.sub_agent_type,
+                    span.pricing_source, span.sub_agent_type, span.attribution_step,
                 ],
             )
         ingest_watermark.bump(1)
@@ -3187,7 +3253,8 @@ class DuckDBBackend:
                 "DROP INDEX IF EXISTS idx_spans_agent_id;\n"
                 "DROP INDEX IF EXISTS idx_spans_start_time;\n"
                 "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
-                "DROP INDEX IF EXISTS idx_spans_conv_id"
+                "DROP INDEX IF EXISTS idx_spans_conv_id;\n"
+                "DROP INDEX IF EXISTS idx_spans_session_id"
             )
             try:
                 chunk = 5000
@@ -3269,6 +3336,7 @@ class DuckDBBackend:
     def get_session_by_conversation(self, conversation_id: str) -> SessionRecord | None:
         cur = self.conn.execute(
             "SELECT * FROM sessions WHERE conversation_id = $1 "
+            "AND (status IS NULL OR status != 'superseded') "
             "ORDER BY started_at DESC LIMIT 1",
             [conversation_id],
         )
@@ -3515,12 +3583,182 @@ class DuckDBBackend:
         row = self.conn.execute(sql, params).fetchone()
         return int(row[0] or 0) if row else 0
 
+    def get_session_ids_for_trace(self, trace_id: str) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT session_id FROM spans "
+            "WHERE trace_id = $1 AND session_id IS NOT NULL "
+            "ORDER BY session_id",
+            [trace_id],
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def get_marker_session_ids_for_trace(self, trace_id: str) -> list[str]:
+        """Return distinct session ids from explicit session marker spans.
+
+        A trace can contain several sessions during fan-out. The old
+        ``LIMIT 1`` lookup silently selected whichever row happened to come
+        first, so a trace-only span could be charged to the wrong session.
+        Marker identity is narrower than arbitrary span membership and lets
+        ingest distinguish an unambiguous trace from a shared one.
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT session_id FROM spans "
+            "WHERE trace_id = $1 AND session_id IS NOT NULL "
+            "AND (attribution_step IS NULL OR attribution_step IN ('explicit', 'conversation')) "
+            "ORDER BY session_id",
+            [trace_id],
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def reconcile_trace_session_attribution(self, trace_id: str) -> None:
+        """Reconcile provisional trace-derived spans after a marker arrives.
+
+        Ownership 3-step ladder (first match wins):
+        1. Step 1: Parent-span ownership (child attaches to parent span's session if resolved).
+        2. Step 2: Sole-marker ownership (trace carries exactly 1 explicit marker).
+        3. Step 3: Unattributed (more than 1 marker & no parentage -> genuinely ambiguous).
+        Provisional session rows are marked superseded rather than deleted,
+        ensuring reference safety on the ingest path.
+        """
+        with self._write_lock:
+            in_tx = False
+            try:
+                marker_ids = self.get_marker_session_ids_for_trace(trace_id)
+                if not marker_ids:
+                    return
+
+                spans_rows = self.conn.execute(
+                    "SELECT span_id, parent_span_id, session_id, attribution_step "
+                    "FROM spans WHERE trace_id = $1",
+                    [trace_id],
+                ).fetchall()
+                if not spans_rows:
+                    return
+
+                parent_map: dict[str, str | None] = {}
+                explicit_map: dict[str, str] = {}
+                span_info: dict[str, tuple[str | None, str | None]] = {}
+
+                for row in spans_rows:
+                    s_id = str(row[0])
+                    p_id = str(row[1]) if row[1] is not None else None
+                    sess_id = str(row[2]) if row[2] is not None else None
+                    step = str(row[3]) if row[3] is not None else None
+                    parent_map[s_id] = p_id
+                    span_info[s_id] = (sess_id, step)
+                    if sess_id and (step in ("explicit", "conversation") or (step is None and sess_id in marker_ids)):
+                        explicit_map[s_id] = sess_id
+
+                resolved_cache: dict[str, str | None] = {}
+
+                def resolve_chain(span_id: str, visited: set[str]) -> str | None:
+                    if span_id in resolved_cache:
+                        return resolved_cache[span_id]
+                    if span_id in explicit_map:
+                        return explicit_map[span_id]
+                    p_id = parent_map.get(span_id)
+                    if not p_id or p_id in visited or len(visited) >= 128:
+                        return None
+                    visited.add(p_id)
+                    res = resolve_chain(p_id, visited)
+                    if res is not None:
+                        resolved_cache[span_id] = res
+                    return res
+
+                updates: list[tuple[str, str | None, str]] = []
+                old_session_ids: set[str] = set()
+
+                marker_span_ids = set(explicit_map.keys())
+                for s_id, (curr_sess, curr_step) in span_info.items():
+                    if curr_step in ("explicit", "conversation") or s_id in marker_span_ids:
+                        continue
+                    chain_sess = resolve_chain(s_id, set())
+                    if chain_sess is not None:
+                        new_sess = chain_sess
+                        new_step = "step1_parent"
+                    elif len(marker_ids) == 1:
+                        new_sess = marker_ids[0]
+                        new_step = "step2_marker"
+                    else:
+                        new_sess = None
+                        new_step = "step3_unattributed"
+
+                    if curr_sess != new_sess or curr_step != new_step:
+                        updates.append((s_id, new_sess, new_step))
+                        if curr_sess is not None:
+                            old_session_ids.add(curr_sess)
+
+                if not updates:
+                    return
+
+                self.conn.execute("BEGIN TRANSACTION")
+                in_tx = True
+
+                affected = set(old_session_ids)
+                grouped_updates: dict[tuple[str | None, str], list[str]] = defaultdict(list)
+                for s_id, new_sess, new_step in updates:
+                    grouped_updates[(new_sess, new_step)].append(s_id)
+                    if new_sess is not None:
+                        affected.add(new_sess)
+
+                eligible_count = len(span_info) - len(marker_span_ids)
+                if len(grouped_updates) == 1 and len(updates) == eligible_count:
+                    (new_sess, new_step) = next(iter(grouped_updates.keys()))
+                    start_idx = 4 if new_sess is not None else 3
+                    placeholders = ", ".join(f"${i + start_idx}" for i in range(len(marker_span_ids)))
+                    not_in_clause = f" AND span_id NOT IN ({placeholders})" if placeholders else ""
+                    if new_sess is not None:
+                        self.conn.execute(
+                            f"UPDATE spans SET session_id = $1, attribution_step = $2 "
+                            f"WHERE trace_id = $3{not_in_clause}",
+                            [new_sess, new_step, trace_id, *sorted(marker_span_ids)],
+                        )
+                    else:
+                        self.conn.execute(
+                            f"UPDATE spans SET session_id = NULL, attribution_step = $1 "
+                            f"WHERE trace_id = $2{not_in_clause}",
+                            [new_step, trace_id, *sorted(marker_span_ids)],
+                        )
+                else:
+                    for (new_sess, new_step), span_ids in grouped_updates.items():
+                        if new_sess is not None:
+                            self.conn.execute(
+                                "UPDATE spans SET session_id = $1, attribution_step = $2 "
+                                "WHERE span_id IN (SELECT unnest($3))",
+                                [new_sess, new_step, span_ids],
+                            )
+                        else:
+                            self.conn.execute(
+                                "UPDATE spans SET session_id = NULL, attribution_step = $1 "
+                                "WHERE span_id IN (SELECT unnest($2))",
+                                [new_step, span_ids],
+                            )
+
+                self.recompute_session_totals_from_spans(sorted(affected))
+                for session_id in old_session_ids - set(marker_ids):
+                    self.conn.execute(
+                        "UPDATE sessions SET status = 'superseded', "
+                        "input_tokens = 0, output_tokens = 0, cache_tokens = 0, "
+                        "cache_write_tokens = 0, total_cost_usd = 0.0, tool_call_count = 0 "
+                        "WHERE session_id = $1 AND NOT EXISTS (SELECT 1 FROM spans WHERE session_id = $1)",
+                        [session_id],
+                    )
+                self.conn.execute("COMMIT")
+                in_tx = False
+            except Exception as exc:
+                if is_fatal_db_error(exc):
+                    note_fatal_db_error(exc)
+                if in_tx:
+                    try:
+                        self.conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                raise
+
     def get_session_id_for_trace(self, trace_id: str) -> str | None:
-        row = self.conn.execute(
-            "SELECT session_id FROM spans WHERE trace_id = $1 AND session_id IS NOT NULL LIMIT 1",
-            [trace_id]
-        ).fetchone()
-        return row[0] if row else None
+        """Return the trace session only when the trace is unambiguous."""
+        session_ids = self.get_session_ids_for_trace(trace_id)
+        return session_ids[0] if len(session_ids) == 1 else None
 
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
         cur = self.conn.execute(
@@ -3562,6 +3800,7 @@ class DuckDBBackend:
             "feature": "feature",
             "environment": "environment",
             "prompt_version": "prompt_template_version",
+            "session": "COALESCE(session_id, 'unattributed')",
         }
         group_expr = group_col_map.get(
             filters.group_by, "CAST(start_time AT TIME ZONE 'UTC' AS DATE)"
@@ -3653,9 +3892,9 @@ class DuckDBBackend:
                 f"GROUP BY grp "
                 f"ORDER BY COUNT(*) DESC"
             )
-        elif filters.group_by in attribution_dims:
+        elif filters.group_by in attribution_dims or filters.group_by == "session":
             # Biggest spender first — the whole point of this grouping is
-            # concentration (which tenant/feature/environment/prompt version is
+            # concentration (which tenant/feature/environment/prompt version/session is
             # driving spend), so cost order is the useful default.
             sql = (
                 f"SELECT {group_expr} AS grp, NULL AS agent_id, NULL AS model, " + token_cols
@@ -3681,6 +3920,16 @@ class DuckDBBackend:
             )
             for r in rows
         ]
+
+    def get_unattributed_spend(
+        self,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        return get_unattributed_spend_summary(
+            self.conn, since=since, until=until, agent_id=agent_id,
+        )
 
     def get_alerts(self, filters: AlertFilters) -> list[Alert]:
         from tokenjam.core.models import AlertType, Severity
@@ -3925,7 +4174,8 @@ class DuckDBBackend:
     def count_unknown_plan_tier_sessions(self) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) FROM sessions "
-            "WHERE plan_tier IS NULL OR plan_tier = 'unknown'"
+            "WHERE (plan_tier IS NULL OR plan_tier = 'unknown') "
+            "AND (status IS NULL OR status != 'superseded')"
         ).fetchone()
         return int(row[0]) if row else 0
 

@@ -176,6 +176,20 @@ def test_timeline_empty_db_has_no_data():
     assert timeline.total_sessions == 0
 
 
+def test_timeline_excludes_superseded_sessions():
+    from tests.factories import make_session
+
+    db = InMemoryBackend()
+    db.upsert_session(make_session(session_id="active1", status="active", input_tokens=100))
+    db.upsert_session(make_session(session_id="superseded1", status="superseded", input_tokens=200))
+
+    timeline = compute_session_timeline(db.conn)
+    assert timeline.total_sessions == 1
+    assert len(timeline.sessions) == 1
+    assert timeline.sessions[0].session_id == "active1"
+    assert timeline.total_tokens == 100
+
+
 # ── CLI: the zero-setup first run, with NO on-disk DB ────────────────────────
 
 def _invoke_quickstart(args):

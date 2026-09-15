@@ -87,10 +87,21 @@ def test_get_session_active_seconds_matches_helper(db):
     assert db.get_session_active_seconds("missing") is None
 
 
+def test_session_scoped_span_reconciliation_index_exists(db):
+    indexes = {
+        row[0]
+        for row in db.conn.execute(
+            "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'spans'"
+        ).fetchall()
+    }
+    assert "idx_spans_session_id" in indexes
+
+
 def test_count_unknown_plan_tier_sessions(db):
     db.upsert_session(make_session(session_id="api1", plan_tier="api"))
     db.upsert_session(make_session(session_id="unk1", plan_tier="unknown"))
     db.upsert_session(make_session(session_id="unk2", plan_tier="unknown"))
+    db.upsert_session(make_session(session_id="unk_superseded", plan_tier="unknown", status="superseded"))
     assert db.count_unknown_plan_tier_sessions() == 2
 
 
