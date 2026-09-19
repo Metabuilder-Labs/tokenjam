@@ -155,12 +155,24 @@ def cmd_status(
         except Exception:
             unknown_count = 0
 
+    unattributed_spend = None
+    if hasattr(db, "get_unattributed_spend"):
+        try:
+            unatt = db.get_unattributed_spend(agent_id=agent_filter)
+            if unatt and float(unatt.get("cost_usd") or 0.0) > 0.0:
+                unattributed_spend = unatt
+        except Exception:
+            unattributed_spend = None
+
     if output_json:
-        click.echo(json.dumps({
+        payload = {
             "agents": agents_data,
             "has_active_alerts": has_active_alerts,
             "unknown_plan_tier_sessions": unknown_count,
-        }, default=str))
+        }
+        if unattributed_spend:
+            payload["unattributed_spend"] = unattributed_spend
+        click.echo(json.dumps(payload, default=str))
     else:
         # Two views over the same data. The cards are reached deliberately —
         # by naming an agent, or by asking for all of them with -v — rather
@@ -186,6 +198,15 @@ def cmd_status(
                 f"Run [bold]tj onboard --claude-code --reconfigure[/bold] "
                 f"(or [bold]--codex[/bold]) to set it.[/dim]"
             )
+        if unattributed_spend:
+            cost_val = float(unattributed_spend["cost_usd"])
+            span_cnt = int(unattributed_spend.get("span_count") or 0)
+            trace_cnt = int(unattributed_spend.get("trace_count") or 0)
+            console.print(
+                f"[yellow]Note: {format_cost(cost_val)} across {span_cnt} span(s) "
+                f"({trace_cnt} trace(s)) is unattributed (not assigned to a named session).[/yellow]"
+            )
+            console.print("Inspect the breakdown with [accent]tj cost --group-by session[/accent].")
         teaser = _recoverable_teaser(ctx.obj.get("config"))
         if teaser:
             console.print(teaser)

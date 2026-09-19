@@ -225,6 +225,7 @@ def test_every_command_the_statusline_nudges_advertise_runs():
     "tj status --agent <id>",
     "tj optimize -v",
     "tj -v optimize",
+    "tj cost --group-by session",
     "tj optimize <analyzer>",
     "tj optimize <analyzer> --expand",
     "tj relearn cost-proposals",

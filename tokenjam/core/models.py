@@ -246,6 +246,10 @@ class NormalizedSpan:
     # recoverable after the fact instead of looking like a correctly-priced
     # one once only the dollar figure remains.
     pricing_source:          str | None = None
+    # Attribution resolution step recorded at ingest (Ownership 3-step ladder):
+    # 'explicit', 'conversation', 'step1_parent', 'step2_marker',
+    # 'step3_unattributed', or 'provisional'. Stays out of span.attributes JSON.
+    attribution_step:        str | None = None
 
 
 @dataclass
@@ -635,7 +639,7 @@ class CostFilters:
     agent_id:  str | None   = None
     since:     datetime | None = None
     until:     datetime | None = None
-    # agent | model | day | tool | tenant | feature | environment | prompt_version
+    # agent | model | day | tool | tenant | feature | environment | prompt_version | session
     group_by:  str          = "day"
     # Equality filters for the new cost-attribution dimensions (#SDK dashboard
     # shape). Independent of group_by — e.g. group_by="model" + tenant_id="acme"

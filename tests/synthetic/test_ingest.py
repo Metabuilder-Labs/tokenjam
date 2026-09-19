@@ -1,8 +1,8 @@
 """Tests for tokenjam.core.ingest — sanitizer, pipeline, session resolution, capture stripping."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 import pytest
 
@@ -11,9 +11,8 @@ from tokenjam.core.ingest import (
     IngestPipeline,
     SpanRejectedError,
     SpanSanitizer,
-    strip_captured_content,
 )
-from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
+from tokenjam.core.models import NormalizedSpan, SessionRecord
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tests.factories import (
     make_invoke_agent_span,
@@ -47,18 +46,60 @@ class _StubBackend:
 
     def get_session_by_conversation(self, conversation_id: str) -> SessionRecord | None:
         for s in self.sessions.values():
-            if s.conversation_id == conversation_id:
+            if s.conversation_id == conversation_id and s.status != "superseded":
                 return s
         return None
 
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
         return [s for s in self.spans if s.trace_id == trace_id]
 
+    def get_span(self, trace_id: str, span_id: str) -> NormalizedSpan | None:
+        for s in self.spans:
+            if s.trace_id == trace_id and s.span_id == span_id:
+                return s
+        return None
+
     def get_session_id_for_trace(self, trace_id: str) -> str | None:
         for s in self.spans:
             if s.trace_id == trace_id and s.session_id:
                 return s.session_id
         return None
+
+    def get_session_ids_for_trace(self, trace_id: str) -> list[str]:
+        return list(dict.fromkeys(
+            s.session_id for s in self.spans
+            if s.trace_id == trace_id and s.session_id
+        ))
+
+    def get_marker_session_ids_for_trace(self, trace_id: str) -> list[str]:
+        return sorted(list(dict.fromkeys(
+            s.session_id for s in self.spans
+            if s.trace_id == trace_id
+            and s.session_id
+            and s.attribution_step in {None, "explicit", "conversation"}
+        )))
+
+
+    def get_unattributed_spend(
+        self,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        unatt_spans = [
+            s for s in self.spans
+            if s.session_id is None
+            and (agent_id is None or s.agent_id == agent_id)
+            and (since is None or (s.start_time and s.start_time >= since))
+            and (until is None or (s.start_time and s.start_time <= until))
+        ]
+        cost_usd = sum(s.cost_usd or 0.0 for s in unatt_spans)
+        trace_ids = {s.trace_id for s in unatt_spans if s.trace_id}
+        return {
+            "cost_usd": cost_usd,
+            "span_count": len(unatt_spans),
+            "trace_count": len(trace_ids),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +295,48 @@ class TestSessionResolution:
         # No new session should have been created.
         assert len(db.sessions) == 1
 
+    def test_shared_trace_does_not_choose_an_arbitrary_session(self):
+        """Ambiguous trace membership must not assign one session's cost to
+        another session merely because its marker arrived first.
+        """
+        trace_id = "trace-shared-by-two-sessions"
+        pipeline, db = _make_pipeline()
+
+        pipeline.process(make_invoke_agent_span(session_id="w1", trace_id=trace_id))
+        pipeline.process(make_invoke_agent_span(session_id="w2", trace_id=trace_id))
+
+        cost_span = make_llm_span(trace_id=trace_id, cost_usd=2.0)
+        cost_span.session_id = None
+        cost_span.conversation_id = None
+        pipeline.process(cost_span)
+
+        assert db.spans[-1].session_id is None
+        assert len(db.sessions) == 2
+        unattributed = db.get_unattributed_spend()
+        assert unattributed["span_count"] == 1
+        assert unattributed["trace_count"] == 1
+        assert unattributed["cost_usd"] == pytest.approx(2.0)
+
+    def test_parent_session_wins_when_trace_has_multiple_sessions(self):
+        """A parent marker identifies the child even when another session's
+        marker was inserted first on the same trace.
+        """
+        trace_id = "trace-parent-disambiguates"
+        pipeline, db = _make_pipeline()
+
+        w2 = make_invoke_agent_span(session_id="w2", trace_id=trace_id)
+        pipeline.process(w2)
+        w1 = make_invoke_agent_span(session_id="w1", trace_id=trace_id)
+        pipeline.process(w1)
+
+        cost_span = make_llm_span(trace_id=trace_id)
+        cost_span.session_id = None
+        cost_span.conversation_id = None
+        cost_span.parent_span_id = w1.span_id
+        pipeline.process(cost_span)
+
+        assert db.spans[-1].session_id == "w1"
+
     def test_spans_on_different_traces_get_independent_sessions(self):
         """Spans on different traces are not accidentally merged (#326 guard).
 
@@ -279,38 +362,245 @@ class TestSessionResolution:
         assert session_id_a != session_id_b
         assert len(db.sessions) == 2
 
-    def test_cost_span_before_marker_gets_own_session(self):
-        """Ordering caveat: if a cost span arrives before the session-marker on
-        the same trace, the trace lookup finds no session-bearing sibling yet
-        and a fresh session is minted.
-
-        This is a known, documented limitation of the step-3 resolution in
-        _resolve_session (#326).  On every real ingestion path the marker span
-        is emitted first, so this ordering does not occur in practice.  The
-        test exists to lock in the behaviour and flag it clearly if the code
-        ever attempts to retroactively re-parent such spans.
+    def test_generic_otlp_sole_marker_with_custom_name_resolves_child_spans(self):
+        """Generic OTLP markers with custom names (e.g. 'workflow') must act
+        as sole markers when exactly one exists on the trace, resolving child spans
+        via step2_marker (#749).
         """
-        trace_id = "trace-reverse-order"
+        trace_id = "trace-otlp-custom-sole"
         pipeline, db = _make_pipeline()
 
-        # 1. Cost span arrives first — no sibling with a session_id yet.
+        marker = make_invoke_agent_span(session_id="wf-session", trace_id=trace_id)
+        marker.name = "workflow"
+        pipeline.process(marker)
+        assert len(db.sessions) == 1
+
         cost_span = make_llm_span(trace_id=trace_id)
         cost_span.session_id = None
         cost_span.conversation_id = None
         pipeline.process(cost_span)
 
-        minted_session_id = db.spans[0].session_id
-        assert minted_session_id is not None
+        assert db.spans[-1].session_id == "wf-session"
+        assert db.spans[-1].attribution_step == "step2_marker"
         assert len(db.sessions) == 1
 
-        # 2. Marker span arrives second with its own session_id.
-        marker = make_invoke_agent_span(session_id="s-marker", trace_id=trace_id)
-        pipeline.process(marker)
+    def test_generic_otlp_multi_marker_with_custom_names_resolves_to_unattributed(self):
+        """Generic OTLP traces with multiple custom-named session roots
+        (e.g. 'workflow' and 'agent.run') must recognize all markers and resolve
+        unparented spans to step3_unattributed (#749).
+        """
+        trace_id = "trace-otlp-custom-multi"
+        pipeline, db = _make_pipeline()
 
-        # The marker keeps its own session; cost span keeps the minted one.
-        assert db.spans[0].session_id == minted_session_id
-        assert db.spans[1].session_id == "s-marker"
+        m1 = make_invoke_agent_span(session_id="wf-1", trace_id=trace_id)
+        m1.name = "workflow"
+        pipeline.process(m1)
+
+        m2 = make_invoke_agent_span(session_id="wf-2", trace_id=trace_id)
+        m2.name = "agent.run"
+        pipeline.process(m2)
+
+        cost_span = make_llm_span(trace_id=trace_id, cost_usd=2.0)
+        cost_span.session_id = None
+        cost_span.conversation_id = None
+        pipeline.process(cost_span)
+
+        assert db.spans[-1].session_id is None
+        assert db.spans[-1].attribution_step == "step3_unattributed"
         assert len(db.sessions) == 2
+        unattributed = db.get_unattributed_spend()
+        assert unattributed["span_count"] == 1
+        assert unattributed["trace_count"] == 1
+        assert unattributed["cost_usd"] == pytest.approx(2.0)
+
+    def test_generic_otlp_nested_custom_markers_forward_arrival_resolves_to_parent_marker(self):
+        """Nested generic OTLP markers (workflow -> agent.run) must attribute child
+        spans to the immediate parent's session via step1_parent, not unattributed (#749).
+        """
+        trace_id = "trace-otlp-nested-forward"
+        pipeline, db = _make_pipeline()
+
+        # 1. Root workflow marker arrives
+        root = make_invoke_agent_span(session_id="wf-root", trace_id=trace_id)
+        root.span_id = "s-root"
+        root.name = "workflow"
+        pipeline.process(root)
+
+        # 2. Subagent marker arrives (nested child of root with explicit session)
+        sub = make_invoke_agent_span(session_id="sub-agent", trace_id=trace_id)
+        sub.span_id = "s-sub"
+        sub.parent_span_id = "s-root"
+        sub.name = "agent.run"
+        pipeline.process(sub)
+
+        # 3. Child span under subagent arrives
+        child = make_llm_span(trace_id=trace_id)
+        child.span_id = "s-child"
+        child.parent_span_id = "s-sub"
+        child.session_id = None
+        child.conversation_id = None
+        pipeline.process(child)
+
+        assert db.spans[-1].session_id == "sub-agent"
+        assert db.spans[-1].attribution_step == "step1_parent"
+        assert len(db.sessions) == 2
+
+    def test_generic_otlp_multiple_spans_same_custom_name_same_session(self):
+        """Multiple spans with the same custom name and same session_id are recognized
+        as a sole marker, resolving unparented spans to step2_marker (#749).
+        """
+        trace_id = "trace-otlp-same-name-same-sess"
+        pipeline, db = _make_pipeline()
+
+        m1 = make_invoke_agent_span(session_id="wf-shared", trace_id=trace_id)
+        m1.name = "workflow"
+        pipeline.process(m1)
+
+        m2 = make_invoke_agent_span(session_id="wf-shared", trace_id=trace_id)
+        m2.name = "workflow"
+        pipeline.process(m2)
+
+        cost_span = make_llm_span(trace_id=trace_id)
+        cost_span.session_id = None
+        cost_span.conversation_id = None
+        pipeline.process(cost_span)
+
+        assert db.spans[-1].session_id == "wf-shared"
+        assert db.spans[-1].attribution_step == "step2_marker"
+        assert len(db.sessions) == 1
+
+    def test_child_spans_with_known_conversation_resolve_by_conversation(self):
+        """A known conversation remains explicit ownership even when a parent agrees."""
+        trace_id = "trace-conv-inherit"
+        pipeline, db = _make_pipeline()
+        conv_id = "conv-inherited-42"
+
+        # 1. Root span with conversation_id
+        root = make_invoke_agent_span(conversation_id=conv_id, trace_id=trace_id)
+        root.session_id = None
+        pipeline.process(root)
+
+        root_span = db.spans[0]
+        assert root_span.attribution_step == "conversation"
+        assert pipeline._is_session_marker(root_span) is True
+
+        # Cache should contain root span
+        cache_key = (trace_id, root.span_id)
+        assert cache_key in pipeline._parent_cache
+
+        # 2. Child span inherits conversation_id and has parent_span_id
+        child = make_llm_span(conversation_id=conv_id, trace_id=trace_id)
+        child.session_id = None
+        child.parent_span_id = root.span_id
+        pipeline.process(child)
+
+        child_span = db.spans[1]
+        assert child_span.session_id == root_span.session_id
+        assert child_span.attribution_step == "conversation"
+
+        # Parent cache must remain populated after child ingest.
+        assert cache_key in pipeline._parent_cache
+        child_cache_key = (trace_id, child.span_id)
+        assert child_cache_key in pipeline._parent_cache
+
+    def test_parent_cache_promotes_a_hit_before_eviction(self, monkeypatch):
+        """A cache hit keeps the parent available when the bounded cache evicts."""
+        import tokenjam.core.ingest as ingest_module
+
+        monkeypatch.setattr(ingest_module, "_PARENT_CACHE_MAXSIZE", 2)
+        pipeline, _ = _make_pipeline()
+
+        first = make_invoke_agent_span(session_id="first", trace_id="cache-first")
+        second = make_invoke_agent_span(session_id="second", trace_id="cache-second")
+        pipeline.process(first)
+        pipeline.process(second)
+
+        child = make_llm_span(trace_id="cache-first")
+        child.session_id = None
+        child.conversation_id = None
+        child.parent_span_id = first.span_id
+        pipeline.process(child)
+
+        assert ("cache-first", first.span_id) in pipeline._parent_cache
+        assert ("cache-second", second.span_id) not in pipeline._parent_cache
+
+    def test_five_trace_only_cost_spans_mint_exactly_one_session(self):
+        """Preserve #326 behavior: 5 trace-only cost spans without marker
+        must share exactly one minted provisional session (must fail at five if broken).
+        """
+        trace_id = "trace-five-spans-no-marker"
+        pipeline, db = _make_pipeline()
+
+        for _ in range(5):
+            span = make_llm_span(trace_id=trace_id)
+            span.session_id = None
+            span.conversation_id = None
+            pipeline.process(span)
+
+        session_ids = {s.session_id for s in db.spans}
+        assert len(session_ids) == 1
+        assert None not in session_ids
+        assert len(db.sessions) == 1
+
+    def test_attribution_step_stored_on_field_not_in_attributes(self):
+        """Attribution step is recorded on span.attribution_step, NOT in span.attributes."""
+        trace_id = "trace-attr-provenance"
+        pipeline, db = _make_pipeline()
+
+        span = make_llm_span(trace_id=trace_id)
+        span.session_id = None
+        span.conversation_id = None
+        pipeline.process(span)
+
+        stored = db.spans[0]
+        assert stored.attribution_step == "provisional"
+        assert "tokenjam.session_attribution" not in stored.attributes
+
+    def test_parent_chain_resolution_uses_get_span_not_get_trace_spans(self):
+        """Issue #749: Parent resolution must use get_span / cache, never get_trace_spans."""
+        trace_id = "trace-bounded-resolution"
+        pipeline, db = _make_pipeline()
+
+        parent = make_llm_span(trace_id=trace_id)
+        parent.session_id = None
+        parent.conversation_id = None
+        pipeline.process(parent)
+
+        # Monkeypatch get_trace_spans to fail if called
+        def boom(_trace_id):
+            raise AssertionError("get_trace_spans must not be called during parent chain resolution")
+
+        db.get_trace_spans = boom
+
+        child = make_llm_span(trace_id=trace_id)
+        child.session_id = None
+        child.conversation_id = None
+        child.parent_span_id = parent.span_id
+        # Should succeed using _parent_cache / get_span without calling get_trace_spans
+        pipeline.process(child)
+
+        assert db.spans[1].session_id == db.spans[0].session_id
+
+    def test_deep_parent_chain_resolves_to_root_session(self):
+        """A deep parent chain preserves its root session through the cache."""
+        trace_id = "trace-deep-chain-scale"
+        pipeline, db = _make_pipeline()
+
+        root = make_invoke_agent_span(session_id="root-sess", trace_id=trace_id)
+        pipeline.process(root)
+
+        last_span_id = root.span_id
+        for i in range(500):
+            span = make_llm_span(trace_id=trace_id)
+            span.parent_span_id = last_span_id
+            span.session_id = None
+            span.conversation_id = None
+            pipeline.process(span)
+            last_span_id = span.span_id
+
+        assert len(db.spans) == 501
+        assert all(s.session_id == "root-sess" for s in db.spans)
+        assert all(s.attribution_step == "step1_parent" for s in db.spans[1:])
 
 
 # ===========================================================================

@@ -99,7 +99,7 @@ def compute_session_timeline(
     """
     result = SessionTimeline()
 
-    where = "started_at IS NOT NULL"
+    where = "started_at IS NOT NULL AND (status IS NULL OR status != 'superseded')"
     params: list[Any] = []
     if agent_id:
         where += " AND agent_id = $1"

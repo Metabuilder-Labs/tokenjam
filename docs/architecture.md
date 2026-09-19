@@ -426,6 +426,8 @@ Renderers (`tj optimize`, `tj cost`, the web UI cost views) read `pricing_mode` 
 
 `SessionRecord.plan_tier` defaults to `unknown` for backfilled rows (no plan signal in the source data). `tj status` surfaces a one-line note when unknown-tier sessions exist; `tj optimize` refuses to render dollar figures for those sessions until the user resolves them via `tj onboard --reconfigure`.
 
+Optimize analyzers do not see unattributed spend; use `tj cost --group-by session` to inspect it.
+
 ---
 
 ## SDK cost-attribution dimensions (multi-tenant cost breakdown)

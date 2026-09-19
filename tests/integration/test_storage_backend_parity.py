@@ -85,6 +85,7 @@ SHIM_PARITY_METHODS = {
     "get_baseline",
     "get_session_commits",
     "get_session",
+    "get_unattributed_spend",
 }
 
 # Methods the shim implements but that intentionally return a degraded / stub
@@ -123,6 +124,8 @@ SHIM_NOT_IMPLEMENTED = {
     "get_trace_cost_stats",
     "get_session_active_seconds",
     "get_session_by_conversation",
+    "get_session_ids_for_trace",
+    "get_marker_session_ids_for_trace",
     "get_window_cost_totals",
     "increment_session_cost",
     "insert_alert",
@@ -132,6 +135,7 @@ SHIM_NOT_IMPLEMENTED = {
     "insert_validation",
     "mark_sessions_completed",
     "update_span_cost",
+    "reconcile_trace_session_attribution",
     "upsert_agent",
     "upsert_baseline",
     "upsert_session",
@@ -178,6 +182,7 @@ def _proj_spans(spans) -> list:
             round(s.cost_usd or 0.0, 6),
             s.model,
             s.provider,
+            s.attribution_step,
             json.dumps(s.attributes or {}, sort_keys=True),
         )
         for s in spans
@@ -199,6 +204,7 @@ def _proj_span(span) -> tuple | None:
         round(span.cost_usd or 0.0, 6),
         span.model,
         span.provider,
+        span.attribution_step,
         json.dumps(span.attributes or {}, sort_keys=True),
     )
 
@@ -274,6 +280,14 @@ def _proj_baseline(baseline) -> tuple | None:
     )
 
 
+def _proj_unattributed_spend(data: dict) -> tuple:
+    return (
+        round(float(data.get("cost_usd", 0.0) or 0.0), 6),
+        int(data.get("trace_count", 0) or 0),
+        int(data.get("span_count", 0) or 0),
+    )
+
+
 # (invoke, project) per parity method. ``now``/``trace_id`` are bound at seed
 # time so get_daily_cost targets the seeded historical day and get_trace_spans a
 # real trace. The historical daily-cost target is load-bearing: querying today
@@ -291,6 +305,7 @@ def _parity_specs(now, trace_id, span_id="span-id"):
         "get_baseline": (lambda b: b.get_baseline(AGENT), _proj_baseline),
         "get_session_commits": (lambda b: b.get_session_commits(SESSION), _proj_commits),
         "get_session": (lambda b: b.get_session(SESSION), _proj_session),
+        "get_unattributed_spend": (lambda b: b.get_unattributed_spend(), _proj_unattributed_spend),
     }
 
 
@@ -336,11 +351,23 @@ def _build_dataset(now) -> _Dataset:
             span = dataclasses.replace(span, trace_id=trace_id)
         spans.append(span)
 
+    spans[0].attribution_step = "explicit"
+
     # A span three days back — get_daily_cost(historical_day) must return only
     # this span, not the cumulative total from that day through now.
     spans.append(make_llm_span(
         agent_id=AGENT, session_id=SESSION, input_tokens=500, output_tokens=100,
         cost_usd=99.0, start_time=now - timedelta(days=3),
+    ))
+    # A costed sessionless LLM span makes unattributed-spend parity prove a
+    # nonzero value instead of comparing two empty buckets.
+    spans.append(make_llm_span(
+        agent_id=AGENT,
+        session_id=None,
+        trace_id="unattributed-parity-trace",
+        input_tokens=250,
+        output_tokens=50,
+        cost_usd=1.25,
     ))
     for _ in range(2):
         spans.append(make_tool_span(agent_id=AGENT, tool_name="grep"))
@@ -457,6 +484,17 @@ def test_shim_matches_db(_parity_env, method):
         f"  db  = {db_result}\n"
         f"  shim= {shim_result}"
     )
+
+
+def test_unattributed_spend_has_one_canonical_dollar_value(_parity_env):
+    """The summary exposes one nonzero dollar amount, never duplicate aliases."""
+    summary = _parity_env["db"].get_unattributed_spend()
+
+    assert summary == {
+        "cost_usd": pytest.approx(1.25),
+        "trace_count": 3,
+        "span_count": 3,
+    }
 
 
 # ---------------------------------------------------------------------------

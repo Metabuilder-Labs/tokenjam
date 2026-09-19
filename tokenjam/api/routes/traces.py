@@ -298,6 +298,7 @@ def _span_to_dict(span: object, include_attributes: bool = False) -> dict:
         "cost_usd": span.cost_usd,
         "request_type": span.request_type,
         "conversation_id": span.conversation_id,
+        "attribution_step": span.attribution_step,
         # Cheap boolean so the UI knows whether a lazy attributes-fetch is worth
         # making for this span (no attributes → don't show the fetch affordance).
         "has_attributes": bool(span.attributes),

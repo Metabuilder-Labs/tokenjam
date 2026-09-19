@@ -51,7 +51,7 @@ def _drop_all_indexes(conn) -> None:
     indexes are not the subject of these tests."""
     for idx in (
         "idx_spans_trace_id", "idx_spans_agent_id", "idx_spans_start_time",
-        "idx_spans_tool_name", "idx_spans_conv_id",
+        "idx_spans_tool_name", "idx_spans_conv_id", "idx_spans_session_id",
         "idx_sessions_agent_id", "idx_sessions_conv_id",
     ):
         conn.execute(f"DROP INDEX IF EXISTS {idx}")

@@ -145,6 +145,8 @@ async def list_sessions(
     if status:
         params.append(status)
         clauses.append(f"status = ${len(params)}")
+    else:
+        clauses.append("(status IS NULL OR status != 'superseded')")
     if agent_id:
         params.append(agent_id)
         clauses.append(f"agent_id = ${len(params)}")
