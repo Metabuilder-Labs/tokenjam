@@ -501,6 +501,42 @@ class IngestConfig:
     startup_lookback_days: int = 14
 
 
+#: Where `tj init --cloud` points when no endpoint is given (contracts §6).
+DEFAULT_CLOUD_ENDPOINT = "https://tokenjam-cloud-api.onrender.com"
+
+
+@dataclass
+class CloudConfig:
+    """`[cloud]` — the bridge to TokenJam Cloud (ledger W5; contracts §6, §9).
+
+    Written by `tj init --cloud <key> --org <org>` into the config `tj init`
+    resolves, which is untracked (Critical Rule 20: the block carries a live
+    per-org ingest key). The daemon forwards spans, sessions and
+    `session_commits` only while `is_active` holds: the block must be present
+    with both credentials AND `enabled` true. An absent block forwards nothing.
+
+    `forward_content` is the second half of the contracts §6 gate: prompt,
+    completion and tool content cross only when the local `[capture]` toggles
+    keep it AND this is true. Off by default; the §9 emission list a user
+    confirms at `tj init --cloud` describes the default.
+    """
+    enabled:         bool = True
+    endpoint:        str  = DEFAULT_CLOUD_ENDPOINT
+    org_id:          str  = ""
+    ingest_key:      str  = ""
+    forward_content: bool = False
+
+    @property
+    def configured(self) -> bool:
+        """Both credentials present, whatever `enabled` says."""
+        return bool(self.org_id.strip() and self.ingest_key.strip())
+
+    @property
+    def is_active(self) -> bool:
+        """Whether the forwarder may send anything at all."""
+        return self.enabled and self.configured
+
+
 @dataclass
 class TjConfig:
     version:  str
@@ -526,6 +562,7 @@ class TjConfig:
     optimize: OptimizeConfig          = field(default_factory=OptimizeConfig)
     loop:     LoopConfig              = field(default_factory=LoopConfig)
     ingest:   IngestConfig            = field(default_factory=IngestConfig)
+    cloud:    CloudConfig             = field(default_factory=CloudConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     policies: list[PolicyConfig]      = field(default_factory=list)
     # Manual session_id -> human label overrides ([session_labels] in TOML).
@@ -917,6 +954,20 @@ def _parse(raw: dict) -> TjConfig:
         ),
     )
 
+    # [cloud] — the bridge to TokenJam Cloud. Absent means "never forward";
+    # the dataclass defaults (enabled, empty credentials) make `is_active`
+    # false until `tj init --cloud` writes both credentials.
+    cloud_raw = raw.get("cloud", {})
+    if not isinstance(cloud_raw, dict):
+        cloud_raw = {}
+    cloud_cfg = CloudConfig(
+        enabled=bool(cloud_raw.get("enabled", CloudConfig.enabled)),
+        endpoint=str(cloud_raw.get("endpoint") or CloudConfig.endpoint),
+        org_id=str(cloud_raw.get("org_id") or ""),
+        ingest_key=str(cloud_raw.get("ingest_key") or ""),
+        forward_content=bool(cloud_raw.get("forward_content", CloudConfig.forward_content)),
+    )
+
     summarize = SummarizeConfig(
         api_model=raw.get("summarize", {}).get("api_model"),
         allow_outbound_run=bool(raw.get("summarize", {}).get("allow_outbound_run", False)),
@@ -1044,6 +1095,7 @@ def _parse(raw: dict) -> TjConfig:
         optimize=optimize,
         loop=loop_cfg,
         ingest=ingest_cfg,
+        cloud=cloud_cfg,
         budgets=budgets,
         policies=policies,
         session_labels=dict(raw.get("session_labels", {})),
@@ -1075,6 +1127,12 @@ def _serialise(config: TjConfig) -> dict:
     d = _dc_to_dict(config)
     # `budgets` (dataclass field) maps to `[budget.*]` (TOML key); strip raw form.
     d.pop("budgets", None)
+
+    # `[cloud]` is written only once `tj init --cloud` has filled it in: an
+    # empty block with `enabled = true` would read as a half-configured bridge
+    # in every config the wizard writes.
+    if not config.cloud.configured:
+        d.pop("cloud", None)
 
     # `session_idle_minutes` (scalar field) maps to the `[sessions]` table.
     idle_minutes = d.pop("session_idle_minutes", None)
