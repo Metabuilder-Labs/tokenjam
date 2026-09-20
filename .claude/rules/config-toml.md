@@ -4,6 +4,7 @@ paths:
   - "tokenjam/core/config.py"
   - "tokenjam/core/pricing.py"
   - "tokenjam/cli/cmd_onboard.py"
+  - "tokenjam/cli/ledger_cloud.py"
   - "tokenjam/cli/cmd_policy.py"
   - "tokenjam/cli/cmd_pricing.py"
   - "**/*.toml"

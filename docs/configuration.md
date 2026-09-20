@@ -95,6 +95,13 @@ include_captured_content = false
   [export.otlp]
   endpoint = ""           # set to forward spans to an external OTel backend
   protocol = "http"            # http | grpc
+
+[cloud]                   # written by `tj init --cloud <key> --org <org>`; absent = never forward
+enabled         = true
+endpoint        = "https://tokenjam-cloud-api.onrender.com"
+org_id          = "org_..."
+ingest_key      = "tj_live_..."   # a live per-org secret: keep this file untracked
+forward_content = false           # prompts / completions / tool outputs never cross while false
 ```
 
 ## Analyzer scans
@@ -204,7 +211,7 @@ Set limits via CLI (`tj budget --daily 10`), the REST API (`POST /api/v1/budget`
 
 ## Content capture and privacy
 
-By default, `tj` captures prompt content (`capture.prompts`) — needed for `tj optimize trim`, `cache-recommend`, and `reuse`'s prompt-prefix mode to work out of the box — plus tool-call inputs from the onboarding templates (`capture.tool_inputs`, Read/Grep/Glob file paths and search queries, not their content). Completion content and tool outputs stay off by default: no analyzer needs them yet, and completion text is the largest, least useful payload. All capture is local-only — it stays in your own telemetry DB and is never sent anywhere. Adjust any flag in `[capture]` when you need something different (or less):
+By default, `tj` captures prompt content (`capture.prompts`) — needed for `tj optimize trim`, `cache-recommend`, and `reuse`'s prompt-prefix mode to work out of the box — plus tool-call inputs from the onboarding templates (`capture.tool_inputs`, Read/Grep/Glob file paths and search queries, not their content). Completion content and tool outputs stay off by default: no analyzer needs them yet, and completion text is the largest, least useful payload. All capture is local-only — it stays in your own telemetry DB and is never sent anywhere unless you connect TokenJam Cloud (below), and even then content crosses only when `[cloud] forward_content = true` as well. Adjust any flag in `[capture]` when you need something different (or less):
 
 ```toml
 [capture]
@@ -227,6 +234,28 @@ The four flags are independent: capture prompts without completions, or tool inp
 - `tj optimize cache-recommend` reads prompts and requires `capture.prompts = true`.
 
 The analyzers that need content fail with a clear message ("set `capture.prompts = true` in tj.toml and let the daemon collect a fresh window of data") rather than running on partial data.
+
+## TokenJam Cloud bridge
+
+`tj init --cloud <key> --org <org>` connects this machine to a TokenJam Cloud organization so Cloud can measure cost per merged PR from real sessions. It writes `[cloud]` into the config `tj init` resolves and, from then on, the `tj serve` daemon forwards three things every five minutes (plus once right away): spans (the existing OTLP shape), sessions, and the session-to-commit joins `tj optimize shipped` builds. Everything is resumable from `~/.tj/cloud_sync.json`, so a machine that was offline catches up on its own.
+
+Before the first byte leaves, the command prints what does and does not cross, and waits for a yes (`--yes` skips the question):
+
+- **Leaves the machine:** token counts, model names, cost, timestamps, tool names, file paths touched, session / repo / branch / commit identifiers, hashed developer id, git author email.
+- **Never leaves by default:** prompt text, completions, tool outputs, file contents, diffs, secrets. Setting `forward_content = true` forwards whatever your `[capture]` toggles keep locally; both must be on for any content to cross.
+
+`tj init --cloud off` turns forwarding off in place and keeps the key. `tj status` shows `Cloud: connected · N spans, M sessions, K commits sent · last 2m ago`, or the reason Cloud disabled forwarding (a rejected key stops every later pass until you re-run `tj init --cloud` with a current one). `tj doctor` checks the endpoint answers and accepts the key without sending any telemetry.
+
+```toml
+[cloud]
+enabled         = true
+endpoint        = "https://tokenjam-cloud-api.onrender.com"
+org_id          = "org_..."
+ingest_key      = "tj_live_..."
+forward_content = false
+```
+
+The block holds a live per-organization ingest key. `.tj/config.toml` is untracked for exactly this reason; keep it that way.
 
 ## Pricing overrides
 

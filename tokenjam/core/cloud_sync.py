@@ -252,9 +252,19 @@ def save_state(state: SyncState, path: Path | None = None) -> None:
 
 
 def reset_state(*, org_id: str, path: Path | None = None) -> SyncState:
-    """`tj init --cloud` start-over: fresh marks for `org_id`, no disable
-    reason, counters at zero. Written immediately."""
-    state = SyncState(org_id=org_id)
+    """What `tj init --cloud` does to the resume state. For the org the marks
+    already describe, only the receiver's disable and the last error are
+    cleared (a re-run with a fresh key resumes, it does not re-send history);
+    for any other org the marks start over, since that org holds none of the
+    rows. Written immediately."""
+    existing = load_state(path)
+    if existing.org_id == org_id:
+        existing.disabled_reason = None
+        existing.disabled_at = None
+        existing.last_error = None
+        state = existing
+    else:
+        state = SyncState(org_id=org_id)
     save_state(state, path)
     return state
 
@@ -710,6 +720,8 @@ class _Source:
 
     def _page(self, sql_all: str, sql_from: str, sql_after: str,
               inclusive: bool, hwm: datetime | None, limit: int) -> Any:
+        """One cursor over a page: everything (no mark yet), from the mark
+        inclusive, or strictly past it."""
         if hwm is None:
             return self.db.conn.execute(sql_all, [limit])
         return self.db.conn.execute(sql_from if inclusive else sql_after, [hwm, limit])
@@ -717,51 +729,55 @@ class _Source:
     def spans(self, mark: StreamMark, limit: int) -> list[NormalizedSpan]:
         from tokenjam.core.db import _row_to_span
 
-        def _fetch(inclusive: bool, hwm: datetime | None) -> list[NormalizedSpan]:
-            cur = self._page(_SPANS_ALL, _SPANS_FROM, _SPANS_AFTER, inclusive, hwm, limit)
+        def _fetch(inclusive: bool, hwm: datetime | None, n: int) -> list[NormalizedSpan]:
+            cur = self._page(_SPANS_ALL, _SPANS_FROM, _SPANS_AFTER, inclusive, hwm, n)
             cols = _columns(cur)
             return [_row_to_span(r, cols) for r in cur.fetchall()]
 
-        return _boundary(_fetch, mark, key=lambda s: s.span_id, at=lambda s: s.start_time)
+        return _boundary(_fetch, mark, limit, key=lambda s: s.span_id, at=lambda s: s.start_time)
 
     def sessions(self, mark: StreamMark, limit: int) -> list[tuple[SessionRecord, datetime]]:
         from tokenjam.core.db import _row_to_session
 
-        def _fetch(inclusive: bool, hwm: datetime | None) -> list[tuple[SessionRecord, datetime]]:
+        def _fetch(inclusive: bool, hwm: datetime | None, n: int) -> list[tuple[SessionRecord, datetime]]:
             cur = self._page(_SESSIONS_ALL, _SESSIONS_FROM, _SESSIONS_AFTER,
-                             inclusive, hwm, limit)
+                             inclusive, hwm, n)
             cols = _columns(cur)
             out = []
             for r in cur.fetchall():
                 out.append((_row_to_session(r, cols), dict(zip(cols, r))["activity_at"]))
             return out
 
-        return _boundary(_fetch, mark, key=lambda t: t[0].session_id, at=lambda t: t[1])
+        return _boundary(_fetch, mark, limit, key=lambda t: t[0].session_id, at=lambda t: t[1])
 
     def commits(self, mark: StreamMark, limit: int) -> list[SessionCommit]:
-        def _fetch(inclusive: bool, hwm: datetime | None) -> list[SessionCommit]:
-            cur = self._page(_COMMITS_ALL, _COMMITS_FROM, _COMMITS_AFTER, inclusive, hwm, limit)
+        def _fetch(inclusive: bool, hwm: datetime | None, n: int) -> list[SessionCommit]:
+            cur = self._page(_COMMITS_ALL, _COMMITS_FROM, _COMMITS_AFTER, inclusive, hwm, n)
             return [SessionCommit(*r) for r in cur.fetchall()]
 
         return _boundary(
-            _fetch, mark, key=lambda c: f"{c.session_id}:{c.commit_sha}", at=lambda c: c.matched_at,
+            _fetch, mark, limit,
+            key=lambda c: f"{c.session_id}:{c.commit_sha}", at=lambda c: c.matched_at,
         )
 
 
-def _boundary(fetch: Callable[[bool, datetime | None], list], mark: StreamMark, *,
+def _boundary(fetch: Callable[[bool, datetime | None, int], list], mark: StreamMark, limit: int, *,
               key: Callable[[Any], str], at: Callable[[Any], datetime | None]) -> list:
-    """Read from the mark inclusive, drop the ids already sent at the mark,
-    and if that emptied a non-empty page (more rows share the boundary
-    timestamp than fit in one page), read strictly past it instead."""
+    """One page of at most `limit` rows past the mark.
+
+    Reads from the mark INCLUSIVE, over-fetching by the number of ids already
+    sent at the mark so the page is still full after those are dropped; if
+    the boundary timestamp alone holds more rows than that (an over-fetched
+    page that filtering emptied), reads strictly past it instead."""
     hwm = mark.hwm_dt()
-    rows = fetch(True, hwm)
-    if hwm is None or not rows:
-        return rows
+    if hwm is None:
+        return fetch(True, None, limit)
     sent = set(mark.in_flight_ids)
-    kept = [r for r in rows if not (at(r) == hwm and key(r) in sent)]
-    if kept:
+    rows = fetch(True, hwm, limit + len(sent))
+    kept = [r for r in rows if not (at(r) == hwm and key(r) in sent)][:limit]
+    if kept or not rows:
         return kept
-    return fetch(False, hwm)
+    return fetch(False, hwm, limit)
 
 
 def _advance(mark: StreamMark, rows: Sequence[Any], *, key: Callable[[Any], str],
@@ -813,12 +829,17 @@ def run_sync(
 
     def _send(path: str, body: Mapping[str, Any], mark: StreamMark, rows: Sequence[Any], *,
               key: Callable[[Any], str], at: Callable[[Any], datetime | None],
-              rebuild: Callable[[Sequence[Any]], Mapping[str, Any]]) -> tuple[int, bool]:
+              rebuild: Callable[[Sequence[Any]], Mapping[str, Any]],
+              counter: str) -> tuple[int, bool]:
         """Post `body`; on a refusal split until the bad row is isolated.
-        Returns (rows acknowledged, keep going)."""
+        Returns (rows acknowledged, keep going). The mark, the `counter`
+        field and the state file all move together, after the ack and
+        before anything else, so what is on disk always describes exactly
+        the rows the receiver has confirmed."""
         result = client.post(path, body)
         if result.outcome == Outcome.OK:
             _advance(mark, rows, key=key, at=at)
+            setattr(state, counter, getattr(state, counter) + len(rows))
             state.last_success_at = utcnow().isoformat()
             state.last_error = None
             save_state(state, state_file)
@@ -826,8 +847,8 @@ def run_sync(
         if result.outcome == Outcome.UNAUTHORIZED:
             state.disabled_reason = (
                 f"Cloud rejected the ingest key ({result.status}"
-                f"{': ' + result.detail if result.detail else ''}); "
-                "run tj init --cloud <key> --org <org> with a current key"
+                f"{': ' + result.detail if result.detail else ''}). Copy a current key "
+                "from Cloud's Connect screen, then: tj init --cloud <key> --org <org>."
             )
             state.disabled_at = utcnow().isoformat()
             state.last_error = state.disabled_reason
@@ -838,11 +859,11 @@ def run_sync(
             if len(rows) > 1:
                 half = len(rows) // 2
                 sent_a, go = _send(path, rebuild(rows[:half]), mark, rows[:half],
-                                   key=key, at=at, rebuild=rebuild)
+                                   key=key, at=at, rebuild=rebuild, counter=counter)
                 if not go:
                     return sent_a, False
                 sent_b, go = _send(path, rebuild(rows[half:]), mark, rows[half:],
-                                   key=key, at=at, rebuild=rebuild)
+                                   key=key, at=at, rebuild=rebuild, counter=counter)
                 return sent_a + sent_b, go
             # One row the receiver refuses: skip it, count it, move on.
             state.rejected += 1
@@ -861,7 +882,9 @@ def run_sync(
 
     try:
         # Sessions first, so a commit or span batch never names a session
-        # the receiver has not seen.
+        # the receiver has not seen. Each loop runs until a page comes back
+        # EMPTY: a short page is not the end, because the boundary filter can
+        # shorten a full page by the rows already sent at the mark.
         while True:
             pairs = source.sessions(state.sessions, BATCH_SIZE)
             if not pairs:
@@ -873,13 +896,10 @@ def run_sync(
 
             n, go = _send(LEDGER_SESSIONS_PATH, _sessions_body(pairs), state.sessions, pairs,
                           key=lambda t: t[0].session_id, at=lambda t: t[1],
-                          rebuild=_sessions_body)
+                          rebuild=_sessions_body, counter="sessions_sent")
             report.sessions_sent += n
-            state.sessions_sent += n
             if not go:
                 return report
-            if len(pairs) < BATCH_SIZE:
-                break
 
         while True:
             commits = source.commits(state.session_commits, BATCH_SIZE)
@@ -891,13 +911,11 @@ def run_sync(
 
             n, go = _send(LEDGER_SESSIONS_PATH, _commits_body(commits), state.session_commits,
                           commits, key=lambda c: f"{c.session_id}:{c.commit_sha}",
-                          at=lambda c: c.matched_at, rebuild=_commits_body)
+                          at=lambda c: c.matched_at, rebuild=_commits_body,
+                          counter="commits_sent")
             report.commits_sent += n
-            state.commits_sent += n
             if not go:
                 return report
-            if len(commits) < BATCH_SIZE:
-                break
 
         while True:
             spans = source.spans(state.spans, BATCH_SIZE)
@@ -912,13 +930,10 @@ def run_sync(
 
             n, go = _send(SPANS_PATH, _spans_body(spans), state.spans, spans,
                           key=lambda s: s.span_id, at=lambda s: s.start_time,
-                          rebuild=_spans_body)
+                          rebuild=_spans_body, counter="spans_sent")
             report.spans_sent += n
-            state.spans_sent += n
             if not go:
                 return report
-            if len(spans) < BATCH_SIZE:
-                break
     finally:
         save_state(state, state_file)
         if own_client:
@@ -1049,11 +1064,13 @@ def status_line(config: TjConfig, *, state_file: Path | None = None) -> str | No
     if not s["configured"]:
         return None
     if s["state"] == "disabled":
-        return "Cloud: off (tj init --cloud <key> --org <org> turns forwarding back on)"
+        return "Cloud: off (turn forwarding back on with: tj init --cloud <key> --org <org>)"
     if s["state"] == "disabled_by_receiver":
         return f"Cloud: disabled: {s['disabled_reason']}"
     counts = (f"{s['spans_sent']} spans, {s['sessions_sent']} sessions, "
               f"{s['commits_sent']} commits sent")
+    if s["rejected"]:
+        counts += f", {s['rejected']} refused by the receiver"
     if s["state"] == "unreachable":
         return f"Cloud: unreachable ({s['last_error']}) · {counts}"
     if s["state"] == "pending":

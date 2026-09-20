@@ -230,13 +230,18 @@ def _restart_daemon_if_running(path: Path, *, reason: str, already_stopped: bool
     console.print(f"  Daemon: {msg} ({reason}).")
 
 
+_NOT_CONNECTED = (
+    "Cloud: not connected (forward to TokenJam Cloud with: tj init --cloud <key> --org <org>)"
+)
+
+
 def cloud_summary_line(config: TjConfig | None) -> str:
     """One line for the `tj init` end-of-run summary and `tj status`."""
     if config is None:
-        return "Cloud: not connected (tj init --cloud <key> --org <org> forwards to TokenJam Cloud)"
+        return _NOT_CONNECTED
     line = cloud_sync.status_line(config)
     if line is None:
-        return "Cloud: not connected (tj init --cloud <key> --org <org> forwards to TokenJam Cloud)"
+        return _NOT_CONNECTED
     return line
 
 
