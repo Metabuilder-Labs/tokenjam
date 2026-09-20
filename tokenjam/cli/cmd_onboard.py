@@ -470,6 +470,20 @@ def _print_instrument_agent_snippet() -> None:
               help="After setup, enable the enforcement proxy in suggest mode "
                    "(`tj proxy enable`) and print what it does and does not "
                    "touch. Composes with --hooks.")
+@click.option("--cloud", "cloud", default=None, metavar="KEY|off",
+              help="Forward spans, sessions and commits to TokenJam Cloud with "
+                   "this ingest key (tj_live_...; pair it with --org). Prints "
+                   "what leaves this machine and asks before the first byte "
+                   "does. `--cloud off` turns forwarding off in place. With "
+                   "an existing config this skips the wizard.")
+@click.option("--org", "cloud_org", default=None, metavar="ORG_ID",
+              help="The Cloud organization the --cloud key belongs to "
+                   "(shown next to the key on Cloud's Connect screen).")
+@click.option("--cloud-endpoint", "cloud_endpoint", default=None, metavar="URL",
+              help="Cloud API base URL for --cloud (default: the hosted API, "
+                   "or whatever [cloud] endpoint the config already holds).")
+@click.option("--yes", "-y", "yes", is_flag=True, default=False,
+              help="Skip the --cloud confirmation.")
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
@@ -477,15 +491,18 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                 removed_project_flag: str | None,
                 backfill_days: int | None, backfill_all: bool,
                 verify: bool, verify_only: bool, add_project: bool,
-                verbose: bool, hooks: bool, notes: bool, enforce: bool) -> None:
+                verbose: bool, hooks: bool, notes: bool, enforce: bool,
+                cloud: str | None, cloud_org: str | None, cloud_endpoint: str | None,
+                yes: bool) -> None:
     """Set up tj (interactive)."""
+    from tokenjam.cli.ledger_cloud import run_cloud_init
     from tokenjam.cli.ledger_hooks import (
         install_repo_hooks, print_hook_install, print_active_session_state, run_enforce,
     )
 
     hooks = hooks or notes
     ledger_only = (
-        (hooks or enforce)
+        (hooks or enforce or cloud is not None)
         and not (claude_code or codex or force or reconfigure or add_project or verify_only)
         and resolve_config_path((ctx.obj or {}).get("config_path_override")) is not None
     )
@@ -512,6 +529,14 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         # is pointed at the file the wizard just wrote (the one the daemon
         # was installed against), not at whatever resolves first.
         run_enforce(ctx, config_path=written_config)
+    if cloud is not None:
+        # Same file as --enforce, for the same reason: the daemon reads the
+        # config it was installed against, and that is where [cloud] must
+        # land for the forwarder to ever see it.
+        run_cloud_init(
+            ctx, cloud, org=cloud_org, endpoint=cloud_endpoint, yes=yes,
+            config_path=written_config,
+        )
 
 
 def _run_onboard_wizard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
@@ -1231,6 +1256,19 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
     return msg, True, total
 
 
+def _load_written_config():
+    """The config a completed onboard run left behind, for the summary
+    lines; None when discovery finds nothing (the summary then says so
+    rather than raising)."""
+    from tokenjam.core.config import load_config, resolve_config_path
+
+    try:
+        path = resolve_config_path()
+        return load_config(str(path)) if path else None
+    except Exception:  # noqa: BLE001 - a summary line never fails the run
+        return None
+
+
 def _print_setup_complete_home(
     *, sessions_backfilled: int = 0, has_data: bool = False,
     days: int | None = None,
@@ -1262,8 +1300,13 @@ def _print_setup_complete_home(
     # The per-repo half of what `tj init` stamps (contracts §3): whether a
     # hand commit in THIS repo joins its session. One informational line,
     # plain (Critical Rule 35: a lone coloured row reads as a failure).
+    from tokenjam.cli.ledger_cloud import cloud_summary_line
     from tokenjam.cli.ledger_hooks import hook_summary_line
     console.print(f"[muted]{hook_summary_line(os.getcwd())}[/muted]", soft_wrap=True)
+    # The bridge half (contracts §6): whether this machine forwards to Cloud.
+    # Read from the config the wizard just wrote when it wrote one, so the
+    # summary describes the file the daemon runs against.
+    console.print(f"[muted]{cloud_summary_line(_load_written_config())}[/muted]", soft_wrap=True)
     console.print("[muted]Full command list:[/muted]  [accent]tj --help[/accent]  "
                   "[muted]· home screen:[/muted]  [accent]tj[/accent]")
 

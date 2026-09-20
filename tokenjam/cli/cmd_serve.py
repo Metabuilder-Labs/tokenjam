@@ -197,6 +197,23 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
             minutes=ingest_cfg.interval_minutes,
         )
 
+    # The bridge to TokenJam Cloud (ledger W5). Same shape as the catch-up:
+    # its own thread, its own backend, resumable off ~/.tj/cloud_sync.json,
+    # and nothing at all when [cloud] is absent or disabled. `start_sync`
+    # itself refuses to start in that case, so the gate here only decides
+    # whether a job is scheduled.
+    from tokenjam.core import cloud_sync
+
+    def _cloud_sync_job() -> None:
+        _guard_fatal_db("Cloud sync", lambda: cloud_sync.start_sync(
+            lambda: DuckDBBackend(config.storage), config,
+        ))
+
+    if config.cloud.is_active:
+        scheduler.add_job(
+            _cloud_sync_job, "interval", minutes=cloud_sync.SYNC_INTERVAL_MINUTES,
+        )
+
     # ~/.local/share/tj/server.state lets other subcommands (e.g. `tj onboard
     # --codex`) find the config this server is using regardless of CWD. We
     # write it from the lifespan so it only happens after uvicorn binds the
@@ -238,6 +255,10 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         # thread with its own connection, so it never delays the bind.
         if ingest_cfg.auto_catch_up:
             _catch_up_job(_timedelta(days=ingest_cfg.startup_lookback_days))
+        # And one bridge pass at startup, so a restart never waits a full
+        # interval to forward what arrived while the daemon was down.
+        if config.cloud.is_active:
+            _cloud_sync_job()
         # Stamp unknown sessions from declared [budget.*].plan on startup so
         # historical/backfilled rows match config without a separate onboard pass.
         from tokenjam.core.framing import apply_declared_plans_to_sessions
@@ -280,6 +301,11 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         console.print(
             f"  Transcript catch-up: on startup, then every "
             f"{ingest_cfg.interval_minutes}m"
+        )
+    if config.cloud.is_active:
+        console.print(
+            f"  Cloud:       forwarding to {config.cloud.endpoint} every "
+            f"{cloud_sync.SYNC_INTERVAL_MINUTES}m"
         )
     if config.export.prometheus.enabled:
         console.print(f"  Metrics:     http://{bind_host}:{bind_port}/metrics")
