@@ -62,11 +62,12 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from tokenjam.core.models import SessionCommit
 from tokenjam.core.persona_scope import add_persona_clause
@@ -869,6 +870,81 @@ def match_sessions_to_commits(db: Any, config: Any = None, *, now: datetime | No
     return result
 
 
+# --- The matcher on the daemon, on request ------------------------------------------
+
+_MATCH_LOCK = threading.Lock()
+_MATCH_THREAD: threading.Thread | None = None
+_MATCH_LAST: dict[str, Any] = {}
+
+
+def start_match(
+    db_factory: Callable[[], Any], config: Any = None,
+) -> tuple[threading.Thread, bool]:
+    """Run :func:`match_sessions_to_commits` on a daemon thread with its OWN
+    backend, the way the scan cycle and the transcript catch-up run.
+
+    Returns ``(thread, started)``: the thread to wait on, and whether this
+    call started it (``False`` means one was already running and the caller
+    joins that one instead of starting a second pass over the same
+    watermarks). The result of the last completed pass is kept in
+    :func:`last_match` for the daemon route to report.
+
+    This is what `POST /api/v1/shipped/match` dispatches, so a CLI that
+    found the daemon holding the DuckDB lock (`tj optimize shipped`) can
+    still get the join refreshed instead of a `ConnectionException` (issue
+    #770, fix 4). A DuckDB fatal is classified where it is recognised and
+    recovered off the process-wide record, never swallowed as one job's
+    warning (Critical Rule 45).
+    """
+    global _MATCH_THREAD
+
+    with _MATCH_LOCK:
+        if _MATCH_THREAD is not None and _MATCH_THREAD.is_alive():
+            return _MATCH_THREAD, False
+
+        def _run() -> None:
+            backend = None
+            try:
+                backend = db_factory()
+                result = match_sessions_to_commits(backend, config)
+                _MATCH_LAST.clear()
+                _MATCH_LAST.update({
+                    "sessions_scanned": result.sessions_scanned,
+                    "rows_written": result.rows_written,
+                    "repos_indexed": result.repos_indexed,
+                    "repos_missing": result.repos_missing,
+                    "by_source": dict(result.by_source),
+                    "finished_at": utcnow().isoformat(),
+                    "error": None,
+                })
+            except Exception as exc:  # noqa: BLE001 - classified below
+                from tokenjam.core.db import handle_if_fatal
+
+                if not handle_if_fatal(exc, what="session -> commit match"):
+                    logger.warning("session -> commit match failed", exc_info=True)
+                _MATCH_LAST.clear()
+                _MATCH_LAST.update({"error": str(exc)[:300], "finished_at": utcnow().isoformat()})
+            finally:
+                from tokenjam.core.db import recover_if_fatal_noted
+
+                recover_if_fatal_noted(what="session -> commit match")
+                if backend is not None:
+                    try:
+                        backend.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        thread = threading.Thread(target=_run, name="tj-commit-match", daemon=True)
+        _MATCH_THREAD = thread
+        thread.start()
+        return thread, True
+
+
+def last_match() -> dict[str, Any]:
+    """The last completed on-request pass (empty before the first)."""
+    return dict(_MATCH_LAST)
+
+
 def _oldest_session_start(conn, root: str, now: datetime) -> datetime:
     row = conn.execute(
         "SELECT MIN(started_at) FROM sessions WHERE repo_root = $1", [root],
@@ -1274,6 +1350,7 @@ __all__ = [
     "ShippedSummary",
     "bridge_suffix",
     "is_git_commit_command",
+    "last_match",
     "match_sessions_to_commits",
     "parse_trailers",
     "reverted_sha",
@@ -1281,5 +1358,6 @@ __all__ = [
     "session_shipped_state",
     "shipped_states",
     "shipped_summary",
+    "start_match",
     "trailer_rank",
 ]

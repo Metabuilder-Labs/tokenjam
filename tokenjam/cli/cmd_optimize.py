@@ -269,6 +269,15 @@ def cmd_optimize(
             from tokenjam.core.api_backend import ApiBackend
             if not isinstance(db, ApiBackend):
                 raise click.ClickException(db_required_message("optimize"))
+            # The session -> commit join the `shipped` finding reads is
+            # refreshed by the daemon's own pass; a direct-DB run refreshes
+            # it inline (below). Here the DB is the daemon's, so ask it to
+            # run the matcher and wait for it, then overlay the LIVE summary
+            # on the stored finding so what renders is the join just made,
+            # not the one the last scan cycle saw (issue #770, fix 4).
+            shipped_live: dict | None = None
+            if "shipped" in selected_analyzers:
+                shipped_live = _refresh_shipped_via_daemon(db, since=since, agent_id=agent)
             try:
                 report_dict = db.fetch_optimize_report(
                     since=since,
@@ -302,6 +311,8 @@ def cmd_optimize(
                     )
                 return
 
+            if shipped_live is not None and "shipped" in (report_dict.get("findings") or {}):
+                report_dict["findings"]["shipped"] = shipped_live
             report = report_from_dict(report_dict)
             # Daemon mode learns the persona only from the payload — `report.persona`
             # is the value the runner actually gated on, so read it rather than
@@ -629,6 +640,41 @@ def _numbered_marker(n: int) -> str:
     if 1 <= n <= 20:
         return chr(0x2460 + n - 1)
     return f"({n})"  # defensive — no report should ever have this many
+
+
+#: How long `tj optimize shipped` waits for the daemon's matcher pass.
+SHIPPED_MATCH_WAIT_S = 20.0
+
+
+def _refresh_shipped_via_daemon(db: Any, *, since: str, agent_id: str | None) -> dict | None:
+    """Run the matcher on the daemon and read the live shipped summary back.
+
+    Never raises: a daemon that cannot run the pass (an older build without
+    the route, a pass that outlasts the wait) leaves the stored finding in
+    place, which is what the CLI rendered before; the user is told either
+    way. Returns the `/api/v1/shipped` payload minus its envelope, or None.
+    """
+    try:
+        answer = db.request_commit_match(wait_s=SHIPPED_MATCH_WAIT_S)
+    except Exception as exc:  # noqa: BLE001 - degrade to the stored finding
+        console.print(
+            f"  [dim]Could not refresh the session-commit join through tj serve "
+            f"({exc}); showing the join from the daemon's last pass.[/dim]"
+        )
+        return None
+    if not answer.get("completed"):
+        console.print(
+            "  [dim]tj serve is still matching sessions to commits; the shipped figures "
+            "below are from its last completed pass. Re-run in a moment.[/dim]"
+        )
+        return None
+    try:
+        payload = db.fetch_shipped(since=since, agent_id=agent_id)
+    except Exception:  # noqa: BLE001 - the stored finding is still a valid answer
+        return None
+    for key in ("since", "window_start", "window_end", "framing"):
+        payload.pop(key, None)
+    return payload
 
 
 def _echo_scan_not_ready(payload: dict, output_json: bool) -> None:

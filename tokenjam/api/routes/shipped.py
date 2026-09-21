@@ -16,10 +16,44 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.framing import PERSONAS, WindowSummary, compute_framing, plan_determination_mix
-from tokenjam.core.shipped import shipped_summary
+from tokenjam.core.shipped import last_match, shipped_summary, start_match
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter()
+
+#: Longest a caller may hold this request open waiting for the pass.
+MATCH_MAX_WAIT_S = 60.0
+
+
+@router.post("/shipped/match", dependencies=[Depends(require_api_key)])
+def match_commits(
+    request: Request,
+    wait_s: float = Query(0.0, ge=0.0, le=MATCH_MAX_WAIT_S,
+                          description="Seconds to wait for the pass before answering."),
+) -> dict[str, Any]:
+    """Run the session -> commit matcher on the daemon, for a CLI that found
+    it holding the DuckDB lock (`tj optimize shipped`; issue #770, fix 4).
+
+    The pass runs on its own thread with its own backend (`start_match`),
+    never on this request's connection, and git never runs on the request
+    thread; `wait_s` only decides how long the caller waits for it. One
+    pass at a time: a request arriving mid-pass joins the running one.
+    Answers ``{"started", "completed", "running", ...last result}``.
+    """
+    config = request.app.state.config
+    db = getattr(request.app.state, "db", None)
+    if config is None or db is None or getattr(db, "conn", None) is None:
+        raise HTTPException(status_code=503, detail="Server has no direct database connection.")
+    from tokenjam.core.db import DuckDBBackend
+
+    thread, started = start_match(lambda: DuckDBBackend(config.storage), config)
+    if wait_s > 0:
+        thread.join(wait_s)
+    running = thread.is_alive()
+    payload: dict[str, Any] = {"started": started, "running": running, "completed": not running}
+    if not running:
+        payload.update(last_match())
+    return payload
 
 
 @router.get("/shipped", dependencies=[Depends(require_api_key)])

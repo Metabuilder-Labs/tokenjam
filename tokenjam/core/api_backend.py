@@ -658,6 +658,19 @@ class ApiBackend:
             body["root"] = root
         return self._post("/api/v1/backfill/claude-code", body)
 
+    def request_commit_match(self, *, wait_s: float = 20.0) -> dict:
+        """Ask the daemon to refresh the session -> commit join
+        (`POST /api/v1/shipped/match`) and wait up to `wait_s` for it. The
+        matcher shells out to git, which a CLI without the DuckDB lock
+        cannot pair with a write; the daemon can (issue #770, fix 4).
+        Returns `{"started", "running", "completed", ...}`."""
+        resp = self.client.post(
+            "/api/v1/shipped/match", params={"wait_s": wait_s},
+            timeout=httpx.Timeout(self._DEFAULT_TIMEOUT, read=wait_s + self._DEFAULT_TIMEOUT),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def fetch_shipped(
         self, *, since: str = "30d", agent_id: str | None = None,
     ) -> dict:

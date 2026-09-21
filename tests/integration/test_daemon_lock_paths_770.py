@@ -9,12 +9,15 @@ serve-mode HTTP shim (`ApiBackend`) the CLI gets in that state:
 * the transcript context refill needs one session write, which the shim
   now carries (`POST /api/v1/sessions/upsert`; parity-covered in
   `test_storage_backend_parity.py`).
+* the session -> commit matcher could not run at all (fix 4): the CLI now
+  asks the daemon to run it (`POST /api/v1/shipped/match`).
 """
 from __future__ import annotations
 
 import threading
 import time
 from contextlib import contextmanager
+from datetime import timedelta
 
 import pytest
 import uvicorn
@@ -22,6 +25,7 @@ from click.testing import CliRunner
 
 from tests.ledger_fixtures import (
     REMOTE,
+    T0,
     contextless_session as _contextless,
     git_repo,
     session_context_row as _context,
@@ -157,3 +161,118 @@ def test_refill_reports_unverified_when_the_daemon_lookup_fails(tmp_path, repo):
 
     report = refill_session_context(Broken(), root=root)
     assert report.verified is False and report.candidates == 0
+
+
+# --- Fix 4: the matcher runs on the daemon when the CLI cannot ------------------------------
+
+def test_the_matcher_can_be_asked_for_through_the_daemon(tmp_path, repo, monkeypatch):
+    import subprocess
+    from dataclasses import replace
+
+    from tests.factories import make_session, make_tool_span
+
+    def _git(*args):
+        return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    with _daemon(tmp_path) as (db, shim, config):
+        db.upsert_session(replace(
+            make_session(session_id="s1", agent_id="claude-code-widgets", started_at=T0,
+                         status="completed", total_cost_usd=1.0),
+            ended_at=T0 + timedelta(minutes=10), repo_remote=REMOTE, repo_root=str(repo),
+            branch_start="main", branch_end="main",
+        ))
+        db.insert_span(make_tool_span(agent_id="claude-code-widgets", tool_name="Bash",
+                                      session_id="s1", start_time=T0 + timedelta(minutes=5),
+                                      tool_input={"command": "git commit -m feat"}))
+        (repo / "a.py").write_text("1\n")
+        _git("add", "a.py")
+        stamp = str(int((T0 + timedelta(minutes=5, seconds=2)).timestamp()))
+        subprocess.run(["git", "commit", "-q", "-m", "feat"], cwd=repo, check=True,
+                       env={**__import__("os").environ, "GIT_AUTHOR_DATE": stamp,
+                            "GIT_COMMITTER_DATE": stamp})
+        sha = _git("rev-parse", "HEAD")
+
+        answer = shim.request_commit_match(wait_s=20)
+        assert answer["completed"] is True, answer
+        assert answer["rows_written"] == 1
+        rows = db.conn.execute(
+            "SELECT commit_sha, confidence, source FROM session_commits WHERE session_id = 's1'"
+        ).fetchall()
+        assert rows == [(sha, "deterministic", "tool_span_git_log")]
+        # Idempotent, and never an error on a repeat.
+        assert shim.request_commit_match(wait_s=20)["completed"] is True
+
+
+def _commit_from_session(db, repo, *, session_id: str = "s1"):
+    """A session whose Bash tool ran `git commit`, and the commit it made."""
+    import os
+    import subprocess
+    from dataclasses import replace
+
+    from tests.factories import make_llm_span, make_session, make_tool_span
+
+    db.upsert_session(replace(
+        make_session(session_id=session_id, agent_id="claude-code-widgets", started_at=T0,
+                     status="completed", total_cost_usd=1.0, input_tokens=10, output_tokens=2),
+        ended_at=T0 + timedelta(minutes=10), repo_remote=REMOTE, repo_root=str(repo),
+        branch_start="main", branch_end="main",
+    ))
+    db.insert_span(make_llm_span(agent_id="claude-code-widgets", session_id=session_id,
+                                 start_time=T0, cost_usd=1.0, input_tokens=10, output_tokens=2))
+    db.insert_span(make_tool_span(agent_id="claude-code-widgets", tool_name="Bash",
+                                  session_id=session_id, start_time=T0 + timedelta(minutes=5),
+                                  tool_input={"command": "git commit -m feat"}))
+    (repo / "a.py").write_text("1\n")
+    subprocess.run(["git", "add", "a.py"], cwd=repo, check=True)
+    stamp = str(int((T0 + timedelta(minutes=5, seconds=2)).timestamp()))
+    subprocess.run(["git", "commit", "-q", "-m", "feat"], cwd=repo, check=True,
+                   env={**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp})
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+                          text=True, check=True).stdout.strip()
+
+
+def test_tj_optimize_shipped_under_the_daemon_runs_the_matcher_and_renders_the_fresh_join(
+    tmp_path, repo, monkeypatch,
+):
+    """The real run: `tj optimize shipped` with the daemon up failed outright.
+    Now the CLI asks the daemon for the pass, and the card it renders is
+    the join that pass just made, not the stored report's stale one."""
+    from tokenjam.cli.cmd_optimize import cmd_optimize
+    from tokenjam.core.optimize import report_store
+
+    with _daemon(tmp_path) as (db, shim, config):
+        sha = _commit_from_session(db, repo)
+        # The daemon's last scan ran BEFORE the commit was joined: its
+        # stored finding says nothing shipped. `recompute_now` is the real
+        # store writer (persona reports and all), on this thread.
+        stored = report_store.recompute_now(db, config, window_days=30)
+        assert stored is not None
+        assert report_store.stored_report_dict(config)["findings"]["shipped"]["sessions_shipped"] == 0
+
+        result = CliRunner().invoke(cmd_optimize, ["shipped"], obj={"db": shim, "config": config})
+
+        assert result.exit_code == 0, result.output
+        assert "ConnectionException" not in result.output
+        rows = db.conn.execute(
+            "SELECT commit_sha, confidence, source FROM session_commits"
+        ).fetchall()
+        assert rows == [(sha, "deterministic", "tool_span_git_log")]
+        flat = " ".join(result.output.split())
+        assert "Shipped 1 of 1" in flat, flat
+
+
+def test_tj_optimize_shipped_under_the_daemon_with_a_cold_store_still_runs_the_matcher(
+    tmp_path, repo,
+):
+    from tokenjam.cli.cmd_optimize import cmd_optimize
+
+    with _daemon(tmp_path) as (db, shim, config):
+        sha = _commit_from_session(db, repo)
+        result = CliRunner().invoke(cmd_optimize, ["shipped"], obj={"db": shim, "config": config})
+        assert result.exit_code == 0, result.output
+        assert "ConnectionException" not in result.output
+        assert db.conn.execute("SELECT commit_sha FROM session_commits").fetchall() == [(sha,)]
+        # The store is honestly cold; the join is nonetheless current for
+        # the daemon's next pass and every other surface.
+        assert "No analyzer report has been computed yet" in result.output
