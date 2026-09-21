@@ -9,13 +9,15 @@ command silently wrote nothing and then failed on the session write (issue
 thread with its own backend and returns at once; the CLI reports progress
 through `tj backfill status`, which reads the same tables.
 
-One on-demand pass at a time: a second request while one runs answers
-`started: false, running: true` rather than parsing the tree twice.
+One catch-up at a time per process, whatever started it (the startup kick,
+the interval job, or this route): the guard lives in
+`transcript_sync.start_catch_up`, so a request arriving mid-pass answers
+`started: false, running: true` and joins it rather than parsing the tree
+twice through two backends.
 Gated by the always-on ingest secret, like `POST /sessions/close`: the CLI holds it in its config and the read-side API key is off by default.
 """
 from __future__ import annotations
 
-import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -26,13 +28,6 @@ from fastapi.responses import JSONResponse
 
 router = APIRouter()
 
-_RUNNING: threading.Thread | None = None
-_LOCK = threading.Lock()
-
-
-def _running() -> bool:
-    return _RUNNING is not None and _RUNNING.is_alive()
-
 
 # Gated by the always-on ingest secret (`IngestAuthMiddleware.PROTECTED_PATHS`),
 # not the optional read-side API key: this is a write.
@@ -40,8 +35,6 @@ def _running() -> bool:
 async def backfill_claude_code(request: Request) -> JSONResponse:
     """Body: ``{"since": <ISO 8601> | null, "root": <path> | null,
     "reingest": bool}``. Returns ``{"started": bool, "running": bool}``."""
-    global _RUNNING
-
     try:
         body = await request.json()
     except Exception:
@@ -70,15 +63,14 @@ async def backfill_claude_code(request: Request) -> JSONResponse:
     root = Path(str(root_raw)).expanduser() if root_raw else None
     reingest = bool(body.get("reingest", False))
 
-    with _LOCK:
-        if _running():
-            return JSONResponse(status_code=200, content={"started": False, "running": True})
-        from tokenjam.core import transcript_sync
-        from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core import transcript_sync
+    from tokenjam.core.db import DuckDBBackend
 
-        _RUNNING = transcript_sync.start_catch_up(
-            lambda: DuckDBBackend(config.storage), config=config, root=root,
-            lookback=lookback, reingest=reingest,
-        )
+    if transcript_sync.catch_up_in_flight():
+        return JSONResponse(status_code=200, content={"started": False, "running": True})
+    transcript_sync.start_catch_up(
+        lambda: DuckDBBackend(config.storage), config=config, root=root,
+        lookback=lookback, reingest=reingest,
+    )
     payload: dict[str, Any] = {"started": True, "running": True}
     return JSONResponse(status_code=200, content=payload)

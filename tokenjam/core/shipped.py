@@ -485,30 +485,37 @@ def _resolve_roots(conn, sessions: list[_Session]) -> tuple[dict[str, str], int,
     return resolved, missing, live_by_remote
 
 
-def _commit_tool_spans(conn) -> tuple[dict[str, list[datetime]], dict[str, str | None]]:
+def _commit_tool_spans(
+    conn, since: datetime, until: datetime,
+) -> tuple[dict[str, list[datetime]], dict[str, tuple[str | None, str | None]]]:
     """`session_id -> timestamps of Bash tool calls that ran git commit`, over
-    EVERY session with repo context, not only the ones due for a scan.
+    every session with repo context whose call falls in `[since, until]`,
+    not only the sessions due for a scan.
 
-    The whole corpus rather than the candidate set because a trailer's rank
-    depends on who else ran the commit (see `CommitToolIndex.producers`): a
-    parent session due for a rescan must see that a subagent session, scanned
-    weeks ago, is the one whose tool call produced the commit."""
+    Every session in the span rather than the candidate set because a
+    trailer's rank depends on who else ran the commit (see
+    `CommitToolIndex.producers`): a parent session due for a rescan must see
+    that a subagent session, scanned weeks ago, is the one whose tool call
+    produced the commit. Bounded to the candidates' combined window so the
+    read grows with the pass, not with the whole retained history."""
     rows = conn.execute(
-        "SELECT sp.session_id, sp.start_time, sp.attributes, s.repo_remote "
+        "SELECT sp.session_id, sp.start_time, sp.attributes, s.repo_remote, s.repo_root "
         "FROM spans sp JOIN sessions s ON s.session_id = sp.session_id "
         "WHERE sp.tool_name = 'Bash' "
+        "AND sp.start_time >= $1 AND sp.start_time <= $2 "
         "AND (s.repo_root IS NOT NULL OR s.repo_remote IS NOT NULL) "
         "AND CAST(sp.attributes AS VARCHAR) LIKE '%commit%'",
+        [since, until],
     ).fetchall()
     out: dict[str, list[datetime]] = defaultdict(list)
-    remotes: dict[str, str | None] = {}
-    for sid, ts, raw, remote in rows:
+    repos: dict[str, tuple[str | None, str | None]] = {}
+    for sid, ts, raw, remote, root in rows:
         if is_git_commit_command(_tool_input(raw).get("command")):
             when = _utc(ts)
             if when is not None:
                 out[sid].append(when)
-                remotes[sid] = remote
-    return out, remotes
+                repos[sid] = (remote, root)
+    return out, repos
 
 
 class CommitToolIndex:
@@ -518,9 +525,10 @@ class CommitToolIndex:
     at all (`producers`)."""
 
     def __init__(self, by_session: dict[str, list[datetime]],
-                 remotes: dict[str, str | None] | None = None) -> None:
+                 repos: dict[str, tuple[str | None, str | None]] | None = None) -> None:
         self._by_session = by_session
-        self._remotes = remotes or {}
+        #: session -> (repo_remote, repo_root) of the session that ran it.
+        self._repos = repos or {}
         pairs = sorted((t, sid) for sid, times in by_session.items() for t in times)
         self._times = [t for t, _ in pairs]
         self._sids = [sid for _, sid in pairs]
@@ -538,18 +546,31 @@ class CommitToolIndex:
                 best = delta
         return best
 
-    def producers(self, committed_at: datetime, remote: str | None = None) -> set[str]:
+    def producers(
+        self, committed_at: datetime, remote: str | None = None, root: str | None = None,
+    ) -> set[str]:
         """Sessions whose own Bash tool ran `git commit` within the match
-        window of `committed_at`, on `remote` when given (a worktree shares
-        its parent's remote, a session in another repo committing at the same
-        second is not evidence about this commit)."""
+        window of `committed_at`, in the repo `(remote, root)` names.
+
+        Same repo means the same remote when both sides know one (a worktree
+        shares its parent's remote), else the same root; a session that ran
+        a commit in an unrelated repository at the same second is not
+        evidence about this commit, and a session whose repo is unknown on
+        both counts never is."""
         window = timedelta(seconds=MATCH_WINDOW_S)
         lo = bisect_left(self._times, committed_at - window)
         hi = bisect_right(self._times, committed_at + window)
         found = set(self._sids[lo:hi])
-        if remote is None:
+        if remote is None and root is None:
             return found
-        return {sid for sid in found if self._remotes.get(sid) in (None, remote)}
+        out: set[str] = set()
+        for sid in found:
+            p_remote, p_root = self._repos.get(sid, (None, None))
+            if remote and p_remote and p_remote == remote:
+                out.add(sid)
+            elif root and p_root and p_root == root:
+                out.add(sid)
+        return out
 
 
 def trailer_rank(named: str, producers: set[str]) -> tuple[str, str]:
@@ -687,7 +708,7 @@ def _match_session(
         #    trailer naming a session OTHER than one whose tool call ran the
         #    commit is inherited evidence and ranks below it (`trailer_rank`).
         trailers = parse_trailers(c.body)
-        producers = tools.producers(c.committed_at, s.repo_remote)
+        producers = tools.producers(c.committed_at, s.repo_remote, root)
         for sid in trailers["tokenjam_sessions"]:
             if sid in known_ids:
                 offer(sid, c, *trailer_rank(sid, producers), None)
@@ -812,7 +833,12 @@ def match_sessions_to_commits(db: Any, config: Any = None, *, now: datetime | No
     sessions = _candidate_sessions(conn, MAX_SESSIONS_PER_PASS, now)
     roots, result.repos_missing, live_by_remote = _resolve_roots(conn, sessions)
     known_ids, by_bridge = _session_index(conn)
-    tools = CommitToolIndex(*_commit_tool_spans(conn))
+    if sessions:
+        span_lo = min(s.window[0] for s in sessions)
+        span_hi = max(s.window[1] for s in sessions)
+        tools = CommitToolIndex(*_commit_tool_spans(conn, span_lo, span_hi))
+    else:
+        tools = CommitToolIndex({})
 
     by_root: dict[str, list[_Session]] = defaultdict(list)
     for s in sessions:

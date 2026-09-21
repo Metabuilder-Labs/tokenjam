@@ -661,6 +661,21 @@ def sweep_stale_active_sessions(
     return len(stale_ids)
 
 
+#: The one catch-up thread this process may have in flight, whatever
+#: started it (the startup kick, the interval job, or a CLI hand-off through
+#: `POST /api/v1/backfill/claude-code`). Two passes over one transcript tree
+#: would parse everything twice and write through two backends whose locks
+#: do not serialise each other; a trigger that finds one running joins it.
+_CATCH_UP_LOCK = threading.Lock()
+_CATCH_UP_THREAD: threading.Thread | None = None
+
+
+def catch_up_in_flight() -> bool:
+    """Whether a catch-up started by ANY trigger is still running."""
+    thread = _CATCH_UP_THREAD
+    return thread is not None and thread.is_alive()
+
+
 def start_catch_up(
     db_factory,
     config=None,
@@ -671,6 +686,12 @@ def start_catch_up(
     reingest: bool = False,
 ) -> threading.Thread:
     """Run :func:`run_catch_up` on a daemon thread with its OWN backend.
+
+    One at a time per process: when a pass is already running (whichever
+    trigger started it) the running thread is returned and nothing new is
+    started; the next tick, or a re-issued request, covers what this one
+    would have. Check :func:`catch_up_in_flight` first to tell the two
+    outcomes apart.
 
     A separate connection per run is the same discipline the retention / relearn
     / cost-proposal jobs already follow in ``cmd_serve`` — it keeps the ingest
@@ -730,6 +751,13 @@ def start_catch_up(
                 except Exception:
                     pass
 
-    thread = threading.Thread(target=_run, name="tj-transcript-catchup", daemon=True)
-    thread.start()
-    return thread
+    global _CATCH_UP_THREAD
+
+    with _CATCH_UP_LOCK:
+        if _CATCH_UP_THREAD is not None and _CATCH_UP_THREAD.is_alive():
+            logger.debug("transcript catch-up already running; joining it")
+            return _CATCH_UP_THREAD
+        thread = threading.Thread(target=_run, name="tj-transcript-catchup", daemon=True)
+        _CATCH_UP_THREAD = thread
+        thread.start()
+        return thread

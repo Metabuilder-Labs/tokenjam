@@ -371,16 +371,52 @@ def test_trailer_rank_is_pure():
     assert shipped.trailer_rank("p", {"p", "w"}) == ("deterministic", "trailer_session")
 
 
-def test_commit_tool_index_scopes_producers_to_the_remote():
+def test_commit_tool_index_scopes_producers_to_the_repo():
     at = T0
     index = shipped.CommitToolIndex(
-        {"a": [at], "b": [at + timedelta(seconds=10)], "far": [at + timedelta(minutes=5)]},
-        remotes={"a": REMOTE, "b": "https://github.com/Other/repo", "far": REMOTE},
+        {"a": [at], "b": [at + timedelta(seconds=10)], "far": [at + timedelta(minutes=5)],
+         "local": [at + timedelta(seconds=2)], "unknown": [at + timedelta(seconds=3)]},
+        repos={"a": (REMOTE, "/srv/w"), "b": ("https://github.com/Other/repo", "/srv/o"),
+               "far": (REMOTE, "/srv/w"),
+               # No origin: a local-only checkout is known by its root alone.
+               "local": (None, "/srv/local"),
+               # Neither known: never evidence about anyone's commit.
+               "unknown": (None, None)},
     )
-    assert index.producers(at) == {"a", "b"}
-    assert index.producers(at, REMOTE) == {"a"}
+    assert index.producers(at) == {"a", "b", "local", "unknown"}
+    assert index.producers(at, REMOTE, "/srv/w") == {"a"}
+    # A remote-less session is a producer only for ITS root, never a
+    # wildcard over every remote (Greptile P2 on #771).
+    assert index.producers(at, REMOTE, "/srv/elsewhere") == {"a"}
+    assert index.producers(at, None, "/srv/local") == {"local"}
     assert index.best_delta("a", at + timedelta(seconds=4)) == -4.0
     assert index.best_delta("far", at) is None
+
+
+def test_tool_span_index_is_bounded_to_the_candidates_window(repo):
+    """The producers index reads Bash spans inside the candidate sessions'
+    combined window, not the whole retained history (Greptile P2 on #771):
+    a commit call a year before any candidate is never loaded."""
+    db = InMemoryBackend()
+    try:
+        _session(db, "s1", repo, T0, T0 + timedelta(minutes=10))
+        _bash(db, "s1", T0 + timedelta(minutes=5), "git commit -m feat")
+        _session(db, "ancient", repo, T0 - timedelta(days=400), T0 - timedelta(days=400, minutes=-10))
+        _bash(db, "ancient", T0 - timedelta(days=400, minutes=-5), "git commit -m old")
+        # Mark `ancient` as scanned so only s1 is a candidate.
+        db.conn.execute(
+            "INSERT INTO session_commit_scans (session_id, ended_at, scanned_at) VALUES ($1,$2,$3)",
+            ["ancient", T0 - timedelta(days=400, minutes=-10), utcnow()],
+        )
+        lo, hi = shipped._Session("s1", str(repo), REMOTE, "main", "main", EMAIL, None,
+                                  T0, T0 + timedelta(minutes=10)).window
+        by_session, repos = shipped._commit_tool_spans(db.conn, lo, hi)
+        assert set(by_session) == {"s1"}
+        assert repos["s1"] == (REMOTE, str(repo))
+        whole, _ = shipped._commit_tool_spans(db.conn, T0 - timedelta(days=401), hi)
+        assert set(whole) == {"s1", "ancient"}
+    finally:
+        db.close()
 
 
 def test_a_plain_commit_in_the_window_with_no_evidence_is_not_joined(repo):

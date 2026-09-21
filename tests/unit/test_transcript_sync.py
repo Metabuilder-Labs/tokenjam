@@ -546,3 +546,37 @@ def test_backfill_status_json_reports_the_gap_machine_readably(
     assert payload["missing_count"] == 1
     assert payload["disk_sessions"] == 1
     assert payload["missing"][0]["session_id"] == "sess-dropped"
+
+
+def test_catch_up_never_overlaps_whatever_started_it(tmp_path: Path, monkeypatch) -> None:
+    """One catch-up per process (Greptile P2 on #771): the startup kick, the
+    interval job and a CLI hand-off through the daemon all go through
+    `start_catch_up`, which returns the running thread instead of starting
+    a second parse over the same tree through a second backend."""
+    import threading
+
+    from tokenjam.core import transcript_sync
+
+    gate = threading.Event()
+    calls: list[int] = []
+
+    def slow_run(db, **kw):
+        calls.append(1)
+        gate.wait(5)
+        return type("R", (), {"sessions_new": 0, "spans_ingested": 0})()
+
+    monkeypatch.setattr(transcript_sync, "run_catch_up", slow_run)
+    monkeypatch.setattr(transcript_sync, "sweep_stale_active_sessions", lambda *a, **k: 0)
+    factory = lambda: type("B", (), {"close": lambda self: None})()  # noqa: E731
+
+    first = transcript_sync.start_catch_up(factory, root=tmp_path)
+    assert transcript_sync.catch_up_in_flight()
+    second = transcript_sync.start_catch_up(factory, root=tmp_path)
+    assert second is first
+    gate.set()
+    first.join(5)
+    assert not transcript_sync.catch_up_in_flight()
+    assert calls == [1]
+    third = transcript_sync.start_catch_up(factory, root=tmp_path)
+    third.join(5)
+    assert calls == [1, 1]
