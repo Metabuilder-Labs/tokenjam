@@ -61,9 +61,13 @@ def cmd_status(
 
     if not agent_ids:
         if output_json:
-            click.echo(json.dumps({"agents": [], "has_active_alerts": False}))
+            click.echo(json.dumps({
+                "agents": [], "has_active_alerts": False,
+                "cloud": cloud_status_summary(ctx.obj.get("config")),
+            }))
         else:
             console.print("[dim]No agents found. Run an instrumented agent first.[/dim]")
+            _print_cloud_line(ctx.obj.get("config"))
         return
 
     has_active_alerts = False
@@ -160,6 +164,7 @@ def cmd_status(
             "agents": agents_data,
             "has_active_alerts": has_active_alerts,
             "unknown_plan_tier_sessions": unknown_count,
+            "cloud": cloud_status_summary(ctx.obj.get("config")),
         }, default=str))
     else:
         # Two views over the same data. The cards are reached deliberately —
@@ -192,8 +197,42 @@ def cmd_status(
         freshness_note = _ingest_freshness_note(ctx.obj.get("config"), db)
         if freshness_note:
             console.print(freshness_note)
+        _print_cloud_line(ctx.obj.get("config"))
 
     ctx.exit(1 if has_active_alerts else 0)
+
+
+def cloud_status_summary(config: object) -> dict:
+    """The bridge block for `--json` (ledger W5): config + the resume state
+    file, never the database, so it reads the same under the daemon."""
+    if config is None:
+        return {"configured": False, "enabled": False, "state": "not_configured"}
+    try:
+        from tokenjam.core.cloud_sync import status_summary
+
+        return status_summary(config)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 - an advisory block never breaks status
+        return {"configured": False, "enabled": False, "state": "unknown"}
+
+
+def _print_cloud_line(config: object) -> None:
+    """`Cloud: connected · N spans, M sessions, K commits sent · last 2m ago`,
+    or the reason the receiver disabled it. Silent on a machine that never
+    ran `tj init --cloud`: nothing to report is not a state worth a line."""
+    if config is None:
+        return
+    try:
+        from tokenjam.core.cloud_sync import status_line
+
+        line = status_line(config)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 - an advisory line never breaks status
+        return
+    if line is None:
+        return
+    if line.startswith("Cloud: disabled") or line.startswith("Cloud: unreachable"):
+        console.print(f"[warn]{escape(line)}[/warn]", soft_wrap=True)
+    else:
+        console.print(escape(line), soft_wrap=True)
 
 
 def _recoverable_teaser(config) -> str | None:

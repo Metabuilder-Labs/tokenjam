@@ -27,9 +27,13 @@ tj onboard --budget 5.00    # set daily budget during setup
 tj onboard --force          # overwrite existing config
 tj onboard --verify         # poll for the first span after setup and report confirmed/not-confirmed
 tj onboard --verify-only    # skip setup; just re-poll an existing install (post-restart re-check)
+tj init --cloud <key> --org <org>   # forward spans, sessions and commits to TokenJam Cloud (asks first; --yes skips)
+tj init --cloud off         # stop forwarding, keep the key
 ```
 
 Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` skip every prompt; use these to run onboarding unattended (CI, Docker, a script). The project/dashboard-namespace name is never prompted for — it's always derived from the repo (git remote) or folder name. `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
+
+**`--cloud <key> --org <org>`** connects this machine to a TokenJam Cloud organization (`tj init` is the same command). It writes `[cloud]` into the config, prints exactly what leaves the machine (token counts, model names, cost, timestamps, tool names, file paths, session / repo / branch / commit identifiers, hashed developer id, git author email) and what never does by default (prompt text, completions, tool outputs, file contents, diffs, secrets), asks for a yes, then pushes the history already on disk; the daemon forwards new sessions every five minutes from then on. Both values are on Cloud's Connect screen; the key alone does not identify the organization. `--cloud-endpoint` points at a different API; `--cloud off` turns forwarding off in place. See [configuration.md](configuration.md#tokenjam-cloud-bridge).
 
 **`--verify-only`** is the lightweight post-restart re-check: it skips the whole wizard (no config rewrite, no summary, no restart banner) and only polls an already-configured install for its first *live* span. Use it after you've restarted Claude Code / Codex; `tj onboard --claude-code --verify-only` (or `--codex`, or bare for an SDK install) reads that persona's existing config and reports confirmed / not-confirmed. Backfilled history doesn't count here; the poll waits for a new live span.
 

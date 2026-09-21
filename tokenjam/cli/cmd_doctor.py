@@ -111,6 +111,10 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     #      right now find a fresh session to join.
     checks.append(_check_commit_hook())
 
+    # 14c. Cloud bridge (ledger W5) — is [cloud] configured, does the endpoint
+    #      answer, does it accept the key, and did the receiver disable us.
+    checks.append(_check_cloud_bridge(config))
+
     # 15. Onboarded-but-silent — first-signal diagnosis (issue #80)
     checks.append(_check_onboarding_first_signal(config, ctx.obj["db"]))
 
@@ -1887,6 +1891,62 @@ def _check_statusline_wiring(config: object) -> dict:
             "you also use Claude Code."
         ),
     }
+
+
+def _check_cloud_bridge(config: object, *, transport: object | None = None) -> dict:
+    """`tj init --cloud`'s bridge: configured, reachable, key accepted, not
+    disabled by the receiver (ledger W5; contracts §6).
+
+    Opt-in feature, so an absent block is `info`. The probe posts an EMPTY
+    OTLP body to the spans route: auth answers before the body is read, so
+    a bad key is a 401 and a good one a 200 with nothing ingested; no
+    telemetry leaves during a doctor run. A receiver-side disable (a 401
+    seen by the forwarder) is a warning naming the fix, since every later
+    pass is silently a no-op until the key is replaced.
+    """
+    from tokenjam.core.cloud_sync import Outcome, load_state, probe
+
+    name = "Cloud bridge"
+    cloud = getattr(config, "cloud", None)
+    if cloud is None or not cloud.configured:
+        return {"name": name, "level": "info",
+                "message": "Not connected to TokenJam Cloud. `tj init --cloud <key> --org <org>` "
+                           "forwards spans, sessions and commits so Cloud can measure cost "
+                           "per merged PR."}
+    if not cloud.enabled:
+        return {"name": name, "level": "info",
+                "message": "Cloud forwarding is off (`[cloud] enabled = false`). "
+                           "`tj init --cloud <key> --org <org>` turns it back on."}
+    state = load_state()
+    if state.disabled_reason:
+        return {"name": name, "level": "warning",
+                "message": f"Forwarding disabled by the receiver: {state.disabled_reason}"}
+    try:
+        result = probe(config, transport=transport)  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001 - never fail doctor on a probe
+        return {"name": name, "level": "warning",
+                "message": f"Could not probe {cloud.endpoint}: {exc}"}
+    if result.outcome == Outcome.UNAUTHORIZED:
+        return {"name": name, "level": "warning",
+                "message": f"{cloud.endpoint} rejected the ingest key for org {cloud.org_id} "
+                           f"({result.status}). Copy a current key from Cloud's Connect "
+                           "screen and re-run `tj init --cloud <key> --org <org>`."}
+    if result.outcome == Outcome.UNAVAILABLE:
+        return {"name": name, "level": "warning",
+                "message": f"{cloud.endpoint} is unreachable "
+                           f"({result.status or 'network'}"
+                           f"{': ' + result.detail if result.detail else ''}). "
+                           "The forwarder retries on its next pass."}
+    if result.outcome == Outcome.REJECTED:
+        return {"name": name, "level": "warning",
+                "message": f"{cloud.endpoint} answered {result.status} to the probe"
+                           f"{': ' + result.detail if result.detail else ''}."}
+    counts = (f"{state.spans_sent} spans, {state.sessions_sent} sessions, "
+              f"{state.commits_sent} commits sent")
+    tail = f"; last error: {state.last_error}" if state.last_error else ""
+    return {"name": name, "level": "ok",
+            "message": f"{cloud.endpoint} reachable, key accepted for org {cloud.org_id}; "
+                       f"{counts}{tail}."}
 
 
 def _check_commit_hook(cwd: str | None = None) -> dict:
