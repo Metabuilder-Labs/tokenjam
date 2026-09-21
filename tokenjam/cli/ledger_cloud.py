@@ -26,6 +26,7 @@ from rich.markup import escape
 
 from tokenjam.core import cloud_sync
 from tokenjam.core.config import CloudConfig, TjConfig, load_config, write_config
+from tokenjam.core.repo_context import ensure_install_id, tj_home
 from tokenjam.utils.formatting import console
 from tokenjam.utils.humanize import display_path
 
@@ -145,6 +146,16 @@ def run_cloud_init(
     write_config(config, path)
     cloud_sync.reset_state(org_id=org_id, db_path=cloud_sync.storage_identity(config))
     console.print(f"[ok]✓[/ok] {_CLOUD_SECTION} written to [accent]{display_path(path)}[/accent]")
+    # The §3 install id rides every forwarded session and spans resource;
+    # Cloud counts connected developers off it. Minted here if `tj init`
+    # never got to, and its absence is said out loud rather than discovered
+    # as a zero on Cloud's Connect screen (issue #770, fix 2).
+    if not ensure_install_id():
+        console.print(
+            f"[warn]No install id could be written under {display_path(tj_home())};[/warn] "
+            "history is forwarded without one and Cloud will not count this machine "
+            "as a connected developer until it can be.", soft_wrap=True,
+        )
 
     _initial_push(config, path)
     return True
@@ -323,6 +334,8 @@ def _print_report(report: cloud_sync.SyncReport) -> None:
         )
         return
     tail = f" ({report.rejected} refused by the receiver)" if report.rejected else ""
+    if report.install_id_missing:
+        tail += " (without an install id: Cloud will not count this machine as a developer)"
     console.print(f"[ok]✓[/ok] Forwarded {counts}{tail}.")
 
 

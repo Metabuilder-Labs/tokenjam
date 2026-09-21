@@ -551,3 +551,20 @@ def test_a_refill_or_match_failure_never_blocks_the_push(fresh_machine, cloud, m
     # The refill ran before the failing step: the session still left with context.
     assert _ledger_bodies(cloud)[0]["sessions"][0]["repo_remote"] == "https://github.com/Acme/widgets"
 
+
+def test_a_missing_install_id_is_said_out_loud_and_never_blocks_the_push(
+    fresh_machine, cloud, monkeypatch,
+):
+    """Fix 2, the failure half: an unwritable ~/.tj/install_id still lets the
+    history leave, and the user is told Cloud will not count the machine."""
+    monkeypatch.setattr("tokenjam.cli.ledger_cloud.ensure_install_id", lambda: None)
+    monkeypatch.setattr("tokenjam.core.cloud_sync.ensure_install_id", lambda: None)
+    result = _init("--cloud", KEY, "--org", ORG, "--yes")
+    assert result.exit_code == 0, result.output
+    out = _flat(result.output)
+    assert "No install id could be written" in out
+    assert "without an install id" in out
+    assert "Forwarded 2 spans, 1 sessions, 1 commits" in out
+    assert _ledger_bodies(cloud)[0]["sessions"][0]["install_id"] is None
+    for command in advertised_commands(result.output):
+        assert_invocable(command)
