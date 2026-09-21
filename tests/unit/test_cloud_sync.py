@@ -431,6 +431,31 @@ def test_a_status_only_close_and_a_plan_stamp_are_re_sent(db, state_file):
     assert cloud.bodies(cs.LEDGER_SESSIONS_PATH)[0]["sessions"][0]["total_cost_usd"] == 1.5
 
 
+def test_an_unchanged_re_upsert_and_recompute_do_not_re_send(db, state_file):
+    """The daemon's transcript catch-up re-upserts every session in its window
+    with a zero delta and recomputes its totals on every pass; neither may
+    move the cursor when nothing changed, or the window is forwarded again
+    every half hour."""
+    _seed(db)
+    db.recompute_session_totals_from_spans(["sess-0"])  # row at SUM(spans), as after a backfill
+    config = _config()
+    _run(db, config, FakeCloud(), state_file)
+    stored = db.get_session("sess-0")
+    zero = replace(stored, total_cost_usd=0.0, input_tokens=0, output_tokens=0, cache_tokens=0,
+                   cache_write_tokens=0, tool_call_count=0, error_count=0)
+    db.upsert_session(zero, accumulate_totals=True)   # the catch-up's per-file write
+    db.upsert_session(stored)                          # a replacing write of the same values
+    db.recompute_session_totals_from_spans(["sess-0"])
+    db.recompute_session_totals_from_spans(["sess-0"])
+    cloud = FakeCloud()
+    assert _run(db, config, cloud, state_file).sessions_sent == 0
+    # A real change through the same paths still moves it.
+    db.upsert_session(replace(zero, input_tokens=7), accumulate_totals=True)
+    cloud = FakeCloud()
+    assert _run(db, config, cloud, state_file).sessions_sent == 1
+    assert cloud.bodies(cs.LEDGER_SESSIONS_PATH)[0]["sessions"][0]["input_tokens"] == stored.input_tokens + 7
+
+
 def test_a_session_whose_totals_grew_is_re_sent(db, state_file):
     _seed(db)
     config = _config()

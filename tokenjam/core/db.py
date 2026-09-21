@@ -2698,6 +2698,69 @@ _SESSION_TOTALS_ACCUMULATE = """
                                 + COALESCE(EXCLUDED.error_count, 0),
 """
 
+# "Did this upsert change the row?" for the two totals variants above, plus
+# the columns every upsert assigns. `updated_at` (migration 25) is the Cloud
+# bridge's session cursor, so it must move exactly when a value moves: the
+# daemon's transcript catch-up re-upserts every session in its window with a
+# zero delta each pass, and stamping those would forward the whole window
+# again every half hour. Each predicate mirrors the assignment it guards.
+_SESSION_TOTALS_CHANGED_REPLACE = """
+                    EXCLUDED.total_cost_usd IS DISTINCT FROM sessions.total_cost_usd
+                    OR EXCLUDED.input_tokens IS DISTINCT FROM sessions.input_tokens
+                    OR EXCLUDED.output_tokens IS DISTINCT FROM sessions.output_tokens
+                    OR EXCLUDED.cache_tokens IS DISTINCT FROM sessions.cache_tokens
+                    OR EXCLUDED.cache_write_tokens IS DISTINCT FROM sessions.cache_write_tokens
+                    OR EXCLUDED.tool_call_count IS DISTINCT FROM sessions.tool_call_count
+                    OR EXCLUDED.error_count IS DISTINCT FROM sessions.error_count
+"""
+
+_SESSION_TOTALS_CHANGED_ACCUMULATE = """
+                    COALESCE(EXCLUDED.total_cost_usd, 0.0) != 0.0
+                    OR COALESCE(EXCLUDED.input_tokens, 0) != 0
+                    OR COALESCE(EXCLUDED.output_tokens, 0) != 0
+                    OR COALESCE(EXCLUDED.cache_tokens, 0) != 0
+                    OR COALESCE(EXCLUDED.cache_write_tokens, 0) != 0
+                    OR COALESCE(EXCLUDED.tool_call_count, 0) != 0
+                    OR COALESCE(EXCLUDED.error_count, 0) != 0
+"""
+
+# Incoming-wins columns change when a non-NULL incoming value differs;
+# stored-wins (fill-once) columns change only when the stored value is NULL
+# and the incoming one is not.
+_SESSION_CHANGED_COMMON = """
+                    OR LEAST(sessions.started_at, COALESCE(EXCLUDED.started_at, sessions.started_at))
+                       IS DISTINCT FROM sessions.started_at
+                    OR COALESCE(EXCLUDED.ended_at, sessions.ended_at) IS DISTINCT FROM sessions.ended_at
+                    OR (EXCLUDED.status IS DISTINCT FROM sessions.status
+                        AND NOT (sessions.status = 'active'
+                                 AND EXCLUDED.status != 'active'
+                                 AND COALESCE(sessions.ended_at, sessions.started_at)
+                                     > COALESCE(EXCLUDED.ended_at, EXCLUDED.started_at)))
+                    OR (COALESCE(sessions.plan_tier, 'unknown') = 'unknown'
+                        AND EXCLUDED.plan_tier IS DISTINCT FROM sessions.plan_tier)
+                    OR (EXCLUDED.service_namespace IS NOT NULL
+                        AND EXCLUDED.service_namespace IS DISTINCT FROM sessions.service_namespace)
+                    OR (EXCLUDED.service_instance_id IS NOT NULL
+                        AND EXCLUDED.service_instance_id IS DISTINCT FROM sessions.service_instance_id)
+                    OR (EXCLUDED.run_id IS NOT NULL AND EXCLUDED.run_id IS DISTINCT FROM sessions.run_id)
+                    OR (EXCLUDED.parent_session_id IS NOT NULL
+                        AND EXCLUDED.parent_session_id IS DISTINCT FROM sessions.parent_session_id)
+                    OR (EXCLUDED.branch_end IS NOT NULL
+                        AND EXCLUDED.branch_end IS DISTINCT FROM sessions.branch_end)
+                    OR (EXCLUDED.head_sha_end IS NOT NULL
+                        AND EXCLUDED.head_sha_end IS DISTINCT FROM sessions.head_sha_end)
+                    OR (sessions.source IS NULL AND EXCLUDED.source IS NOT NULL)
+                    OR (sessions.task_statement_hash IS NULL AND EXCLUDED.task_statement_hash IS NOT NULL)
+                    OR (sessions.dominant_model IS NULL AND EXCLUDED.dominant_model IS NOT NULL)
+                    OR (sessions.repo_remote IS NULL AND EXCLUDED.repo_remote IS NOT NULL)
+                    OR (sessions.repo_root IS NULL AND EXCLUDED.repo_root IS NOT NULL)
+                    OR (sessions.branch_start IS NULL AND EXCLUDED.branch_start IS NOT NULL)
+                    OR (sessions.head_sha_start IS NULL AND EXCLUDED.head_sha_start IS NOT NULL)
+                    OR (sessions.developer_id IS NULL AND EXCLUDED.developer_id IS NOT NULL)
+                    OR (sessions.user_email IS NULL AND EXCLUDED.user_email IS NOT NULL)
+                    OR (sessions.bridge_session_id IS NULL AND EXCLUDED.bridge_session_id IS NOT NULL)
+"""
+
 
 def _connect_bounded(db_path: str, memory_limit: str, threads: int):
     """Open `db_path` with an explicit buffer-pool ceiling.
@@ -3145,6 +3208,10 @@ class DuckDBBackend:
         interpolated fragment is a module constant, never user data.
         """
         totals = _SESSION_TOTALS_ACCUMULATE if accumulate_totals else _SESSION_TOTALS_REPLACE
+        changed = (
+            _SESSION_TOTALS_CHANGED_ACCUMULATE if accumulate_totals
+            else _SESSION_TOTALS_CHANGED_REPLACE
+        ) + _SESSION_CHANGED_COMMON
         # plan_tier: promote unknown → known on conflict; never overwrite a
         # session that already has a known tier (backfill re-runs must not
         # clobber historical tiers when config plan changes).
@@ -3230,7 +3297,9 @@ class DuckDBBackend:
                     developer_id = COALESCE(sessions.developer_id, EXCLUDED.developer_id),
                     user_email = COALESCE(sessions.user_email, EXCLUDED.user_email),
                     bridge_session_id = COALESCE(sessions.bridge_session_id, EXCLUDED.bridge_session_id),
-                    updated_at = now()
+                    -- Moves only when a value above moves (see the CHANGED
+                    -- predicates): this is the Cloud bridge's cursor.
+                    updated_at = CASE WHEN ({changed}) THEN now() ELSE sessions.updated_at END
                 """,
                 [
                     session.session_id, session.agent_id, session.conversation_id,
@@ -3298,6 +3367,15 @@ class DuckDBBackend:
                     updated_at         = now()
                 FROM agg
                 WHERE s.session_id = agg.session_id
+                  -- Rows already at the SUM are left alone: `updated_at` is
+                  -- the Cloud bridge's cursor, and the catch-up runs this over
+                  -- every session in its window on every pass.
+                  AND (s.input_tokens IS DISTINCT FROM agg.input_tokens
+                       OR s.output_tokens IS DISTINCT FROM agg.output_tokens
+                       OR s.cache_tokens IS DISTINCT FROM agg.cache_tokens
+                       OR s.cache_write_tokens IS DISTINCT FROM agg.cache_write_tokens
+                       OR s.total_cost_usd IS DISTINCT FROM agg.total_cost_usd
+                       OR s.tool_call_count IS DISTINCT FROM agg.tool_call_count)
                 """,
                 [list(session_ids)],
             )
