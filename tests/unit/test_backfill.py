@@ -15,7 +15,7 @@ from tokenjam.core.backfill import (
     iter_claude_code_sessions,
     parse_claude_code_session,
 )
-from tokenjam.core.config import CaptureConfig
+from tokenjam.core.config import CaptureConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 
@@ -517,12 +517,12 @@ def test_claude_code_backfill_accepts_since_window(tmp_path, monkeypatch):
         return BackfillResult()
 
     monkeypatch.setattr("tokenjam.utils.time_parse.utcnow", lambda: fixed_now)
-    monkeypatch.setattr(cmd_backfill_module, "ingest_claude_code", fake_ingest)
+    monkeypatch.setattr("tokenjam.core.backfill.ingest_claude_code", fake_ingest)
 
     result = CliRunner().invoke(
         cmd_backfill_module.claude_code,
         ["--root", str(tmp_path), "--since", "30d", "--quiet"],
-        obj={"db": object(), "config": None},
+        obj={"db": InMemoryBackend(), "config": TjConfig(version="1")},
     )
 
     assert result.exit_code == 0, result.output
@@ -538,12 +538,12 @@ def test_claude_code_backfill_keeps_since_days_alias(tmp_path, monkeypatch):
         return BackfillResult()
 
     monkeypatch.setattr(cmd_backfill_module, "utcnow", lambda: fixed_now)
-    monkeypatch.setattr(cmd_backfill_module, "ingest_claude_code", fake_ingest)
+    monkeypatch.setattr("tokenjam.core.backfill.ingest_claude_code", fake_ingest)
 
     result = CliRunner().invoke(
         cmd_backfill_module.claude_code,
         ["--root", str(tmp_path), "--since-days", "7", "--quiet"],
-        obj={"db": object(), "config": None},
+        obj={"db": InMemoryBackend(), "config": TjConfig(version="1")},
     )
 
     assert result.exit_code == 0, result.output
@@ -551,12 +551,13 @@ def test_claude_code_backfill_keeps_since_days_alias(tmp_path, monkeypatch):
 
 
 def test_claude_code_backfill_rejects_two_since_flags(tmp_path, monkeypatch):
-    monkeypatch.setattr(cmd_backfill_module, "ingest_claude_code", lambda **kwargs: BackfillResult())
+    monkeypatch.setattr("tokenjam.core.backfill.ingest_claude_code",
+                        lambda *args, **kwargs: BackfillResult())
 
     result = CliRunner().invoke(
         cmd_backfill_module.claude_code,
         ["--root", str(tmp_path), "--since", "30d", "--since-days", "7", "--quiet"],
-        obj={"db": object(), "config": None},
+        obj={"db": InMemoryBackend(), "config": TjConfig(version="1")},
     )
 
     assert result.exit_code != 0
@@ -583,7 +584,7 @@ def test_claude_code_backfill_prints_unknown_model_warning_after_summary(tmp_pat
     result = CliRunner().invoke(
         cmd_backfill_module.claude_code,
         ["--root", str(tmp_path), "--quiet"],
-        obj={"db": db, "config": None},
+        obj={"db": db, "config": TjConfig(version="1")},
     )
 
     assert result.exit_code == 0, result.output
@@ -622,7 +623,7 @@ def test_claude_code_backfill_prints_unknown_model_warning_after_no_sessions(tmp
     result = CliRunner().invoke(
         cmd_backfill_module.claude_code,
         ["--root", str(tmp_path), "--since", "2026-01-01", "--quiet"],
-        obj={"db": db, "config": None},
+        obj={"db": db, "config": TjConfig(version="1")},
     )
 
     assert result.exit_code == 0, result.output

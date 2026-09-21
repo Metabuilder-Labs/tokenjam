@@ -23,7 +23,10 @@ fallback — this seam makes that split explicit at one choke point
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Protocol, TypeVar, runtime_checkable
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Protocol, TypeVar, runtime_checkable
 
 import click
 import httpx
@@ -42,6 +45,9 @@ from tokenjam.core.framing import (
 from tokenjam.core.optimize.analyzers.model_downgrade import audit_opus_quota
 from tokenjam.core.optimize.types import OpusQuotaAudit, audit_from_dict
 from tokenjam.utils.time_parse import parse_since, utcnow
+
+if TYPE_CHECKING:
+    from tokenjam.core.backfill import BackfillResult
 
 
 @runtime_checkable
@@ -62,6 +68,22 @@ class DataAccess(Protocol):
     def quota_audit(
         self, *, since: str, agent_id: str | None,
     ) -> tuple[OpusQuotaAudit, Framing]: ...
+
+    def claude_code_backfill(
+        self, *, root: Path, since: datetime | None, reingest: bool,
+        progress: Callable[..., None] | None,
+    ) -> "BackfillResult | DelegatedBackfill": ...
+
+
+@dataclass(frozen=True)
+class DelegatedBackfill:
+    """The serve path's answer to a backfill: the daemon runs it (issue #770,
+    fix 3). Not a result and not a parity case: the run is asynchronous on
+    the daemon's own thread, so the command reports where its result shows
+    up (`tj backfill status`) rather than rendering one."""
+    root: Path
+    started: bool
+    running: bool
 
 
 class DirectDataAccess:
@@ -120,6 +142,17 @@ class DirectDataAccess:
         )
         return audit, framing
 
+    def claude_code_backfill(
+        self, *, root: Path, since: datetime | None, reingest: bool,
+        progress: Callable[..., None] | None,
+    ) -> "BackfillResult | DelegatedBackfill":
+        from tokenjam.core.backfill import ingest_claude_code
+
+        return ingest_claude_code(
+            self._db, root=root, since=since, progress=progress,
+            config=self._config, reingest=reingest,
+        )
+
 
 class ServeDataAccess:
     """:class:`DataAccess` routed through a running ``tj serve`` (``ApiBackend``).
@@ -154,6 +187,23 @@ class ServeDataAccess:
             payload = self._db.fetch_opus_quota_audit(since=since, agent_id=agent_id)
             return audit_from_dict(payload), _framing_from_payload(payload)
         return _through_serve("premium quota audit", build)
+
+    def claude_code_backfill(
+        self, *, root: Path, since: datetime | None, reingest: bool,
+        progress: Callable[..., None] | None,
+    ) -> "BackfillResult | DelegatedBackfill":
+        # The backfill needs bulk span writes the shim cannot carry, so the
+        # daemon runs it (`POST /api/v1/backfill/claude-code`, the same
+        # transcript catch-up it schedules) and this returns at once.
+        def build() -> DelegatedBackfill:
+            answer = self._db.request_claude_code_backfill(
+                since=since, root=str(root), reingest=reingest,
+            )
+            return DelegatedBackfill(
+                root=root, started=bool(answer.get("started")),
+                running=bool(answer.get("running")),
+            )
+        return _through_serve("Claude Code backfill hand-off", build)
 
 
 _T = TypeVar("_T")

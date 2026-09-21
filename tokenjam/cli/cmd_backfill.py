@@ -7,11 +7,11 @@ from pathlib import Path
 import click
 
 from tokenjam.cli.backfill_progress import backfill_progress
+from tokenjam.cli.data_access import DelegatedBackfill, resolve_data_access
 from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.backfill import (
     CLAUDE_CODE_PROJECTS_ROOT,
     count_claude_code_sessions_in_scope,
-    ingest_claude_code,
 )
 from tokenjam.core.cost import defer_pricing_warnings, print_deferred_pricing_warnings
 from tokenjam.core.ingest_adapters.codex import (
@@ -75,25 +75,26 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
             raise click.BadParameter("amount must be > 0", param_hint="'--since-days'")
         since = utcnow() - timedelta(days=since_days)
 
-    # The daemon holds the DuckDB write lock (main.py handed us the HTTP
-    # shim): the backfill needs bulk span writes the shim cannot carry, so
-    # the daemon runs it on its own catch-up thread instead (issue #770).
-    if getattr(db, "conn", None) is None and hasattr(db, "request_claude_code_backfill"):
-        _backfill_via_daemon(db, since=since, root=root, reingest=reingest)
-        return
-
     # Cheap pre-count (stat() only, no parsing) so the shared progress counter
     # can show "N/total" rather than a bare running count (#443).
     total_in_scope = count_claude_code_sessions_in_scope(root=root, since=since)
 
     console.print(f"Backfilling Claude Code sessions from {root} …")
+    # Direct vs serve is the seam's call (`resolve_data_access`): with the
+    # daemon holding the DuckDB lock the run is handed to it (issue #770,
+    # fix 3), and the command reports where the result shows up instead.
+    data = resolve_data_access(ctx)
     # Pass config so backfilled sessions carry the declared plan tier (#176).
     with defer_pricing_warnings() as pricing_warnings:
         with backfill_progress(total_in_scope, quiet=quiet) as progress:
-            result = ingest_claude_code(
-                db, root=root, since=since, progress=progress,
-                config=ctx.obj.get("config"), reingest=reingest,
+            outcome = data.claude_code_backfill(
+                root=root, since=since, reingest=reingest, progress=progress,
             )
+        if isinstance(outcome, DelegatedBackfill):
+            _print_delegated(outcome)
+            print_deferred_pricing_warnings(console=console, messages=pricing_warnings)
+            return
+        result = outcome
 
         if result.sessions_seen == 0:
             console.print(
@@ -156,23 +157,14 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
         print_deferred_pricing_warnings(console=console, messages=pricing_warnings)
 
 
-def _backfill_via_daemon(db, *, since, root: Path, reingest: bool) -> None:
-    """Hand the run to `tj serve` and say where its result shows up."""
-    try:
-        answer = db.request_claude_code_backfill(
-            since=since, root=str(root), reingest=reingest,
-        )
-    except Exception as exc:  # noqa: BLE001 - reported, never a traceback
-        raise click.ClickException(
-            f"tj serve holds the database but refused to run the backfill: {exc}. "
-            "Stop it (tj stop) and re-run, or check `tj doctor`."
-        ) from exc
-    if answer.get("started"):
+def _print_delegated(outcome: DelegatedBackfill) -> None:
+    """The daemon took the run: say so, and where its result shows up."""
+    if outcome.started:
         console.print(
             "[bold]tj serve[/bold] holds the database, so it is running this backfill "
-            f"itself from {root} in the background."
+            f"itself from {outcome.root} in the background."
         )
-    elif answer.get("running"):
+    elif outcome.running:
         console.print(
             "[bold]tj serve[/bold] is already running a transcript backfill; "
             "this request joins it."

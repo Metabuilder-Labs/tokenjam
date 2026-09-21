@@ -14,6 +14,24 @@ paths:
 
 # Ingest / accounting rules
 
+## The transcript context refill (`core/transcript_sync.py`, issue #770)
+
+A session's ledger columns (`repo_remote`, `repo_root`, branch, developer identity; contracts §3/§4)
+are derived from the transcript's `cwd` at backfill time (`session_record_from_parsed` →
+`repo_context.session_context_for_cwd`). A session ingested by the live OTLP path, or by a build
+that predates the derivation, carries nulls, and until `refill_session_context` existed nothing
+went back for them: the first real `tj init --cloud` push carried ten sessions with no repo and
+zero commits. The refill scans the on-disk transcripts, asks the store which are ingested AND still
+unresolved (`ingested_session_ids(..., missing_context=True)`, one predicate
+`SESSION_CONTEXT_MISSING_SQL` = no remote and no root, answered through the direct connection or
+the daemon shim), re-parses only those, and writes through the same fill-null-only
+`upsert_session(..., accumulate_totals=True)` the backfill uses with every total ZERO, so the row's
+figures are untouched and `updated_at` moves (the Cloud bridge's cursor). `run_catch_up` runs it
+after every ingest over the same mtime window; `tj init --cloud` and `tj backfill claude-code`
+(via the catch-up) run it unwindowed, bounded by `REFILL_MAX_SESSIONS` per pass, newest first;
+an unresolvable session (deleted worktree) is re-tried next pass. The daemon test neutralises the
+ingest's own per-file fill so the refill is proved on its own (Critical Rule 36).
+
 ### Critical Rule 33 — A backfill run scoped by `--since` (or any window) must NEVER run the stale-scheme reconciliation DELETE
 
 A windowed keep-set is structurally incomplete. `ingest_claude_code` builds `keep_by_session[sid]` as
