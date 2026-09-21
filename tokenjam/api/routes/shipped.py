@@ -25,7 +25,9 @@ router = APIRouter()
 MATCH_MAX_WAIT_S = 60.0
 
 
-@router.post("/shipped/match", dependencies=[Depends(require_api_key)])
+# Gated by the always-on ingest secret (`IngestAuthMiddleware.PROTECTED_PATHS`),
+# not the optional read-side API key: this is a write.
+@router.post("/shipped/match")
 def match_commits(
     request: Request,
     wait_s: float = Query(0.0, ge=0.0, le=MATCH_MAX_WAIT_S,

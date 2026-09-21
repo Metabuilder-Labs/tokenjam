@@ -22,7 +22,9 @@ POST /api/v1/sessions/upsert — one `DuckDBBackend.upsert_session` call carried
 over HTTP for the serve-mode shim (`ApiBackend.upsert_session`), so a CLI
 that found the daemon holding the DuckDB write lock can still fill a
 session's repo context (the transcript refill, issue #770). Fill-null-only on
-the context columns exactly as the direct write is; API-key gated.
+the context columns exactly as the direct write is; gated by the always-on
+ingest secret like `/sessions/close` (a write must not ride the optional
+read-side API key).
 
 GET /api/v1/sessions/{session_id} — per-session detail rollup for the dashboard
 Session Detail view. Read-only; guarded by `require_api_key` like other GET
@@ -339,7 +341,9 @@ async def ingested_session_ids(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={"ingested": sorted(found)})
 
 
-@router.post("/sessions/upsert", dependencies=[Depends(require_api_key)])
+# Gated by the always-on ingest secret (`IngestAuthMiddleware.PROTECTED_PATHS`),
+# not the optional read-side API key: this is a write.
+@router.post("/sessions/upsert")
 async def upsert_session_endpoint(request: Request) -> JSONResponse:
     """Write one session row through the daemon's own backend.
 

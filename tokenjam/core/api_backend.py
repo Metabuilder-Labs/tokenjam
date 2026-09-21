@@ -54,7 +54,9 @@ class ApiBackend:
     #: absorbs that compute while still bounding a genuinely stuck daemon.
     _HEAVY_ENDPOINT_TIMEOUT = 60
 
-    def __init__(self, base_url: str, api_key: str | None = None) -> None:
+    def __init__(
+        self, base_url: str, api_key: str | None = None, *, ingest_secret: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         headers: dict[str, str] = {}
         if api_key:
@@ -62,6 +64,16 @@ class ApiBackend:
         self.client = httpx.Client(
             base_url=self.base_url, headers=headers, timeout=self._DEFAULT_TIMEOUT
         )
+        # The always-on ingest secret (`[security] ingest_secret`), sent on
+        # the write routes `IngestAuthMiddleware` protects; the read-side
+        # API key is optional and off by default, so it cannot be what
+        # authorises a write (issue #770, Greptile P1).
+        self._ingest_secret = ingest_secret or None
+
+    def _write_headers(self) -> dict[str, str]:
+        if not self._ingest_secret:
+            return {}
+        return {"Authorization": f"Bearer {self._ingest_secret}"}
 
     def _get(
         self, path: str, params: dict | None = None, *, timeout: float | None = None
@@ -85,9 +97,16 @@ class ApiBackend:
         resp.raise_for_status()
         return resp.json()
 
-    def _post(self, path: str, body: dict) -> dict:
-        """POST `body` as JSON to `path` and return the parsed JSON response."""
-        resp = self.client.post(path, json=body)
+    def _post(self, path: str, body: dict, *, write: bool = False,
+              timeout: httpx.Timeout | None = None) -> dict:
+        """POST `body` as JSON to `path` and return the parsed JSON response.
+        `write=True` sends the ingest secret (the write routes' gate)."""
+        kwargs: dict[str, Any] = {"json": body}
+        if write:
+            kwargs["headers"] = self._write_headers()
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        resp = self.client.post(path, **kwargs)
         resp.raise_for_status()
         return resp.json()
 
@@ -125,6 +144,7 @@ class ApiBackend:
         self._post(
             "/api/v1/sessions/upsert",
             {"session": session.to_dict(), "accumulate_totals": bool(accumulate_totals)},
+            write=True,
         )
 
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
@@ -656,7 +676,7 @@ class ApiBackend:
             body["since"] = since.isoformat()
         if root:
             body["root"] = root
-        return self._post("/api/v1/backfill/claude-code", body)
+        return self._post("/api/v1/backfill/claude-code", body, write=True)
 
     def request_commit_match(self, *, wait_s: float = 20.0) -> dict:
         """Ask the daemon to refresh the session -> commit join
@@ -665,7 +685,7 @@ class ApiBackend:
         cannot pair with a write; the daemon can (issue #770, fix 4).
         Returns `{"started", "running", "completed", ...}`."""
         resp = self.client.post(
-            "/api/v1/shipped/match", params={"wait_s": wait_s},
+            "/api/v1/shipped/match", params={"wait_s": wait_s}, headers=self._write_headers(),
             timeout=httpx.Timeout(self._DEFAULT_TIMEOUT, read=wait_s + self._DEFAULT_TIMEOUT),
         )
         resp.raise_for_status()
@@ -734,8 +754,11 @@ def _dict_to_span(d: dict) -> NormalizedSpan:
     )
 
 
-def probe_api(host: str, port: int, api_key: str | None = None) -> ApiBackend | None:
-    """Check if tj serve is running and return an ApiBackend if so."""
+def probe_api(
+    host: str, port: int, api_key: str | None = None, *, ingest_secret: str | None = None,
+) -> ApiBackend | None:
+    """Check if tj serve is running and return an ApiBackend if so.
+    `ingest_secret` is what the shim's write routes authenticate with."""
     base_url = f"http://{host}:{port}"
     try:
         headers: dict[str, str] = {}
@@ -744,7 +767,7 @@ def probe_api(host: str, port: int, api_key: str | None = None) -> ApiBackend | 
         resp = httpx.get(f"{base_url}/api/v1/traces", params={"limit": 1},
                          headers=headers, timeout=2)
         if resp.status_code in (200, 401):
-            return ApiBackend(base_url, api_key)
+            return ApiBackend(base_url, api_key, ingest_secret=ingest_secret)
     except (httpx.ConnectError, httpx.TimeoutException):
         pass
     return None

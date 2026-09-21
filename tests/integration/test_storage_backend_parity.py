@@ -462,7 +462,9 @@ def _parity_env(tmp_path_factory):
     app = create_app(config=config, db=db, ingest_pipeline=pipeline)
 
     with _live_server(app) as base_url:
-        shim = ApiBackend(base_url)
+        # The parity config sets an ingest secret; the shim's one write
+        # (`upsert_session`) authenticates with it like the CLI's does.
+        shim = ApiBackend(base_url, ingest_secret="parity-secret")
         try:
             yield {
                 "db": db, "shim": shim, "now": now,

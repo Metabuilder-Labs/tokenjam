@@ -11,7 +11,7 @@ through `tj backfill status`, which reads the same tables.
 
 One on-demand pass at a time: a second request while one runs answers
 `started: false, running: true` rather than parsing the tree twice.
-API-key gated like every other local write-shaped route the CLI calls.
+Gated by the always-on ingest secret, like `POST /sessions/close`: the CLI holds it in its config and the read-side API key is off by default.
 """
 from __future__ import annotations
 
@@ -20,10 +20,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from tokenjam.api.deps import require_api_key
 
 router = APIRouter()
 
@@ -35,7 +34,9 @@ def _running() -> bool:
     return _RUNNING is not None and _RUNNING.is_alive()
 
 
-@router.post("/backfill/claude-code", dependencies=[Depends(require_api_key)])
+# Gated by the always-on ingest secret (`IngestAuthMiddleware.PROTECTED_PATHS`),
+# not the optional read-side API key: this is a write.
+@router.post("/backfill/claude-code")
 async def backfill_claude_code(request: Request) -> JSONResponse:
     """Body: ``{"since": <ISO 8601> | null, "root": <path> | null,
     "reingest": bool}``. Returns ``{"started": bool, "running": bool}``."""

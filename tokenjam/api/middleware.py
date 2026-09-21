@@ -1,4 +1,4 @@
-"""Ingest auth middleware — validates Bearer token on POST /api/v1/spans."""
+"""Ingest auth middleware: validates the ingest Bearer token on the write routes."""
 from __future__ import annotations
 
 from fastapi import Request
@@ -8,13 +8,19 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 class IngestAuthMiddleware(BaseHTTPMiddleware):
     """
-    Validates the ingest secret on POST /api/v1/spans.
+    Validates the ingest secret on every POST in `PROTECTED_PATHS`.
     If security.ingest_secret is empty string, auth is disabled.
     Returns 401 with JSON error if secret is wrong or missing.
     """
 
     PROTECTED_PATHS = {
         "/api/v1/spans", "/api/v1/sessions/close", "/v1/logs", "/v1/traces",
+        # The three write-shaped routes a CLI without the DuckDB lock calls
+        # (issue #770): a session write, a daemon-run backfill, a daemon-run
+        # matcher pass. `require_api_key` is off by default, so these take
+        # the always-on ingest secret, which the CLI holds in its config and
+        # `ApiBackend` sends on exactly these posts.
+        "/api/v1/sessions/upsert", "/api/v1/backfill/claude-code", "/api/v1/shipped/match",
     }
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]

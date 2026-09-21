@@ -72,7 +72,7 @@ def _daemon(tmp_path):
     app = create_app(config=config, db=db, ingest_pipeline=IngestPipeline(db=db, config=config))
     try:
         with _live_server(app) as base_url:
-            shim = ApiBackend(base_url)
+            shim = ApiBackend(base_url, ingest_secret="s")
             try:
                 yield db, shim, config
             finally:
@@ -161,6 +161,37 @@ def test_refill_reports_unverified_when_the_daemon_lookup_fails(tmp_path, repo):
 
     report = refill_session_context(Broken(), root=root)
     assert report.verified is False and report.candidates == 0
+
+
+def test_the_write_routes_refuse_a_caller_without_the_ingest_secret(tmp_path, repo):
+    """Greptile P1 on #771: the read-side API key is off by default, so the
+    three write routes take the always-on ingest secret instead, exactly as
+    `POST /sessions/close` does. A shim without it is refused with 401 and
+    writes nothing; the CLI's shim carries the config's secret."""
+    import httpx
+
+    from tests.factories import make_session
+
+    with _daemon(tmp_path) as (db, shim, config):
+        anon = ApiBackend(shim.base_url)  # no ingest secret
+        try:
+            with pytest.raises(httpx.HTTPStatusError) as err:
+                anon.upsert_session(make_session(session_id="forged", started_at=T0))
+            assert err.value.response.status_code == 401
+            assert db.get_session("forged") is None
+            with pytest.raises(httpx.HTTPStatusError) as err:
+                anon.request_claude_code_backfill(root=str(tmp_path))
+            assert err.value.response.status_code == 401
+            with pytest.raises(httpx.HTTPStatusError) as err:
+                anon.request_commit_match(wait_s=0)
+            assert err.value.response.status_code == 401
+        finally:
+            anon.close()
+        # The middleware is the gate, so the path set must name all three.
+        from tokenjam.api.middleware import IngestAuthMiddleware
+
+        assert {"/api/v1/sessions/upsert", "/api/v1/backfill/claude-code",
+                "/api/v1/shipped/match"} <= IngestAuthMiddleware.PROTECTED_PATHS
 
 
 # --- Fix 4: the matcher runs on the daemon when the CLI cannot ------------------------------

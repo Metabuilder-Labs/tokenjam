@@ -155,7 +155,10 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         if "lock" in err_msg or "already open" in err_msg or "i/o error" in err_msg:
             from tokenjam.core.api_backend import probe_api
             api_key = config.api.auth.api_key if config.api.auth.enabled else None
-            db = probe_api(config.api.host, config.api.port, api_key)
+            db = probe_api(
+                config.api.host, config.api.port, api_key,
+                ingest_secret=config.security.ingest_secret or None,
+            )
             if db is None:
                 raise click.ClickException(
                     "Database is locked (tj serve is running?) and the API "
