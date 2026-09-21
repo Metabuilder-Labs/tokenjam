@@ -52,6 +52,7 @@ from tokenjam.core.config import (
 from tokenjam.core.db import DuckDBBackend, InMemoryBackend, StorageBackend
 from tokenjam.core.ingest import IngestPipeline
 from tokenjam.core.models import (
+    SESSION_CONTEXT_FIELDS,
     Alert,
     AlertFilters,
     AlertType,
@@ -85,6 +86,9 @@ SHIM_PARITY_METHODS = {
     "get_baseline",
     "get_session_commits",
     "get_session",
+    # The one WRITE the shim carries (issue #770): proved by writing the same
+    # record through both backends and reading it back through each.
+    "upsert_session",
 }
 
 # Methods the shim implements but that intentionally return a degraded / stub
@@ -134,7 +138,6 @@ SHIM_NOT_IMPLEMENTED = {
     "update_span_cost",
     "upsert_agent",
     "upsert_baseline",
-    "upsert_session",
     "upsert_session_commits",
 }
 
@@ -238,17 +241,40 @@ def _proj_daily_cost(value) -> float:
 
 def _proj_session(session) -> tuple | None:
     # The fields `tj commit-note`'s §5 note reads off a session (identity,
-    # plan tier and its derived pricing mode, measured cost, token counts).
-    # Repo context and the ingest `source` column are not carried by
-    # /sessions/{id}; the note derives the tool from `agent_id` instead.
+    # plan tier and its derived pricing mode, measured cost, token counts),
+    # plus the eight ledger context columns and the ingest `source`, which
+    # the transcript refill (`refill_session_context`) reads back through
+    # the shim to decide what still needs filling (issue #770).
     if session is None:
         return None
     return (
         session.session_id, session.agent_id, session.plan_tier, session.pricing_mode,
         session.total_cost_usd, session.input_tokens, session.output_tokens,
         session.cache_tokens, session.cache_write_tokens, session.tool_call_count,
-        session.error_count,
+        session.error_count, session.source,
+        *(getattr(session, f) for f in SESSION_CONTEXT_FIELDS),
     )
+
+
+UPSERT_SESSION = "parity-upsert"
+
+
+def _upsert_then_read(backend):
+    """The write half of the shim's one write method, made comparable: the
+    same record (repo context and all) goes in through `backend`, and what
+    `get_session` then reads back is the projection. Replace semantics on
+    the totals and fill-null-only on the context columns make the second
+    backend's write land the same row, so the two reads are of one row
+    written the way each backend writes it."""
+    record = dataclasses.replace(
+        make_session(session_id=UPSERT_SESSION, agent_id=AGENT, status="completed",
+                     input_tokens=10, output_tokens=2, total_cost_usd=0.5),
+        source="claude-code", repo_remote="https://github.com/Acme/parity",
+        repo_root="/srv/parity", branch_start="main", user_email="dev@example.com",
+        developer_id="feedfacefeedface",
+    )
+    backend.upsert_session(record)
+    return backend.get_session(UPSERT_SESSION)
 
 
 def _proj_commits(commits) -> list:
@@ -291,6 +317,7 @@ def _parity_specs(now, trace_id, span_id="span-id"):
         "get_baseline": (lambda b: b.get_baseline(AGENT), _proj_baseline),
         "get_session_commits": (lambda b: b.get_session_commits(SESSION), _proj_commits),
         "get_session": (lambda b: b.get_session(SESSION), _proj_session),
+        "upsert_session": (_upsert_then_read, _proj_session),
     }
 
 
@@ -310,9 +337,16 @@ class _Dataset:
 
 
 def _build_dataset(now) -> _Dataset:
-    session = make_session(
-        session_id=SESSION, agent_id=AGENT, status="completed",
-        input_tokens=3000, output_tokens=600, total_cost_usd=6.0, tool_call_count=2,
+    session = dataclasses.replace(
+        make_session(
+            session_id=SESSION, agent_id=AGENT, status="completed",
+            input_tokens=3000, output_tokens=600, total_cost_usd=6.0, tool_call_count=2,
+        ),
+        # Non-null context and provenance, so the get_session parity check
+        # compares real values across the shim rather than None == None.
+        source="claude-code", repo_remote="https://github.com/Acme/widgets",
+        repo_root="/srv/widgets", branch_start="main", branch_end="feat/x",
+        user_email="dev@example.com", developer_id="deadbeefdeadbeef",
     )
 
     spans = []

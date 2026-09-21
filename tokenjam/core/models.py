@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
@@ -328,6 +328,31 @@ class SessionRecord:
     def context(self) -> SessionContext:
         """The eight ledger columns as one value (see `SessionContext`)."""
         return SessionContext(**{f: getattr(self, f) for f in SESSION_CONTEXT_FIELDS})
+
+    def to_dict(self) -> dict[str, Any]:
+        """Every field, JSON-ready (datetimes as ISO 8601). The shape
+        `SessionRecord.from_dict` reads back; used by the serve-mode shim to
+        carry a session write to the daemon (`POST /api/v1/sessions/upsert`)."""
+        out: dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            out[f.name] = value.isoformat() if isinstance(value, datetime) else value
+        return out
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "SessionRecord":
+        """Inverse of `to_dict`. Unknown keys are ignored so a newer sender
+        never breaks an older daemon; a missing `started_at` is a ValueError
+        because a session with no observed start cannot be stored."""
+        known = {f.name for f in fields(cls)}
+        data: dict[str, Any] = {k: v for k, v in raw.items() if k in known}
+        for key in ("started_at", "ended_at"):
+            value = data.get(key)
+            if isinstance(value, str):
+                data[key] = datetime.fromisoformat(value)
+        if not isinstance(data.get("started_at"), datetime):
+            raise ValueError("session record has no started_at")
+        return cls(**data)
 
     @property
     def duration_seconds(self) -> float | None:

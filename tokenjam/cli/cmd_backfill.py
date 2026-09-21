@@ -75,6 +75,13 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
             raise click.BadParameter("amount must be > 0", param_hint="'--since-days'")
         since = utcnow() - timedelta(days=since_days)
 
+    # The daemon holds the DuckDB write lock (main.py handed us the HTTP
+    # shim): the backfill needs bulk span writes the shim cannot carry, so
+    # the daemon runs it on its own catch-up thread instead (issue #770).
+    if getattr(db, "conn", None) is None and hasattr(db, "request_claude_code_backfill"):
+        _backfill_via_daemon(db, since=since, root=root, reingest=reingest)
+        return
+
     # Cheap pre-count (stat() only, no parsing) so the shared progress counter
     # can show "N/total" rather than a bare running count (#443).
     total_in_scope = count_claude_code_sessions_in_scope(root=root, since=since)
@@ -147,6 +154,37 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
                 "flag thin-data projections.[/dim]"
             )
         print_deferred_pricing_warnings(console=console, messages=pricing_warnings)
+
+
+def _backfill_via_daemon(db, *, since, root: Path, reingest: bool) -> None:
+    """Hand the run to `tj serve` and say where its result shows up."""
+    try:
+        answer = db.request_claude_code_backfill(
+            since=since, root=str(root), reingest=reingest,
+        )
+    except Exception as exc:  # noqa: BLE001 - reported, never a traceback
+        raise click.ClickException(
+            f"tj serve holds the database but refused to run the backfill: {exc}. "
+            "Stop it (tj stop) and re-run, or check `tj doctor`."
+        ) from exc
+    if answer.get("started"):
+        console.print(
+            "[bold]tj serve[/bold] holds the database, so it is running this backfill "
+            f"itself from {root} in the background."
+        )
+    elif answer.get("running"):
+        console.print(
+            "[bold]tj serve[/bold] is already running a transcript backfill; "
+            "this request joins it."
+        )
+    else:
+        raise click.ClickException(
+            "tj serve did not start the backfill. Stop it (tj stop) and re-run."
+        )
+    console.print(
+        "  Progress: [accent]tj backfill status[/accent] "
+        "(sessions appear in [accent]tj status[/accent] as they land)."
+    )
 
 
 @cmd_backfill.command("status", status_message="Checking backfill status…")
