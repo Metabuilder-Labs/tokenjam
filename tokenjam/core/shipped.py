@@ -17,7 +17,14 @@ window and joins each one at the best confidence the evidence supports:
 * `trailer_session` (deterministic): the commit body carries
   `TokenJam-Session: <id>` or `Claude-Session: <url>` resolving to an ingested
   session. The URL names the bridge session id, not the local uuid, which is
-  why `sessions.bridge_session_id` exists.
+  why `sessions.bridge_session_id` exists. **Ranked below `tool_span_git_log`
+  when the two disagree:** the trailer is written from the shell environment
+  the commit inherited (`CLAUDE_CODE_SESSION_ID`), and a subagent spawned by
+  a session inherits the parent's, so a commit the subagent's own Bash tool
+  ran carries the PARENT's trailer. The session whose tool call ran the
+  commit produced it; a trailer naming a different session is inherited
+  evidence and is written at `inferred`, so the parent never absorbs its
+  subagents' commits at the top confidence (issue #770, fix 6).
 * `git_note` (deterministic): a `refs/notes/ai` (Git AI), `refs/notes/exceeds-ink`
   or `refs/notes/tokenjam` (our own, written by the `tj init --notes`
   post-commit hook, `core/commit_hooks.py`) note names a session id we
@@ -55,6 +62,7 @@ import os
 import re
 import shutil
 import subprocess
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -476,24 +484,83 @@ def _resolve_roots(conn, sessions: list[_Session]) -> tuple[dict[str, str], int,
     return resolved, missing, live_by_remote
 
 
-def _commit_tool_spans(conn, session_ids: list[str]) -> dict[str, list[datetime]]:
-    """`session_id -> timestamps of Bash tool calls that ran git commit`."""
-    if not session_ids:
-        return {}
-    placeholders = ", ".join(f"${i + 1}" for i in range(len(session_ids)))
+def _commit_tool_spans(conn) -> tuple[dict[str, list[datetime]], dict[str, str | None]]:
+    """`session_id -> timestamps of Bash tool calls that ran git commit`, over
+    EVERY session with repo context, not only the ones due for a scan.
+
+    The whole corpus rather than the candidate set because a trailer's rank
+    depends on who else ran the commit (see `CommitToolIndex.producers`): a
+    parent session due for a rescan must see that a subagent session, scanned
+    weeks ago, is the one whose tool call produced the commit."""
     rows = conn.execute(
-        f"SELECT session_id, start_time, attributes FROM spans "
-        f"WHERE tool_name = 'Bash' AND session_id IN ({placeholders}) "
-        f"AND CAST(attributes AS VARCHAR) LIKE '%commit%'",
-        session_ids,
+        "SELECT sp.session_id, sp.start_time, sp.attributes, s.repo_remote "
+        "FROM spans sp JOIN sessions s ON s.session_id = sp.session_id "
+        "WHERE sp.tool_name = 'Bash' "
+        "AND (s.repo_root IS NOT NULL OR s.repo_remote IS NOT NULL) "
+        "AND CAST(sp.attributes AS VARCHAR) LIKE '%commit%'",
     ).fetchall()
     out: dict[str, list[datetime]] = defaultdict(list)
-    for sid, ts, raw in rows:
+    remotes: dict[str, str | None] = {}
+    for sid, ts, raw, remote in rows:
         if is_git_commit_command(_tool_input(raw).get("command")):
             when = _utc(ts)
             if when is not None:
                 out[sid].append(when)
-    return out
+                remotes[sid] = remote
+    return out, remotes
+
+
+class CommitToolIndex:
+    """Every `git commit` tool call in the corpus, time-sorted, answering two
+    questions per commit: how close this session's own call was
+    (`best_delta`), and which sessions ran a commit inside the match window
+    at all (`producers`)."""
+
+    def __init__(self, by_session: dict[str, list[datetime]],
+                 remotes: dict[str, str | None] | None = None) -> None:
+        self._by_session = by_session
+        self._remotes = remotes or {}
+        pairs = sorted((t, sid) for sid, times in by_session.items() for t in times)
+        self._times = [t for t, _ in pairs]
+        self._sids = [sid for _, sid in pairs]
+
+    def times(self, session_id: str) -> list[datetime]:
+        return self._by_session.get(session_id, [])
+
+    def best_delta(self, session_id: str, committed_at: datetime) -> float | None:
+        """Tool-span time minus commit time for this session's closest call
+        inside `MATCH_WINDOW_S`, else None."""
+        best: float | None = None
+        for t in self.times(session_id):
+            delta = (t - committed_at).total_seconds()
+            if abs(delta) <= MATCH_WINDOW_S and (best is None or abs(delta) < abs(best)):
+                best = delta
+        return best
+
+    def producers(self, committed_at: datetime, remote: str | None = None) -> set[str]:
+        """Sessions whose own Bash tool ran `git commit` within the match
+        window of `committed_at`, on `remote` when given (a worktree shares
+        its parent's remote, a session in another repo committing at the same
+        second is not evidence about this commit)."""
+        window = timedelta(seconds=MATCH_WINDOW_S)
+        lo = bisect_left(self._times, committed_at - window)
+        hi = bisect_right(self._times, committed_at + window)
+        found = set(self._sids[lo:hi])
+        if remote is None:
+            return found
+        return {sid for sid in found if self._remotes.get(sid) in (None, remote)}
+
+
+def trailer_rank(named: str, producers: set[str]) -> tuple[str, str]:
+    """`(confidence, source)` for a `TokenJam-Session:` / `Claude-Session:`
+    trailer resolving to `named`, given the sessions whose tool call ran the
+    commit. Deterministic when nobody else is known to have run it, or when
+    the named session did; `inferred` when a DIFFERENT session's tool span
+    matched, because the trailer was then inherited from the environment
+    (contracts §2, issue #770 fix 6)."""
+    if producers and named not in producers:
+        return "inferred", "trailer_session"
+    return "deterministic", "trailer_session"
 
 
 def _session_index(conn) -> tuple[set[str], dict[str, list[tuple[str, datetime, datetime]]]]:
@@ -582,7 +649,7 @@ def _index_repo(conn, root: str, remote: str | None, oldest: datetime, now: date
 
 
 def _match_session(
-    s: _Session, root: str, commits: list[GitCommit], tool_times: list[datetime],
+    s: _Session, root: str, commits: list[GitCommit], tools: CommitToolIndex,
     known_ids: set[str], by_bridge: dict, notes_refs: list[str], now: datetime,
 ) -> list[SessionCommit]:
     rows: dict[tuple[str, str], SessionCommit] = {}
@@ -611,23 +678,22 @@ def _match_session(
 
     for c in commits:
         # 1. A git commit tool call in this session, closest within the window.
-        best: float | None = None
-        for t in tool_times:
-            delta = (t - c.committed_at).total_seconds()
-            if abs(delta) <= MATCH_WINDOW_S and (best is None or abs(delta) < abs(best)):
-                best = delta
+        best = tools.best_delta(s.session_id, c.committed_at)
         if best is not None:
             offer(s.session_id, c, "deterministic", "tool_span_git_log", best)
 
-        # 2. Trailers naming an ingested session (this one or another).
+        # 2. Trailers naming an ingested session (this one or another). A
+        #    trailer naming a session OTHER than one whose tool call ran the
+        #    commit is inherited evidence and ranks below it (`trailer_rank`).
         trailers = parse_trailers(c.body)
+        producers = tools.producers(c.committed_at, s.repo_remote)
         for sid in trailers["tokenjam_sessions"]:
             if sid in known_ids:
-                offer(sid, c, "deterministic", "trailer_session", None)
+                offer(sid, c, *trailer_rank(sid, producers), None)
         for suffix in trailers["claude_sessions"]:
             sid = _resolve_bridge(suffix, c.committed_at, by_bridge)
             if sid is not None:
-                offer(sid, c, "deterministic", "trailer_session", None)
+                offer(sid, c, *trailer_rank(sid, producers), None)
 
         # 3. Git notes (Git AI / Exceeds) naming a session we ingested.
         for ref in notes_refs:
@@ -745,7 +811,7 @@ def match_sessions_to_commits(db: Any, config: Any = None, *, now: datetime | No
     sessions = _candidate_sessions(conn, MAX_SESSIONS_PER_PASS, now)
     roots, result.repos_missing, live_by_remote = _resolve_roots(conn, sessions)
     known_ids, by_bridge = _session_index(conn)
-    tool_times = _commit_tool_spans(conn, [s.session_id for s in sessions if s.session_id in roots])
+    tools = CommitToolIndex(*_commit_tool_spans(conn))
 
     by_root: dict[str, list[_Session]] = defaultdict(list)
     for s in sessions:
@@ -774,8 +840,7 @@ def match_sessions_to_commits(db: Any, config: Any = None, *, now: datetime | No
                 since, until = s.window
                 commits = _log_between(root, since, until)
                 rows = _match_session(
-                    s, root, commits, tool_times.get(s.session_id, []),
-                    known_ids, by_bridge, notes_refs, now,
+                    s, root, commits, tools, known_ids, by_bridge, notes_refs, now,
                 )
                 written = db.upsert_session_commits(rows)
                 result.rows_written += written
@@ -1204,6 +1269,7 @@ __all__ = [
     "STATE_REVERTED",
     "STATE_SHIPPED",
     "STATE_UNSHIPPED",
+    "CommitToolIndex",
     "MatchResult",
     "ShippedSummary",
     "bridge_suffix",
@@ -1215,4 +1281,5 @@ __all__ = [
     "session_shipped_state",
     "shipped_states",
     "shipped_summary",
+    "trailer_rank",
 ]
