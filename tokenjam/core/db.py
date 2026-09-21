@@ -1044,6 +1044,19 @@ MIGRATIONS: list[tuple[int, str]] = [
     (24,
      "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bridge_session_id TEXT;\n"
      + LEDGER_TABLES_SQL),
+    # Migration 25: arrival order, for the Cloud bridge (ledger W5). The
+    # forwarder resumes from a high-water mark, and neither `start_time` nor
+    # any session timestamp follows the order rows REACH this store: a
+    # backfill or the daemon's transcript catch-up inserts spans and sessions
+    # that are older than everything already forwarded, and a status-only
+    # close changes a session without moving its `ended_at`. `ingested_at`
+    # is stamped by the column default on every insert; `updated_at` by the
+    # default on insert and by every session writer on update, so "changed
+    # since the mark" is one comparison. Existing rows take the migration
+    # time, which forwards them all once.
+    (25,
+     "ALTER TABLE spans ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ DEFAULT now();\n"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();"),
 ]
 
 
@@ -1089,6 +1102,8 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("sessions", "developer_id",            "TEXT"),               # migration 23
     ("sessions", "user_email",              "TEXT"),               # migration 23
     ("sessions", "bridge_session_id",       "TEXT"),               # migration 24
+    ("spans",    "ingested_at",             "TIMESTAMPTZ DEFAULT now()"),  # migration 25
+    ("sessions", "updated_at",              "TIMESTAMPTZ DEFAULT now()"),  # migration 25
 ]
 
 
@@ -3214,7 +3229,8 @@ class DuckDBBackend:
                     head_sha_end = COALESCE(EXCLUDED.head_sha_end, sessions.head_sha_end),
                     developer_id = COALESCE(sessions.developer_id, EXCLUDED.developer_id),
                     user_email = COALESCE(sessions.user_email, EXCLUDED.user_email),
-                    bridge_session_id = COALESCE(sessions.bridge_session_id, EXCLUDED.bridge_session_id)
+                    bridge_session_id = COALESCE(sessions.bridge_session_id, EXCLUDED.bridge_session_id),
+                    updated_at = now()
                 """,
                 [
                     session.session_id, session.agent_id, session.conversation_id,
@@ -3278,7 +3294,8 @@ class DuckDBBackend:
                     cache_tokens       = agg.cache_tokens,
                     cache_write_tokens = agg.cache_write_tokens,
                     total_cost_usd     = agg.total_cost_usd,
-                    tool_call_count    = agg.tool_call_count
+                    tool_call_count    = agg.tool_call_count,
+                    updated_at         = now()
                 FROM agg
                 WHERE s.session_id = agg.session_id
                 """,
@@ -3515,7 +3532,7 @@ class DuckDBBackend:
             with self._write_lock:
                 self.conn.execute(
                     "UPDATE sessions SET status = 'closed', "
-                    "ended_at = COALESCE(ended_at, $2) "
+                    "ended_at = COALESCE(ended_at, $2), updated_at = now() "
                     "WHERE service_instance_id = $1 AND status = 'active'",
                     [instance_id, now],
                 )
@@ -3538,7 +3555,7 @@ class DuckDBBackend:
             with self._write_lock:
                 self.conn.execute(
                     "UPDATE sessions SET status = 'closed', "
-                    "ended_at = COALESCE(ended_at, $2) "
+                    "ended_at = COALESCE(ended_at, $2), updated_at = now() "
                     "WHERE session_id = $1 AND status = 'active'",
                     [session_id, now],
                 )
@@ -3565,7 +3582,7 @@ class DuckDBBackend:
         with self._write_lock:
             placeholders = ", ".join(f"${i + 1}" for i in range(len(session_ids)))
             self.conn.execute(
-                f"UPDATE sessions SET status = 'completed' "
+                f"UPDATE sessions SET status = 'completed', updated_at = now() "
                 f"WHERE session_id IN ({placeholders}) AND status = 'active'",
                 session_ids,
             )
@@ -4111,8 +4128,8 @@ class DuckDBBackend:
     def increment_session_cost(self, session_id: str, delta_usd: float) -> None:
         with self._write_lock:
             self.conn.execute(
-                "UPDATE sessions SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 "
-                "WHERE session_id = $2",
+                "UPDATE sessions SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1, "
+                "updated_at = now() WHERE session_id = $2",
                 [delta_usd, session_id],
             )
 

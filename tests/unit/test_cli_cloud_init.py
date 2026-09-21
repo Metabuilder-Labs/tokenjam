@@ -212,6 +212,38 @@ def test_org_is_required_unless_the_config_already_names_it(seeded, cloud):
     assert all(r.url.host == "staging.test" for r in cloud.requests)
 
 
+def test_a_tracked_config_never_receives_the_key(seeded, cloud, tmp_path, monkeypatch):
+    """Critical Rule 20: the block carries a live secret, so a config git
+    tracks is refused rather than written."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    tracked = repo / "tokenjam.toml"
+    write_config(TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "x.duckdb"))), tracked)
+    subprocess.run(["git", "add", "tokenjam.toml"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-q", "-m", "x"],
+                   cwd=repo, check=True)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [Path("tokenjam.toml"), seeded])
+    result = _init("--cloud", KEY, "--org", ORG, "--yes")
+    assert result.exit_code == 0, result.output
+    assert "tracked by git" in _flat(result.output)
+    assert "[cloud]" not in tracked.read_text() and KEY not in tracked.read_text()
+    assert cloud.requests == []
+    # An untracked sibling in the same repo is fine.
+    untracked = repo / ".tj" / "config.toml"
+    write_config(TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "x.duckdb"))), untracked)
+    monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [Path(".tj/config.toml"), seeded])
+    result = _init("--cloud", KEY, "--org", ORG, "--yes")
+    assert "[cloud] written to" in _flat(result.output)
+    assert KEY in untracked.read_text()
+
+
 def test_a_malformed_key_is_refused_before_anything_happens(seeded, cloud):
     result = _init("--cloud", "sk-ant-not-a-tj-key", "--org", ORG, "--yes")
     assert result.exit_code == 2 and "tj_live_" in result.output

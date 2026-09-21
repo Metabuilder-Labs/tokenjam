@@ -240,7 +240,7 @@ def apply_declared_plans_to_sessions(
             if to_update == 0:
                 continue
             conn.execute(
-                "UPDATE sessions SET plan_tier = $1 "
+                "UPDATE sessions SET plan_tier = $1, updated_at = now() "
                 "WHERE session_id IN ("
                 "  SELECT DISTINCT session_id FROM spans "
                 "  WHERE billing_account = $2"
@@ -262,7 +262,7 @@ def apply_declared_plans_to_sessions(
         if to_update == 0:
             continue
         conn.execute(
-            "UPDATE sessions SET plan_tier = $1 "
+            "UPDATE sessions SET plan_tier = $1, updated_at = now() "
             "WHERE COALESCE(plan_tier, 'unknown') = 'unknown' "
             "AND session_id IN ("
             "  SELECT DISTINCT session_id FROM spans "

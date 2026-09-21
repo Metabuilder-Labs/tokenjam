@@ -304,13 +304,28 @@ def test_content_crosses_only_when_capture_and_forward_content_both_allow(db, st
     _run(db, config, cloud, state_file)
     assert SECRET not in b"".join(r.content for r in cloud.requests).decode()
 
-    # Both on: the prompt crosses, the tool input does too.
+    # Both on for prompts and tool inputs: the governed prompt and tool input
+    # cross; a vendor key no toggle names (`llm.prompts`, `output.value`)
+    # stays home while any toggle is off, since nothing can vouch for what
+    # kind of content it holds.
+    db.insert_span(make_llm_span(agent_id="claude-code-widgets", session_id="sess-0",
+                                 start_time=T0 + timedelta(minutes=1),
+                                 extra_attributes={"output.value": "VENDOR COMPLETION"}))
     cloud = FakeCloud()
     config = _config(forward_content=True)
     config.capture = CaptureConfig(prompts=True, completions=False, tool_inputs=True, tool_outputs=False)
     _run(db, config, cloud, state_file=state_file.with_name("s2.json"))
     wire = b"".join(r.content for r in cloud.requests).decode()
     assert SECRET in wire and "git commit" in wire
+    assert "gen_ai.prompt.content" in wire and "llm.prompts" not in wire
+    assert "VENDOR COMPLETION" not in wire
+
+    # Every toggle on: the user has said everything may cross, and it does.
+    cloud = FakeCloud()
+    config.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True, tool_outputs=True)
+    _run(db, config, cloud, state_file=state_file.with_name("s3.json"))
+    wire = b"".join(r.content for r in cloud.requests).decode()
+    assert "VENDOR COMPLETION" in wire and "llm.prompts" in wire
 
 
 # --- Batching, resume, idempotency ----------------------------------------------------------
@@ -332,7 +347,8 @@ def test_batches_are_capped_and_a_second_pass_sends_nothing(db, state_file, monk
 
     state = cs.load_state(state_file)
     assert (state.spans_sent, state.sessions_sent, state.commits_sent) == (12, 3, 3)
-    assert state.spans.hwm == "2026-09-01T12:00:30+00:00"
+    # The mark is ARRIVAL time (migration 25), not the span's own time.
+    assert state.spans.hwm and state.spans.hwm > "2026-09-01T12:00:30+00:00"
     assert state.last_success_at and state.last_error is None
 
     again = FakeCloud()
@@ -365,6 +381,56 @@ def test_resume_picks_up_only_what_arrived_after_the_mark(db, state_file):
     }
 
 
+def test_rows_that_arrive_late_with_old_timestamps_are_still_forwarded(db, state_file):
+    """A backfill or the daemon's transcript catch-up inserts spans and
+    sessions OLDER than everything already forwarded. The mark is arrival
+    order, so they are picked up; an event-time mark would skip them forever."""
+    _seed(db, at=T0 + timedelta(days=10))
+    config = _config()
+    _run(db, config, FakeCloud(), state_file)
+    old = T0 - timedelta(days=30)
+    db.upsert_session(replace(make_session(session_id="ancient", agent_id="a", started_at=old), ended_at=old))
+    db.insert_span(make_llm_span(agent_id="a", session_id="ancient", start_time=old))
+    cloud = FakeCloud()
+    report = _run(db, config, cloud, state_file)
+    assert (report.sessions_sent, report.spans_sent) == (1, 1)
+    (body,) = cloud.bodies(cs.LEDGER_SESSIONS_PATH)
+    assert body["sessions"][0]["session_id"] == "ancient"
+
+
+def test_a_status_only_close_and_a_plan_stamp_are_re_sent(db, state_file):
+    """Every session writer stamps `updated_at`, including the ones that
+    move no timestamp: a stale-active sweep and the plan-tier stamp."""
+    from tokenjam.core.config import ProviderBudget
+    from tokenjam.core.framing import apply_declared_plans_to_sessions
+
+    _seed(db)
+    db.upsert_session(replace(make_session(session_id="zombie", agent_id="a", started_at=T0,
+                                           status="active", plan_tier="unknown"), ended_at=T0))
+    db.insert_span(make_llm_span(agent_id="a", session_id="zombie", start_time=T0))
+    config = _config()
+    _run(db, config, FakeCloud(), state_file)
+
+    db.mark_sessions_completed(["zombie"])
+    cloud = FakeCloud()
+    assert _run(db, config, cloud, state_file).sessions_sent == 1
+    (body,) = cloud.bodies(cs.LEDGER_SESSIONS_PATH)
+    assert (body["sessions"][0]["session_id"], body["sessions"][0]["status"]) == ("zombie", "completed")
+
+    config.budgets = {"anthropic": ProviderBudget(plan="max_5x")}
+    apply_declared_plans_to_sessions(db.conn, config)
+    cloud = FakeCloud()
+    assert _run(db, config, cloud, state_file).sessions_sent == 1
+    (body,) = cloud.bodies(cs.LEDGER_SESSIONS_PATH)
+    assert body["sessions"][0]["plan_tier"] == "max_5x"
+    assert body["sessions"][0]["pricing_mode"] == "subscription"
+
+    db.increment_session_cost("sess-0", 0.5)
+    cloud = FakeCloud()
+    assert _run(db, config, cloud, state_file).sessions_sent == 1
+    assert cloud.bodies(cs.LEDGER_SESSIONS_PATH)[0]["sessions"][0]["total_cost_usd"] == 1.5
+
+
 def test_a_session_whose_totals_grew_is_re_sent(db, state_file):
     _seed(db)
     config = _config()
@@ -380,8 +446,14 @@ def test_a_session_whose_totals_grew_is_re_sent(db, state_file):
 
 def test_rows_sharing_the_boundary_timestamp_are_neither_skipped_nor_resent(db, state_file, monkeypatch):
     monkeypatch.setattr(cs, "BATCH_SIZE", 3)
-    for i in range(7):  # seven spans, all at T0
-        db.insert_span(make_llm_span(agent_id="a", session_id="s", start_time=T0, span_id=f"{i:016x}"))
+    # Seven spans that all ARRIVED at the same instant (one bulk insert
+    # shares one default evaluation), so every one sits on the boundary.
+    db.bulk_insert_spans([
+        make_llm_span(agent_id="a", session_id="s", start_time=T0, span_id=f"{i:016x}")
+        for i in range(7)
+    ])
+    stamps = db.conn.execute("SELECT COUNT(DISTINCT ingested_at) FROM spans").fetchone()[0]
+    assert stamps == 1
     config = _config()
     cloud = FakeCloud()
     report = _run(db, config, cloud, state_file)
@@ -499,13 +571,93 @@ def test_a_refused_record_is_isolated_skipped_and_counted(db, state_file, monkey
     assert not _run(db, config, FakeCloud(), state_file).sent_anything
 
 
-def test_a_different_org_resets_the_marks(db, state_file):
+def test_a_different_org_or_store_resets_the_marks(db, state_file, tmp_path):
     _seed(db)
     _run(db, _config(), FakeCloud(), state_file)
     other = FakeCloud()
     report = _run(db, _config(org_id="org_other"), other, state_file)
     assert report.sent_anything and cs.load_state(state_file).org_id == "org_other"
     assert other.requests[0].headers["X-TokenJam-Org"] == "org_other"
+
+    # Same org, a second database: its rows are older than the marks the
+    # first one left, and they must still all be forwarded.
+    second = DuckDBBackend(StorageConfig(path=str(tmp_path / "second.duckdb")))
+    try:
+        _seed(second, at=T0 - timedelta(days=5))
+        config2 = _config(org_id="org_other")
+        config2.storage = StorageConfig(path=str(tmp_path / "second.duckdb"))
+        cloud2 = FakeCloud()
+        report = _run(second, config2, cloud2, state_file)
+        assert (report.sessions_sent, report.commits_sent, report.spans_sent) == (1, 1, 3)
+        assert cs.load_state(state_file).db_path == str((tmp_path / "second.duckdb").resolve())
+    finally:
+        second.close()
+
+
+def test_partial_rejections_inside_a_2xx_are_counted_not_folded_into_sent(db, state_file):
+    _seed(db, spans_per=3, commits=False)  # 4 spans
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == cs.SPANS_PATH:
+            return httpx.Response(200, json={
+                "ingested": 3, "rejected": 1,
+                "rejections": [{"span_id": "x", "reason": "span carries no startTimeUnixNano"}],
+            })
+        return httpx.Response(200, json={"ingested": 1, "rejected": 0})
+
+    config = _config()
+    client = cs.CloudClient(config, transport=httpx.MockTransport(_handler), sleep=lambda _s: None)
+    report = cs.run_sync(db, config, client=client, state_file=state_file, install_id="i", host_name="h")
+    assert (report.spans_sent, report.rejected, report.stopped) == (3, 1, None)
+    state = cs.load_state(state_file)
+    assert state.spans_sent == 3 and state.rejected == 1
+    assert "refused 1 record" in state.last_error and "startTimeUnixNano" in state.last_error
+    # Advanced past, not retried: the same body would be refused again.
+    assert not cs.run_sync(db, config, client=client, state_file=state_file,
+                           install_id="i", host_name="h").sent_anything
+
+
+def test_passes_never_overlap(db, state_file):
+    import threading
+
+    _seed(db)
+    config = _config()
+    gate = threading.Event()
+    inside = threading.Event()
+
+    def _slow(request: httpx.Request) -> httpx.Response:
+        inside.set()
+        gate.wait(timeout=10)
+        return httpx.Response(200, json={"ingested": 1, "rejected": 0})
+
+    slow = cs.CloudClient(config, transport=httpx.MockTransport(_slow), sleep=lambda _s: None)
+    first: list[cs.SyncReport] = []
+    t = threading.Thread(target=lambda: first.append(cs.run_sync(
+        db, config, client=slow, state_file=state_file, install_id="i", host_name="h")))
+    t.start()
+    assert inside.wait(timeout=10)
+    second = _run(db, config, FakeCloud(), state_file)
+    assert second.skipped_reason == "a forwarding pass is already running"
+    gate.set()
+    t.join(timeout=30)
+    assert first and first[0].sent_anything
+
+
+def test_sdk_event_timestamps_survive_the_wire(db, state_file):
+    at = T0 + timedelta(minutes=1)
+    span = make_llm_span(agent_id="a", session_id="s", start_time=at)
+    span.events = [
+        {"name": "sdk", "timestamp": at.isoformat(), "attributes": {}},
+        {"name": "otlp", "time": str(int(at.timestamp() * 1e9) + 5), "attributes": {}},
+        {"name": "none", "attributes": {}},
+    ]
+    db.insert_span(span)
+    cloud = FakeCloud()
+    _run(db, _config(), cloud, state_file)
+    (raw,) = FakeCloud.spans(cloud.bodies(cs.SPANS_PATH)[0])
+    times = {e["name"]: e["timeUnixNano"] for e in raw["events"]}
+    assert times == {"sdk": str(int(at.timestamp() * 1e9)),
+                     "otlp": str(int(at.timestamp() * 1e9) + 5), "none": "0"}
 
 
 def test_a_corrupt_state_file_costs_one_resend_never_the_pass(db, state_file):

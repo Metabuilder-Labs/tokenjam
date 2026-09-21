@@ -18,14 +18,19 @@ and the same resume state:
   as `{"sessions": [...], "session_commits": [...]}`, each list at most
   `BATCH_SIZE` rows, idempotent by primary key on the receiver.
 
-**Resumable.** `~/.tj/cloud_sync.json` holds one high-water mark per stream:
-the largest `start_time` (spans), last-activity time (sessions, so a session
-whose totals grew is re-sent) or `matched_at` (commits, which a confidence
-upgrade re-stamps) acknowledged so far, plus the ids already sent AT that
-timestamp so a resume can re-read from the mark inclusive without
-re-sending them. State is written after every acknowledged batch, never
-before, so a crash mid-pass re-sends at most one batch, which the receiver
-dedupes.
+**Resumable.** `~/.tj/cloud_sync.json` holds one high-water mark per stream
+in ARRIVAL order, never event order: `spans.ingested_at` (stamped on insert),
+`sessions.updated_at` (stamped on insert and by every session writer, so a
+session whose totals grew, that was closed, or whose plan tier was stamped
+later is re-sent) and `session_commits.matched_at` (set at write time and
+re-stamped by a confidence upgrade). Event time would lose rows: a backfill
+or the daemon's transcript catch-up inserts spans and sessions OLDER than
+everything already forwarded. The mark carries the ids already sent AT its
+timestamp so a resume can re-read from it inclusive without re-sending
+them. State is written after every acknowledged batch, never before, so a
+crash mid-pass re-sends at most one batch, which the receiver dedupes. The
+marks are scoped to the org AND the database file they describe; either
+changing starts them over.
 
 **Content never crosses by default.** Prompt, completion and tool content is
 stripped unless the local `[capture]` toggles keep it AND
@@ -138,6 +143,12 @@ _CAPTURE_NONE = CaptureConfig(
     prompts=False, completions=False, tool_inputs=False, tool_outputs=False,
 )
 
+#: One pass at a time per process. The daemon's interval job and its
+#: startup kick both dispatch a thread and return; a receiver that is slow
+#: or backing off can keep one pass alive past the next tick, and two passes
+#: over the same marks would re-send batches and race on the state file.
+_PASS_LOCK = threading.Lock()
+
 _KIND_MAP = {"internal": 1, "server": 2, "client": 3, "producer": 4, "consumer": 5}
 _STATUS_MAP = {"unset": 0, "ok": 1, "error": 2}
 
@@ -181,9 +192,11 @@ class SyncState:
     #: Set on a 401; the forwarder does nothing while it is set.
     disabled_reason: str | None = None
     disabled_at: str | None = None
-    #: The org the marks belong to. A re-init against a different org resets
-    #: every mark, since the new org has none of the rows.
+    #: The org the marks belong to, and the database file they were read
+    #: from. Either changing resets every mark: another org holds none of
+    #: the rows, and another store has its own arrival order.
     org_id: str | None = None
+    db_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -222,6 +235,7 @@ class SyncState:
             disabled_reason=_str(raw.get("disabled_reason")),
             disabled_at=_str(raw.get("disabled_at")),
             org_id=_str(raw.get("org_id")),
+            db_path=_str(raw.get("db_path")),
         )
 
 
@@ -251,20 +265,27 @@ def save_state(state: SyncState, path: Path | None = None) -> None:
         logger.debug("could not persist cloud sync state at %s", target, exc_info=True)
 
 
-def reset_state(*, org_id: str, path: Path | None = None) -> SyncState:
-    """What `tj init --cloud` does to the resume state. For the org the marks
-    already describe, only the receiver's disable and the last error are
-    cleared (a re-run with a fresh key resumes, it does not re-send history);
-    for any other org the marks start over, since that org holds none of the
-    rows. Written immediately."""
+def storage_identity(config: TjConfig) -> str:
+    """The database file the marks describe, resolved the way `DuckDBBackend`
+    opens it, so two configs naming the same file share one set of marks
+    and two files never do."""
+    return str(Path(config.storage.path).expanduser().resolve())
+
+
+def reset_state(*, org_id: str, db_path: str | None = None, path: Path | None = None) -> SyncState:
+    """What `tj init --cloud` does to the resume state. For the org and store
+    the marks already describe, only the receiver's disable and the last
+    error are cleared (a re-run with a fresh key resumes, it does not re-send
+    history); for any other org or store the marks start over. Written
+    immediately."""
     existing = load_state(path)
-    if existing.org_id == org_id:
+    if existing.org_id == org_id and (db_path is None or existing.db_path == db_path):
         existing.disabled_reason = None
         existing.disabled_at = None
         existing.last_error = None
         state = existing
     else:
-        state = SyncState(org_id=org_id)
+        state = SyncState(org_id=org_id, db_path=db_path)
     save_state(state, path)
     return state
 
@@ -363,18 +384,66 @@ def _all_off(capture: CaptureConfig) -> bool:
                 or capture.tool_inputs or capture.tool_outputs)
 
 
+def _all_on(capture: CaptureConfig) -> bool:
+    return (capture.prompts and capture.completions
+            and capture.tool_inputs and capture.tool_outputs)
+
+
+#: The content keys `strip_captured_content` governs toggle by toggle. After
+#: it has run, these carry exactly what the local toggles allow; every OTHER
+#: content-shaped key is one no toggle names, so it crosses only when the
+#: user has turned every toggle on.
+_GOVERNED_CONTENT_KEYS = frozenset({
+    GenAIAttributes.PROMPT_CONTENT, GenAIAttributes.COMPLETION_CONTENT,
+    GenAIAttributes.TOOL_INPUT, GenAIAttributes.TOOL_OUTPUT,
+    TjAttributes.REQUEST_TOOLS, TjAttributes.SYSTEM_PREFIX_CONTENT,
+    TjAttributes.SYSTEM_PREFIX_SAMPLE, TjAttributes.SYSTEM_PREFIX_HASH,
+    TjAttributes.SYSTEM_PREFIX_LENGTH,
+})
+
+
 def _scrub(attrs: Mapping[str, Any], capture: CaptureConfig) -> dict[str, Any]:
+    """The toggles decide the governed keys; the sweep decides the rest.
+    A vendor key no toggle names (`output.value`, `llm.prompts`) is content
+    of unknown kind, so a partial configuration (prompts on, completions
+    off) cannot vouch for it: it crosses only when all four are on."""
     stripped = strip_captured_content(dict(attrs), capture)
-    return _sweep_content_keys(stripped) if _all_off(capture) else stripped
+    if _all_on(capture):
+        return stripped
+    swept = _sweep_content_keys(stripped)
+    for k in _GOVERNED_CONTENT_KEYS:
+        if k in stripped:
+            swept[k] = stripped[k]
+    return swept
+
+
+def _event_ns(e: Mapping[str, Any]) -> str:
+    """An event's time as OTLP nanoseconds. Two producers, two spellings:
+    the OTLP paths store `time` (already nanoseconds), the in-process SDK
+    stores `timestamp` (ISO 8601)."""
+    raw = e.get("time")
+    if raw not in (None, "", 0, "0"):
+        try:
+            return str(int(raw))
+        except (TypeError, ValueError):
+            pass
+    stamp = e.get("timestamp")
+    if isinstance(stamp, str) and stamp:
+        try:
+            dt = datetime.fromisoformat(stamp)
+        except ValueError:
+            return "0"
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return _ns(dt)
+    return "0"
 
 
 def _scrub_events(events: Sequence[Mapping[str, Any]] | None,
                   capture: CaptureConfig) -> list[dict[str, Any]]:
     out = []
     for e in events or []:
-        entry: dict[str, Any] = {
-            "name": str(e.get("name", "")), "timeUnixNano": str(e.get("time") or "0"),
-        }
+        entry: dict[str, Any] = {"name": str(e.get("name", "")), "timeUnixNano": _event_ns(e)}
         if not _all_off(capture):
             attrs = e.get("attributes")
             if isinstance(attrs, Mapping):
@@ -573,6 +642,9 @@ class PostResult:
     outcome: str
     status: int | None = None
     detail: str = ""
+    #: Rows the receiver refused INSIDE a 2xx (the `rejected` count of the
+    #: OSS partial-success body); 0 when the body carries none.
+    rejected: int = 0
 
 
 def auth_headers(config: TjConfig) -> dict[str, str]:
@@ -622,7 +694,7 @@ class CloudClient:
                 status = resp.status_code
                 detail = _response_detail(resp)
                 if status < 300:
-                    return PostResult(Outcome.OK, status, detail)
+                    return PostResult(Outcome.OK, status, detail, rejected=_rejected_count(resp))
                 if status == 401:
                     return PostResult(Outcome.UNAUTHORIZED, status, detail)
                 if 400 <= status < 500 and status != 429:
@@ -643,6 +715,22 @@ def _retry_after(resp: Any) -> float:
         return 0.0
 
 
+def _rejected_count(resp: Any) -> int:
+    """`rejected` from the OSS partial-success body, bounded by what the
+    body actually lists when it lists anything; 0 for any other shape."""
+    try:
+        data = resp.json()
+    except ValueError:
+        return 0
+    if not isinstance(data, Mapping):
+        return 0
+    try:
+        n = int(data.get("rejected") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, n)
+
+
 def _response_detail(resp: Any) -> str:
     try:
         data = resp.json()
@@ -652,7 +740,11 @@ def _response_detail(resp: Any) -> str:
         for key in ("error", "detail", "message"):
             if key in data:
                 return str(data[key])[:200]
-        return json.dumps(data)[:200]
+        rejections = data.get("rejections")
+        if isinstance(rejections, list) and rejections:
+            reasons = [str(r.get("reason", "")) for r in rejections[:3] if isinstance(r, Mapping)]
+            return "; ".join(x for x in reasons if x)[:200]
+        return ""
     return str(data)[:200]
 
 
@@ -678,20 +770,19 @@ def _columns(cursor: Any) -> list[str]:
     return [d[0] for d in cursor.description]
 
 
-_SPANS_ALL = "SELECT * FROM spans ORDER BY start_time, span_id LIMIT $1"
-_SPANS_FROM = ("SELECT * FROM spans WHERE start_time >= $1 "
-               "ORDER BY start_time, span_id LIMIT $2")
-_SPANS_AFTER = ("SELECT * FROM spans WHERE start_time > $1 "
-                "ORDER BY start_time, span_id LIMIT $2")
-_SESSIONS_SELECT = ("SELECT s.*, GREATEST(started_at, COALESCE(ended_at, started_at)) "
-                    "AS activity_at FROM sessions s ")
-_SESSIONS_ALL = _SESSIONS_SELECT + "ORDER BY activity_at, session_id LIMIT $1"
-_SESSIONS_FROM = (_SESSIONS_SELECT
-                  + "WHERE GREATEST(started_at, COALESCE(ended_at, started_at)) >= $1 "
-                  "ORDER BY activity_at, session_id LIMIT $2")
-_SESSIONS_AFTER = (_SESSIONS_SELECT
-                   + "WHERE GREATEST(started_at, COALESCE(ended_at, started_at)) > $1 "
-                   "ORDER BY activity_at, session_id LIMIT $2")
+# Arrival-order columns (migration 25). A row whose stamp is NULL (written by
+# a build that predates the column and never touched since the migration
+# defaulted it) sorts first and is read once on the first pass.
+_SPANS_ALL = "SELECT * FROM spans ORDER BY ingested_at, span_id LIMIT $1"
+_SPANS_FROM = ("SELECT * FROM spans WHERE ingested_at >= $1 "
+               "ORDER BY ingested_at, span_id LIMIT $2")
+_SPANS_AFTER = ("SELECT * FROM spans WHERE ingested_at > $1 "
+                "ORDER BY ingested_at, span_id LIMIT $2")
+_SESSIONS_ALL = "SELECT * FROM sessions ORDER BY updated_at, session_id LIMIT $1"
+_SESSIONS_FROM = ("SELECT * FROM sessions WHERE updated_at >= $1 "
+                  "ORDER BY updated_at, session_id LIMIT $2")
+_SESSIONS_AFTER = ("SELECT * FROM sessions WHERE updated_at > $1 "
+                   "ORDER BY updated_at, session_id LIMIT $2")
 _COMMITS_SELECT = ("SELECT session_id, commit_sha, confidence, source, repo_remote, "
                    "author_email, committed_at, matched_at, match_delta_s "
                    "FROM session_commits ")
@@ -726,15 +817,18 @@ class _Source:
             return self.db.conn.execute(sql_all, [limit])
         return self.db.conn.execute(sql_from if inclusive else sql_after, [hwm, limit])
 
-    def spans(self, mark: StreamMark, limit: int) -> list[NormalizedSpan]:
+    def spans(self, mark: StreamMark, limit: int) -> list[tuple[NormalizedSpan, datetime]]:
         from tokenjam.core.db import _row_to_span
 
-        def _fetch(inclusive: bool, hwm: datetime | None, n: int) -> list[NormalizedSpan]:
+        def _fetch(inclusive: bool, hwm: datetime | None, n: int) -> list[tuple[NormalizedSpan, datetime]]:
             cur = self._page(_SPANS_ALL, _SPANS_FROM, _SPANS_AFTER, inclusive, hwm, n)
             cols = _columns(cur)
-            return [_row_to_span(r, cols) for r in cur.fetchall()]
+            out = []
+            for r in cur.fetchall():
+                out.append((_row_to_span(r, cols), dict(zip(cols, r))["ingested_at"]))
+            return out
 
-        return _boundary(_fetch, mark, limit, key=lambda s: s.span_id, at=lambda s: s.start_time)
+        return _boundary(_fetch, mark, limit, key=lambda t: t[0].span_id, at=lambda t: t[1])
 
     def sessions(self, mark: StreamMark, limit: int) -> list[tuple[SessionRecord, datetime]]:
         from tokenjam.core.db import _row_to_session
@@ -745,7 +839,7 @@ class _Source:
             cols = _columns(cur)
             out = []
             for r in cur.fetchall():
-                out.append((_row_to_session(r, cols), dict(zip(cols, r))["activity_at"]))
+                out.append((_row_to_session(r, cols), dict(zip(cols, r))["updated_at"]))
             return out
 
         return _boundary(_fetch, mark, limit, key=lambda t: t[0].session_id, at=lambda t: t[1])
@@ -810,11 +904,36 @@ def run_sync(
     if not config.cloud.is_active:
         report.skipped_reason = "cloud forwarding is not configured"
         return report
+    if not _PASS_LOCK.acquire(blocking=False):
+        report.skipped_reason = "a forwarding pass is already running"
+        return report
+    try:
+        return _run_sync_locked(db, config, report, client=client, state_file=state_file,
+                                install_id=install_id, host_name=host_name)
+    finally:
+        _PASS_LOCK.release()
+
+
+def _run_sync_locked(
+    db: Any,
+    config: TjConfig,
+    report: SyncReport,
+    *,
+    client: CloudClient | None,
+    state_file: Path | None,
+    install_id: str | None,
+    host_name: str | None,
+) -> SyncReport:
     state = load_state(state_file)
-    if state.org_id and state.org_id != config.cloud.org_id:
-        # A different org: none of the marks describe what it holds.
-        state = reset_state(org_id=config.cloud.org_id, path=state_file)
+    db_path = storage_identity(config)
+    if (state.org_id and state.org_id != config.cloud.org_id) or (
+        state.db_path and state.db_path != db_path
+    ):
+        # A different org or store: none of the marks describe what it holds.
+        state = SyncState(org_id=config.cloud.org_id, db_path=db_path)
+        save_state(state, state_file)
     state.org_id = config.cloud.org_id
+    state.db_path = db_path
     if state.disabled_reason:
         report.skipped_reason = state.disabled_reason
         return report
@@ -838,12 +957,27 @@ def run_sync(
         the rows the receiver has confirmed."""
         result = client.post(path, body)
         if result.outcome == Outcome.OK:
+            # A 2xx is the receiver's ack for the BATCH; the OSS partial
+            # success shape inside it names the rows it refused. Those are
+            # per-record faults a retry cannot fix (the same body would be
+            # refused again), so they are advanced past like any other
+            # refused row, and counted, never silently folded into "sent".
+            refused = result.rejected
+            if refused:
+                state.rejected += refused
+                report.rejected += refused
+                state.last_error = (
+                    f"receiver refused {refused} record(s) in an accepted batch"
+                    f"{': ' + result.detail if result.detail else ''}"
+                )
+            else:
+                state.last_error = None
             _advance(mark, rows, key=key, at=at)
-            setattr(state, counter, getattr(state, counter) + len(rows))
+            sent = len(rows) - refused
+            setattr(state, counter, getattr(state, counter) + sent)
             state.last_success_at = utcnow().isoformat()
-            state.last_error = None
             save_state(state, state_file)
-            return len(rows), True
+            return sent, True
         if result.outcome == Outcome.UNAUTHORIZED:
             state.disabled_reason = (
                 f"Cloud rejected the ingest key ({result.status}"
@@ -922,14 +1056,14 @@ def run_sync(
             if not spans:
                 break
             sessions = {sid: source.session(sid)
-                        for sid in {s.session_id for s in spans if s.session_id}}
+                        for sid in {s.session_id for s, _ in spans if s.session_id}}
 
-            def _spans_body(rows: Sequence[NormalizedSpan]) -> dict[str, Any]:
-                return encode_spans_otlp(rows, sessions, capture=capture,
+            def _spans_body(rows: Sequence[tuple[NormalizedSpan, datetime]]) -> dict[str, Any]:
+                return encode_spans_otlp([s for s, _ in rows], sessions, capture=capture,
                                          install_id=install, host_name=host)
 
             n, go = _send(SPANS_PATH, _spans_body(spans), state.spans, spans,
-                          key=lambda s: s.span_id, at=lambda s: s.start_time,
+                          key=lambda t: t[0].span_id, at=lambda t: t[1],
                           rebuild=_spans_body, counter="spans_sent")
             report.spans_sent += n
             if not go:
@@ -1116,6 +1250,7 @@ __all__ = [
     "probe",
     "reset_state",
     "run_sync",
+    "storage_identity",
     "save_state",
     "session_to_wire",
     "span_attributes_for_wire",

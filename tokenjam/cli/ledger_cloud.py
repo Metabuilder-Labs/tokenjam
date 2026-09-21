@@ -14,6 +14,7 @@ never echoed back in full.
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import click
@@ -108,6 +109,15 @@ def run_cloud_init(
         )
     target_endpoint = (endpoint or "").strip() or config.cloud.endpoint or CloudConfig.endpoint
 
+    if is_git_tracked(path):
+        console.print(
+            f"[warn]Cloud not connected:[/warn] [accent]{display_path(path)}[/accent] is tracked "
+            "by git, and the ingest key is a live secret. Add the file to .gitignore (or point "
+            "tj at an untracked config with [accent]--config[/accent]) and re-run.",
+            soft_wrap=True,
+        )
+        return False
+
     print_emission_list(config)
     console.print(
         f"  Forwarding to [accent]{target_endpoint}[/accent] as org [bold]{org_id}[/bold] "
@@ -130,11 +140,26 @@ def run_cloud_init(
         forward_content=config.cloud.forward_content,
     )
     write_config(config, path)
-    cloud_sync.reset_state(org_id=org_id)
+    cloud_sync.reset_state(org_id=org_id, db_path=cloud_sync.storage_identity(config))
     console.print(f"[ok]✓[/ok] {_CLOUD_SECTION} written to [accent]{display_path(path)}[/accent]")
 
     _initial_push(config, path)
     return True
+
+
+def is_git_tracked(path: Path) -> bool:
+    """Whether git tracks `path` (Critical Rule 20: a live key never lands
+    in a committable file). Read-only, 2s, `check=False`; anything short of
+    a clean "yes" is "no", so a machine without git is never blocked."""
+    try:
+        target = path.resolve()
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", target.name],
+            cwd=target.parent, capture_output=True, text=True, timeout=2, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _turn_off(config: TjConfig, path: Path) -> bool:
@@ -248,6 +273,7 @@ def cloud_summary_line(config: TjConfig | None) -> str:
 __all__ = [
     "CLOUD_OFF",
     "cloud_summary_line",
+    "is_git_tracked",
     "print_emission_list",
     "run_cloud_init",
 ]
