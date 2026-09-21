@@ -11,6 +11,7 @@ helpers are stubbed: a unit test never touches launchd.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -411,3 +412,159 @@ def test_doctor_probes_reachability_and_the_key(seeded, cloud):
 
     config.cloud.enabled = False
     assert _check_cloud_bridge(config)["level"] == "info"
+
+
+# --- The first push on a fresh machine (issue #770) --------------------------------------
+
+def _ledger_bodies(cloud: FakeCloud) -> list[dict]:
+    return [json.loads(r.content) for r in cloud.requests if r.url.path == cs.LEDGER_SESSIONS_PATH]
+
+
+@pytest.fixture
+def fresh_machine(config_path, monkeypatch, tmp_path):
+    """What the first real run looked like: a session ingested by a daemon
+    that never derived repo context (nulls), its transcript still on disk in
+    a real checkout, and the commit its Bash tool made. No install id yet."""
+    import subprocess
+
+    from tests.ledger_fixtures import T0 as START
+    from tests.ledger_fixtures import git_repo, write_transcript
+    from tests.factories import make_tool_span
+
+    repo = next(git_repo(tmp_path, monkeypatch))
+    # `git_repo` re-points HOME under tmp_path; the config fixture's home is
+    # what `tj init` must keep using.
+    home = config_path.parents[2]
+    monkeypatch.setenv("HOME", str(home))
+    projects = home / ".claude" / "projects"
+    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(projects))
+    write_transcript(projects, "live-1", str(repo), at=START)
+
+    db = DuckDBBackend(load_config(str(config_path)).storage)
+    db.upsert_session(replace(
+        make_session(session_id="live-1", agent_id="claude-code-widgets", started_at=START,
+                     total_cost_usd=2.0, input_tokens=200, output_tokens=40, tool_call_count=1),
+        ended_at=START + timedelta(minutes=10), source="claude-code",
+    ))
+    db.insert_span(make_llm_span(agent_id="claude-code-widgets", session_id="live-1",
+                                 start_time=START, cost_usd=2.0, input_tokens=200, output_tokens=40))
+    db.insert_span(make_tool_span(agent_id="claude-code-widgets", tool_name="Bash",
+                                  session_id="live-1", start_time=START + timedelta(minutes=5),
+                                  tool_input={"command": "git commit -m feat"}))
+    db.close()
+    (repo / "a.py").write_text("1\n")
+    subprocess.run(["git", "add", "a.py"], cwd=repo, check=True)
+    stamp = str(int((START + timedelta(minutes=5, seconds=2)).timestamp()))
+    subprocess.run(["git", "commit", "-q", "-m", "feat"], cwd=repo, check=True,
+                   env={**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp,
+                        "GIT_AUTHOR_EMAIL": "dev@example.com",
+                        "GIT_COMMITTER_EMAIL": "dev@example.com",
+                        "GIT_AUTHOR_NAME": "Dev", "GIT_COMMITTER_NAME": "Dev"})
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+                         text=True, check=True).stdout.strip()
+    assert not (home / ".tj" / "install_id").exists()
+    return {"config_path": config_path, "home": home, "repo": repo, "sha": sha}
+
+
+def test_first_push_carries_context_install_id_and_commits(fresh_machine, cloud):
+    """The acceptance case for issue #770: `tj init --cloud` on a machine whose
+    sessions were ingested without context sends, on the FIRST push, sessions
+    with repo context and this machine's install id, and the commits joined
+    to them. Before: 25k spans, 11 sessions, 0 commits, no developer."""
+    result = _init("--cloud", KEY, "--org", ORG, "--yes")
+    assert result.exit_code == 0, result.output
+    out = _flat(result.output)
+
+    install_id = (fresh_machine["home"] / ".tj" / "install_id").read_text().strip()
+    assert install_id
+
+    bodies = _ledger_bodies(cloud)
+    sessions = [s for b in bodies for s in b["sessions"]]
+    commits = [c for b in bodies for c in b["session_commits"]]
+    assert [s["session_id"] for s in sessions] == ["live-1"]
+    session = sessions[0]
+    # Fix 1: context filled BEFORE the send.
+    assert session["repo_remote"] == "https://github.com/Acme/widgets"
+    assert session["repo_root"] == str(fresh_machine["repo"])
+    assert session["branch_start"] == "main"
+    assert session["user_email"] == "dev@example.com"
+    assert session["developer_id"]
+    # Fix 2: the install id, from ~/.tj/install_id, on every session row
+    # and on the spans' resource attributes.
+    assert session["install_id"] == install_id
+    spans_body = json.loads(next(r.content for r in cloud.requests if r.url.path == cs.SPANS_PATH))
+    resource_attrs = {a["key"]: a["value"] for a in spans_body["resourceSpans"][0]["resource"]["attributes"]}
+    assert resource_attrs["tokenjam.install_id"] == {"stringValue": install_id}
+    # Fix 1: the join was made before the send, and sessions went first.
+    assert [(c["session_id"], c["commit_sha"], c["confidence"], c["source"]) for c in commits] == [
+        ("live-1", fresh_machine["sha"], "deterministic", "tool_span_git_log"),
+    ]
+    paths = [r.url.path for r in cloud.requests]
+    assert paths.index(cs.SPANS_PATH) > paths.index(cs.LEDGER_SESSIONS_PATH)
+    # And the screen says what happened, in order.
+    assert "repo context filled on 1 of 1" in out
+    assert "1 new session-commit join" in out
+    assert "Forwarded 2 spans, 1 sessions, 1 commits" in out
+    assert out.index("Before sending") < out.index("Forwarded 2 spans")
+    for command in advertised_commands(result.output):
+        assert_invocable(command)
+
+
+def test_the_status_line_stops_and_the_result_prints_before_the_daemon_restarts(
+    fresh_machine, cloud, monkeypatch,
+):
+    """Fix 5. The spinner used to sit on screen until the restart finished.
+    Rendered as a real terminal so the live display exists, then proved: no
+    live display is active when the restart runs, and the forwarded line is
+    already on screen by then."""
+    from rich.console import Console
+
+    from tokenjam.utils.formatting import console
+
+    monkeypatch.setattr(Console, "is_terminal", property(lambda self: True))
+    seen: dict[str, object] = {}
+
+    def _restart(path, no_daemon, **kw):
+        # Rich keeps every active live display (a status spinner is one) on
+        # the console's live stack; an empty stack is "nothing is spinning".
+        seen["live_at_restart"] = list(console._live_stack)
+        return "restarted (stub)"
+
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard._stop_serve_for_db_write", lambda: True)
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard._restart_tj_server", _restart)
+    result = _init("--cloud", KEY, "--org", ORG, "--yes")
+    assert result.exit_code == 0, result.output
+    assert "live_at_restart" in seen, "the restart never ran"
+    assert seen["live_at_restart"] == [], "a status line was still live during the restart"
+    out = _flat(result.output)
+    assert out.index("Forwarded 2 spans, 1 sessions, 1 commits") < out.index("Daemon: restarted")
+
+
+def test_a_refill_or_match_failure_never_blocks_the_push(fresh_machine, cloud, monkeypatch):
+    monkeypatch.setattr("tokenjam.core.shipped.match_sessions_to_commits",
+                        lambda db, config=None, **kw: (_ for _ in ()).throw(RuntimeError("git exploded")))
+    result = _init("--cloud", KEY, "--org", ORG, "--yes")
+    assert result.exit_code == 0, result.output
+    out = _flat(result.output)
+    assert "could not run (git exploded)" in out
+    assert "Forwarded 2 spans, 1 sessions, 0 commits" in out
+    # The refill ran before the failing step: the session still left with context.
+    assert _ledger_bodies(cloud)[0]["sessions"][0]["repo_remote"] == "https://github.com/Acme/widgets"
+
+
+def test_a_missing_install_id_is_said_out_loud_and_never_blocks_the_push(
+    fresh_machine, cloud, monkeypatch,
+):
+    """Fix 2, the failure half: an unwritable ~/.tj/install_id still lets the
+    history leave, and the user is told Cloud will not count the machine."""
+    monkeypatch.setattr("tokenjam.cli.ledger_cloud.ensure_install_id", lambda: None)
+    monkeypatch.setattr("tokenjam.core.cloud_sync.ensure_install_id", lambda: None)
+    result = _init("--cloud", KEY, "--org", ORG, "--yes")
+    assert result.exit_code == 0, result.output
+    out = _flat(result.output)
+    assert "No install id could be written" in out
+    assert "without an install id" in out
+    assert "Forwarded 2 spans, 1 sessions, 1 commits" in out
+    assert _ledger_bodies(cloud)[0]["sessions"][0]["install_id"] is None
+    for command in advertised_commands(result.output):
+        assert_invocable(command)

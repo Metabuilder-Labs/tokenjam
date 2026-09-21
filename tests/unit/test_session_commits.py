@@ -317,6 +317,108 @@ def test_ai_trailer_on_the_session_branch_is_inferred_and_a_later_pass_upgrades_
         db.close()
 
 
+def test_a_parents_trailer_on_a_commit_a_subagent_ran_ranks_below_the_tool_span(repo):
+    """Issue #770 fix 6. A subagent spawned by a session inherits the parent's
+    `CLAUDE_CODE_SESSION_ID`, so a commit the subagent's own Bash tool ran
+    carries the PARENT's `TokenJam-Session:` trailer. The subagent produced
+    it (`tool_span_git_log`, deterministic); the parent's row is inherited
+    evidence and is written at `inferred`, whichever of the two sessions the
+    pass scans first."""
+    db = InMemoryBackend()
+    try:
+        _session(db, "parent", repo, T0, T0 + timedelta(minutes=30))
+        _session(db, "worker", repo, T0 + timedelta(minutes=1), T0 + timedelta(minutes=20))
+        _bash(db, "worker", T0 + timedelta(minutes=5), "git commit -m 'feat'")
+        sha = _commit(repo, "a.py", "1\n", "feat\n\nTokenJam-Session: parent",
+                      T0 + timedelta(minutes=5, seconds=3))
+        match_sessions_to_commits(db)
+        assert _rows(db, "worker") == [("worker", sha, "deterministic", "tool_span_git_log", -3.0)]
+        assert _rows(db, "parent") == [("parent", sha, "inferred", "trailer_session", None)]
+        # A second pass changes nothing (idempotent, and no upgrade is offered).
+        match_sessions_to_commits(db)
+        assert [(r[2], r[3]) for r in _rows(db, "parent")] == [("inferred", "trailer_session")]
+    finally:
+        db.close()
+
+
+def test_a_trailer_naming_the_session_that_ran_the_commit_stays_deterministic(repo):
+    """The control for the rule above: the trailer agrees with the tool span,
+    so nothing is demoted, and the `Claude-Session:` spelling resolves through
+    the bridge id the same way."""
+    db = InMemoryBackend()
+    try:
+        _session(db, "s1", repo, T0, T0 + timedelta(minutes=10), bridge="cse_01AbC")
+        _session(db, "other", repo, T0 + timedelta(hours=2), T0 + timedelta(hours=3))
+        _bash(db, "s1", T0 + timedelta(minutes=3), "git commit -m feat")
+        sha = _commit(repo, "a.py", "1\n",
+                      "feat\n\nClaude-Session: https://claude.ai/code/session_01AbC",
+                      T0 + timedelta(minutes=3, seconds=1))
+        # A commit with ONLY a trailer, and nobody's tool span near it: still
+        # deterministic, because no other producer is known.
+        alone = _commit(repo, "b.py", "2\n", "docs\n\nTokenJam-Session: other",
+                        T0 + timedelta(hours=2, minutes=30))
+        match_sessions_to_commits(db)
+        assert [(r[1], r[2], r[3]) for r in _rows(db, "s1")] == [(sha, "deterministic", "tool_span_git_log")]
+        assert [(r[1], r[2], r[3]) for r in _rows(db, "other")] == [(alone, "deterministic", "trailer_session")]
+    finally:
+        db.close()
+
+
+def test_trailer_rank_is_pure():
+    assert shipped.trailer_rank("p", set()) == ("deterministic", "trailer_session")
+    assert shipped.trailer_rank("p", {"p"}) == ("deterministic", "trailer_session")
+    assert shipped.trailer_rank("p", {"w"}) == ("inferred", "trailer_session")
+    assert shipped.trailer_rank("p", {"p", "w"}) == ("deterministic", "trailer_session")
+
+
+def test_commit_tool_index_scopes_producers_to_the_repo():
+    at = T0
+    index = shipped.CommitToolIndex(
+        {"a": [at], "b": [at + timedelta(seconds=10)], "far": [at + timedelta(minutes=5)],
+         "local": [at + timedelta(seconds=2)], "unknown": [at + timedelta(seconds=3)]},
+        repos={"a": (REMOTE, "/srv/w"), "b": ("https://github.com/Other/repo", "/srv/o"),
+               "far": (REMOTE, "/srv/w"),
+               # No origin: a local-only checkout is known by its root alone.
+               "local": (None, "/srv/local"),
+               # Neither known: never evidence about anyone's commit.
+               "unknown": (None, None)},
+    )
+    assert index.producers(at) == {"a", "b", "local", "unknown"}
+    assert index.producers(at, REMOTE, "/srv/w") == {"a"}
+    # A remote-less session is a producer only for ITS root, never a
+    # wildcard over every remote (Greptile P2 on #771).
+    assert index.producers(at, REMOTE, "/srv/elsewhere") == {"a"}
+    assert index.producers(at, None, "/srv/local") == {"local"}
+    assert index.best_delta("a", at + timedelta(seconds=4)) == -4.0
+    assert index.best_delta("far", at) is None
+
+
+def test_tool_span_index_is_bounded_to_the_candidates_window(repo):
+    """The producers index reads Bash spans inside the candidate sessions'
+    combined window, not the whole retained history (Greptile P2 on #771):
+    a commit call a year before any candidate is never loaded."""
+    db = InMemoryBackend()
+    try:
+        _session(db, "s1", repo, T0, T0 + timedelta(minutes=10))
+        _bash(db, "s1", T0 + timedelta(minutes=5), "git commit -m feat")
+        _session(db, "ancient", repo, T0 - timedelta(days=400), T0 - timedelta(days=400, minutes=-10))
+        _bash(db, "ancient", T0 - timedelta(days=400, minutes=-5), "git commit -m old")
+        # Mark `ancient` as scanned so only s1 is a candidate.
+        db.conn.execute(
+            "INSERT INTO session_commit_scans (session_id, ended_at, scanned_at) VALUES ($1,$2,$3)",
+            ["ancient", T0 - timedelta(days=400, minutes=-10), utcnow()],
+        )
+        lo, hi = shipped._Session("s1", str(repo), REMOTE, "main", "main", EMAIL, None,
+                                  T0, T0 + timedelta(minutes=10)).window
+        by_session, repos = shipped._commit_tool_spans(db.conn, lo, hi)
+        assert set(by_session) == {"s1"}
+        assert repos["s1"] == (REMOTE, str(repo))
+        whole, _ = shipped._commit_tool_spans(db.conn, T0 - timedelta(days=401), hi)
+        assert set(whole) == {"s1", "ancient"}
+    finally:
+        db.close()
+
+
 def test_a_plain_commit_in_the_window_with_no_evidence_is_not_joined(repo):
     db = InMemoryBackend()
     try:

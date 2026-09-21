@@ -18,6 +18,14 @@ so it is not additionally gated by the read-side API key.
 POST /api/v1/sessions/{id}/label — set (or clear) a user-supplied display name
 for a session (the dashboard's right-click rename). API-key gated.
 
+POST /api/v1/sessions/upsert — one `DuckDBBackend.upsert_session` call carried
+over HTTP for the serve-mode shim (`ApiBackend.upsert_session`), so a CLI
+that found the daemon holding the DuckDB write lock can still fill a
+session's repo context (the transcript refill, issue #770). Fill-null-only on
+the context columns exactly as the direct write is; gated by the always-on
+ingest secret like `/sessions/close` (a write must not ride the optional
+read-side API key).
+
 GET /api/v1/sessions/{session_id} — per-session detail rollup for the dashboard
 Session Detail view. Read-only; guarded by `require_api_key` like other GET
 endpoints. Includes a per-subagent cost/token breakdown (`subagents`) for
@@ -302,6 +310,11 @@ async def ingested_session_ids(request: Request) -> JSONResponse:
         return JSONResponse(
             status_code=400, content={"error": "session_ids must be a list"}
         )
+    # `missing_context: true` narrows the answer to ingested sessions whose
+    # repo context is still unresolved (the transcript refill's candidate set,
+    # `transcript_sync.refill_session_context`); the predicate is the shared
+    # `SESSION_CONTEXT_MISSING_SQL` so the direct path and this one agree.
+    missing_context = bool(body.get("missing_context", False))
     if len(raw) > MAX_INGESTED_ID_CANDIDATES:
         # Reject rather than clamp: silently truncating would under-report the
         # ingested set and reintroduce a wrong count. Guards against an
@@ -322,18 +335,39 @@ async def ingested_session_ids(request: Request) -> JSONResponse:
     if conn is None or not session_ids:
         return JSONResponse(status_code=200, content={"ingested": []})
 
-    found: set[str] = set()
-    chunk = 5000
-    for start in range(0, len(session_ids), chunk):
-        batch = session_ids[start:start + chunk]
-        placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
-        rows = conn.execute(
-            f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders})",
-            batch,
-        ).fetchall()
-        found.update(row[0] for row in rows)
+    from tokenjam.core.transcript_sync import ingested_session_ids as _lookup
 
+    found = _lookup(conn, session_ids, missing_context=missing_context)
     return JSONResponse(status_code=200, content={"ingested": sorted(found)})
+
+
+# Gated by the always-on ingest secret (`IngestAuthMiddleware.PROTECTED_PATHS`),
+# not the optional read-side API key: this is a write.
+@router.post("/sessions/upsert")
+async def upsert_session_endpoint(request: Request) -> JSONResponse:
+    """Write one session row through the daemon's own backend.
+
+    Body: ``{"session": <SessionRecord.to_dict()>, "accumulate_totals": bool}``.
+    Returns ``{"upserted": 1}``. The write has the same semantics as the
+    direct ``upsert_session`` (fill-null-only context, never-downgrade plan
+    tier, totals replaced or accumulated per the flag), because it IS that
+    call: the shim exists so a CLI without the write lock can reach it.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict) or not isinstance(body.get("session"), dict):
+        return JSONResponse(
+            status_code=400, content={"error": "Expected {\"session\": {...}}"}
+        )
+    try:
+        record = SessionRecord.from_dict(body["session"])
+    except (TypeError, ValueError) as exc:
+        return JSONResponse(status_code=400, content={"error": f"bad session: {exc}"})
+    db = request.app.state.db
+    db.upsert_session(record, accumulate_totals=bool(body.get("accumulate_totals", False)))
+    return JSONResponse(status_code=200, content={"upserted": 1})
 
 
 # Max length of a user-supplied session label; longer input is truncated.
@@ -742,6 +776,9 @@ async def get_session_detail(request: Request, session_id: str):
             "error_count": session.error_count,
             "conversation_count": conversation_count,
             "active_alerts": len(active_alerts),
+            # Ingest provenance (`claude-code`, `codex`, ...), so the serve
+            # shim's `get_session` carries what the direct read does.
+            "source": session.source,
             **session_context_payload(session.context),
             # Derived at read time from the ledger tables (contracts §4, brief
             # §3): SQL only, no git on a request.

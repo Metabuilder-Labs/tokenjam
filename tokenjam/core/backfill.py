@@ -192,6 +192,10 @@ class ParsedSession:
 
 # --- ID derivation helpers ---------------------------------------------------
 
+class BackfillUnavailable(RuntimeError):
+    """`ingest_claude_code` was handed a backend that cannot store spans."""
+
+
 def _det_id(*parts: str, length: int = 16) -> str:
     """Deterministic hex ID derived from the given parts."""
     h = hashlib.sha256("|".join(parts).encode()).hexdigest()
@@ -1243,6 +1247,17 @@ def ingest_claude_code(
 
     `progress(parsed_session, result)` is called once per session if provided.
     """
+    # A backend that can neither take a bulk insert (no `conn`) nor a single
+    # one (no `insert_span`) is the serve-mode HTTP shim: every span write
+    # below would be swallowed by the per-span `except` and the session
+    # write would then raise a bare AttributeError out of a "sample error"
+    # line. Refuse up front with the instruction that works; `tj backfill
+    # claude-code` routes such a run to the daemon before ever getting here.
+    if getattr(db, "conn", None) is None and not hasattr(db, "insert_span"):
+        raise BackfillUnavailable(
+            "this backend cannot ingest spans (the daemon holds the database); "
+            "ask the daemon to run the backfill instead"
+        )
     result = BackfillResult()
     projects_seen: set[str] = set()
     plan_tier = _plan_tier_for_provider(config, _CLAUDE_CODE_PROVIDER)
@@ -1644,6 +1659,7 @@ def _insert_session_idempotent(
 
 __all__ = [
     "BackfillResult",
+    "BackfillUnavailable",
     "ParsedSession",
     "CLAUDE_CODE_PROJECTS_ROOT",
     "parse_claude_code_session",

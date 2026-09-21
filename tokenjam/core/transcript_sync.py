@@ -48,7 +48,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -285,8 +285,23 @@ def scan_disk_sessions(
     return sessions, scanned, unreadable
 
 
-def _ingested_session_ids(conn, session_ids: list[str]) -> set[str]:
-    """Subset of ``session_ids`` already present in the ``sessions`` table.
+#: A session whose repo context was never resolved: none of the START-side
+#: ledger columns (contracts §4) is set. `branch_start` alone does not count,
+#: because the transcript supplies it without git, and `user_email` alone
+#: does not either (the global git identity is known even outside a repo);
+#: a session with a remote or a root has been through a resolution that
+#: found a repo, and one with neither has not, whatever else it carries.
+SESSION_CONTEXT_MISSING_SQL = "(repo_remote IS NULL AND repo_root IS NULL)"
+
+
+def ingested_session_ids(
+    conn, session_ids: list[str], *, missing_context: bool = False,
+) -> set[str]:
+    """Subset of ``session_ids`` already present in the ``sessions`` table;
+    with ``missing_context`` only those whose repo context is unresolved
+    (``SESSION_CONTEXT_MISSING_SQL``). The same function answers the daemon's
+    ``POST /sessions/ingested-ids``, so the direct and shim paths cannot
+    disagree on either predicate.
 
     Chunked for the same reason ``backfill._existing_span_ids`` is: a large
     history can otherwise blow past DuckDB's bind-parameter ceiling.
@@ -294,16 +309,37 @@ def _ingested_session_ids(conn, session_ids: list[str]) -> set[str]:
     found: set[str] = set()
     if not session_ids:
         return found
+    extra = f" AND {SESSION_CONTEXT_MISSING_SQL}" if missing_context else ""
     chunk = 5000
     for start in range(0, len(session_ids), chunk):
         batch = session_ids[start:start + chunk]
         placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
         rows = conn.execute(
-            f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders})",
+            f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders}){extra}",
             batch,
         ).fetchall()
         found.update(row[0] for row in rows)
     return found
+
+
+def _lookup_ingested(db, session_ids: list[str], *, missing_context: bool = False) -> set[str] | None:
+    """``ingested_session_ids`` through whichever backend is in hand: the
+    direct connection, else the serve-mode shim's HTTP counterpart. None
+    when neither is available or the daemon lookup failed (the caller must
+    treat that as UNVERIFIED, never as "nothing ingested")."""
+    conn = getattr(db, "conn", None)
+    if conn is not None:
+        return ingested_session_ids(conn, session_ids, missing_context=missing_context)
+    fetch = getattr(db, "fetch_ingested_session_ids", None)
+    if fetch is None:
+        return None
+    try:
+        if missing_context:
+            return fetch(session_ids, missing_context=True)
+        return fetch(session_ids)
+    except Exception:
+        logger.warning("daemon ingested-id lookup failed", exc_info=True)
+        return None
 
 
 def _has_billable_turns(session: DiskSession) -> bool:
@@ -351,34 +387,17 @@ def reconcile_claude_code(
     report.disk_sessions = len(sessions)
 
     disk_ids = sorted(sessions)
-    conn = getattr(db, "conn", None)
-    if conn is not None:
-        ingested = _ingested_session_ids(conn, disk_ids)
-    else:
-        # `tj serve` holds the DB write-lock, so the CLI got a connection-less
-        # HTTP shim (`ApiBackend`). Route the anti-join through the daemon that
-        # owns the connection rather than bailing to `0 already ingested` on a
-        # fully-ingested install (#642).
-        fetch = getattr(db, "fetch_ingested_session_ids", None)
-        if fetch is None:
-            logger.debug(
-                "reconcile: backend exposes no connection and no HTTP shim; "
-                "nothing to compare"
-            )
-            # Could not verify — do NOT let the empty buckets read as a
-            # confident "0 ingested · everything ingested" (#642 P1).
-            report.verified = False
-            return report
-        try:
-            ingested = fetch(disk_ids)
-        except Exception:
-            # Auth/connectivity/server/decode failure. Returning here with the
-            # buckets left at 0 would reprint the exact misleading status #642
-            # set out to kill, so mark the report unverified and let the caller
-            # surface an honest "couldn't verify" instead (Greptile P1).
-            logger.warning("reconcile: daemon ingested-id lookup failed", exc_info=True)
-            report.verified = False
-            return report
+    # `tj serve` holding the DB write-lock hands the CLI a connection-less
+    # HTTP shim (`ApiBackend`); the anti-join is then routed through the
+    # daemon that owns the connection rather than bailing to `0 already
+    # ingested` on a fully-ingested install (#642). A lookup that could not
+    # run (no shim, or an auth / connectivity / decode failure) must NOT let
+    # the empty buckets read as a confident "0 ingested, everything
+    # ingested" (#642 P1): the report is marked unverified instead.
+    ingested = _lookup_ingested(db, disk_ids)
+    if ingested is None:
+        report.verified = False
+        return report
     report.ingested_sessions = len(ingested)
 
     candidates = [sessions[sid] for sid in disk_ids if sid not in ingested]
@@ -397,11 +416,147 @@ def reconcile_claude_code(
     return report
 
 
+@dataclass
+class RefillReport:
+    """What one :func:`refill_session_context` pass did."""
+
+    #: Ingested sessions on disk whose repo context was unresolved.
+    candidates: int = 0
+    #: Candidates whose transcript resolved the REPO (a remote or a root):
+    #: they are no longer candidates after the write.
+    filled: int = 0
+    #: Candidates whose repo could not be resolved (a deleted worktree, a
+    #: cwd outside any repo). Whatever else the transcript carried (the
+    #: branch, the global git identity) is still written; they stay
+    #: candidates and are re-tried on a later pass.
+    unresolved: int = 0
+    #: Candidates skipped because the pass hit ``max_sessions``.
+    deferred: int = 0
+    #: True only when the ingested-id lookup ran (see ``SyncReport.verified``).
+    verified: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "candidates": self.candidates, "filled": self.filled,
+            "unresolved": self.unresolved, "deferred": self.deferred,
+            "verified": self.verified,
+        }
+
+
+#: Candidates one refill pass parses at most. The daemon's interval pass is
+#: mtime-windowed so it rarely reaches this; a full pass (`tj init --cloud`,
+#: `tj backfill claude-code`) walks the whole history and this keeps the
+#: worst case (thousands of sessions from deleted worktrees that will never
+#: resolve) bounded per pass rather than per day.
+REFILL_MAX_SESSIONS = 2000
+
+
+def refill_session_context(
+    db,
+    root: Path | None = None,
+    since: datetime | None = None,
+    config=None,
+    max_sessions: int | None = REFILL_MAX_SESSIONS,
+) -> RefillReport:
+    """Fill the repo context of sessions that were ingested WITHOUT it.
+
+    The ledger columns (`repo_remote`, `repo_root`, branch, developer
+    identity; contracts §3/§4) are derived from the transcript's `cwd` and
+    `gitBranch` at backfill time. A session ingested by the live OTLP path,
+    or by a build that predates the derivation, carries nulls, and until
+    this function existed nothing ever went back for them: a machine whose
+    daemon ran old code pushed every session to Cloud with no repo, so the
+    session -> commit join had nothing to join on (issue #770, fix 1).
+
+    Candidates are the sessions on disk that ARE ingested and whose context
+    is unresolved (`SESSION_CONTEXT_MISSING_SQL`, looked up through the
+    direct connection or the daemon shim). Each is re-parsed and written
+    through the same `upsert_session(..., accumulate_totals=True)` the
+    backfill uses, with every total ZERO so the row's figures are untouched
+    and only the null context columns fill (the write is fill-null-only on
+    them). Idempotent: a session that resolves is no longer a candidate; one
+    that does not is tried again next pass.
+
+    ``since`` is the mtime pre-filter the catch-up uses (a daemon pass only
+    opens files that changed); ``None`` walks the whole history.
+    """
+    from tokenjam.core.backfill import (
+        _plan_tier_for_provider,
+        parse_claude_code_session,
+        session_record_from_parsed,
+    )
+    from tokenjam.core.transcript import resolve_projects_root
+
+    report = RefillReport()
+    base = Path(root) if root is not None else resolve_projects_root()
+    sessions, _scanned, _unreadable = scan_disk_sessions(base, since=since)
+    if not sessions:
+        return report
+    needing = _lookup_ingested(db, sorted(sessions), missing_context=True)
+    if needing is None:
+        report.verified = False
+        return report
+    ordered = sorted(
+        (sessions[sid] for sid in needing),
+        key=lambda d: (d.started_at is None, d.started_at or datetime.min.replace(tzinfo=timezone.utc)),
+        reverse=True,
+    )
+    report.candidates = len(ordered)
+    if max_sessions is not None and len(ordered) > max_sessions:
+        report.deferred = len(ordered) - max_sessions
+        ordered = ordered[:max_sessions]
+    plan_tier = _plan_tier_for_provider(config, "anthropic")
+
+    for candidate in ordered:
+        record = None
+        for path in candidate.files:
+            try:
+                parsed = parse_claude_code_session(path)
+            except Exception:  # one bad file must not stop the pass
+                continue
+            if parsed is None:
+                continue
+            record = session_record_from_parsed(parsed, plan_tier)
+            if not record.context.is_empty():
+                break
+        if record is None or record.context.is_empty():
+            report.unresolved += 1
+            continue
+        resolved_repo = bool(record.repo_remote or record.repo_root)
+        try:
+            db.upsert_session(
+                replace(
+                    record, total_cost_usd=0.0, input_tokens=0, output_tokens=0,
+                    cache_tokens=0, cache_write_tokens=0, tool_call_count=0, error_count=0,
+                    # The row's own lifecycle is not this pass's business:
+                    # a NULL never erases a stored `ended_at`, and the
+                    # status guard keeps a live row live.
+                    ended_at=None,
+                ),
+                accumulate_totals=True,
+            )
+        except Exception as exc:
+            from tokenjam.core.db import is_fatal_db_error
+
+            if is_fatal_db_error(exc):
+                raise
+            logger.warning("context refill failed for %s", candidate.session_id, exc_info=True)
+            report.unresolved += 1
+            continue
+        if resolved_repo:
+            report.filled += 1
+        else:
+            report.unresolved += 1
+    return report
+
+
 def run_catch_up(
     db,
     config=None,
     root: Path | None = None,
     lookback: timedelta | None = None,
+    *,
+    reingest: bool = False,
 ):
     """Re-run the Claude Code backfill over a bounded recent window.
 
@@ -413,6 +568,14 @@ def run_catch_up(
 
     ``lookback=None`` means no window at all (a full history pass) — used by
     ``tj backfill claude-code``, not by the scheduled job.
+
+    The pass also REFILLS the repo context of sessions already ingested
+    without it (:func:`refill_session_context`, same window), so a machine
+    whose history was ingested by a build that never derived the ledger
+    columns heals on the daemon's own schedule rather than waiting for a
+    human to re-run the backfill (issue #770, fix 1). The ingest itself
+    fills context for every file it re-parses; the explicit refill covers
+    what the ingest's own filters skip and is the tested contract.
     """
     from tokenjam.core.backfill import ingest_claude_code
     from tokenjam.core.transcript import resolve_projects_root
@@ -421,7 +584,18 @@ def run_catch_up(
     since = None
     if lookback is not None:
         since = datetime.now(tz=timezone.utc) - lookback
-    return ingest_claude_code(db, root=base, since=since, config=config)
+    result = ingest_claude_code(db, root=base, since=since, config=config, reingest=reingest)
+    try:
+        refill = refill_session_context(db, root=base, since=since, config=config)
+        if refill.filled:
+            logger.info("transcript catch-up filled repo context on %d session(s)", refill.filled)
+    except Exception as exc:
+        from tokenjam.core.db import is_fatal_db_error
+
+        if is_fatal_db_error(exc):
+            raise
+        logger.warning("transcript context refill failed", exc_info=True)
+    return result
 
 
 def sweep_stale_active_sessions(
@@ -487,14 +661,37 @@ def sweep_stale_active_sessions(
     return len(stale_ids)
 
 
+#: The one catch-up thread this process may have in flight, whatever
+#: started it (the startup kick, the interval job, or a CLI hand-off through
+#: `POST /api/v1/backfill/claude-code`). Two passes over one transcript tree
+#: would parse everything twice and write through two backends whose locks
+#: do not serialise each other; a trigger that finds one running joins it.
+_CATCH_UP_LOCK = threading.Lock()
+_CATCH_UP_THREAD: threading.Thread | None = None
+
+
+def catch_up_in_flight() -> bool:
+    """Whether a catch-up started by ANY trigger is still running."""
+    thread = _CATCH_UP_THREAD
+    return thread is not None and thread.is_alive()
+
+
 def start_catch_up(
     db_factory,
     config=None,
     root: Path | None = None,
     lookback: timedelta | None = None,
     on_done=None,
+    *,
+    reingest: bool = False,
 ) -> threading.Thread:
     """Run :func:`run_catch_up` on a daemon thread with its OWN backend.
+
+    One at a time per process: when a pass is already running (whichever
+    trigger started it) the running thread is returned and nothing new is
+    started; the next tick, or a re-issued request, covers what this one
+    would have. Check :func:`catch_up_in_flight` first to tell the two
+    outcomes apart.
 
     A separate connection per run is the same discipline the retention / relearn
     / cost-proposal jobs already follow in ``cmd_serve`` — it keeps the ingest
@@ -510,7 +707,9 @@ def start_catch_up(
         backend = None
         try:
             backend = db_factory()
-            result = run_catch_up(backend, config=config, root=root, lookback=lookback)
+            result = run_catch_up(
+                backend, config=config, root=root, lookback=lookback, reingest=reingest,
+            )
             if result.sessions_new:
                 logger.info(
                     "transcript catch-up ingested %d new session(s), %d span(s)",
@@ -552,6 +751,13 @@ def start_catch_up(
                 except Exception:
                     pass
 
-    thread = threading.Thread(target=_run, name="tj-transcript-catchup", daemon=True)
-    thread.start()
-    return thread
+    global _CATCH_UP_THREAD
+
+    with _CATCH_UP_LOCK:
+        if _CATCH_UP_THREAD is not None and _CATCH_UP_THREAD.is_alive():
+            logger.debug("transcript catch-up already running; joining it")
+            return _CATCH_UP_THREAD
+        thread = threading.Thread(target=_run, name="tj-transcript-catchup", daemon=True)
+        _CATCH_UP_THREAD = thread
+        thread.start()
+        return thread

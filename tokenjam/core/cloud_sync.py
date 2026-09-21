@@ -583,7 +583,11 @@ def encode_spans_otlp(
 def session_to_wire(session: SessionRecord, *, install_id: str | None) -> dict[str, Any]:
     """One `sessions` row for `POST /api/v1/ledger/sessions` (contracts §6):
     the session's identity, timing and totals, its §4 ledger columns,
-    `plan_tier` and the derived `pricing_mode`, and the install it came from."""
+    `plan_tier` and the derived `pricing_mode`, and the install it came from.
+
+    `install_id` is stamped on EVERY row, backfilled sessions included: the
+    id names the machine forwarding the row, not the path that ingested it,
+    and Cloud counts connected developers off it (issue #770, fix 2)."""
     row: dict[str, Any] = {
         "session_id": session.session_id,
         "agent_id": session.agent_id,
@@ -760,6 +764,9 @@ class SyncReport:
     #: or the exception text); None when every stream drained.
     stopped: str | None = None
     skipped_reason: str | None = None
+    #: True when `~/.tj/install_id` could neither be read nor written, so
+    #: the rows left without the §3 install id (contracts §3; issue #770).
+    install_id_missing: bool = False
 
     @property
     def sent_anything(self) -> bool:
@@ -943,6 +950,16 @@ def _run_sync_locked(
     client = client or CloudClient(config)
     capture = content_gate(config)
     install = install_id if install_id is not None else ensure_install_id()
+    if not install:
+        # Every session row and every spans resource carries this id
+        # (contracts §3); it is how Cloud counts this machine as a connected
+        # developer. Without it the push still goes, but the receiver will
+        # report zero developers, so say so where `tj status` can find it.
+        logger.warning(
+            "no install id under %s; sessions are forwarded without one and Cloud "
+            "will not count this machine as a connected developer", tj_home(),
+        )
+        report.install_id_missing = True
     host = host_name if host_name is not None else _host_name()
     source = _Source(db)
 

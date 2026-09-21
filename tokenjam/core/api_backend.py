@@ -2,6 +2,13 @@
 API-based backend for CLI commands when DuckDB is locked by tj serve.
 Implements the subset of StorageBackend used by CLI commands by routing
 queries through the REST API.
+
+Read-only with one deliberate exception: `upsert_session` carries a single
+session write to the daemon (`POST /api/v1/sessions/upsert`) so the
+transcript context refill (`transcript_sync.refill_session_context`) can run
+from a CLI that found the daemon holding the write lock (issue #770). Every
+method here is classified in `tests/integration/test_storage_backend_parity.py`;
+a method added without a classification fails CI there.
 """
 from __future__ import annotations
 
@@ -11,6 +18,7 @@ from typing import Any
 import httpx
 
 from tokenjam.core.models import (
+    SESSION_CONTEXT_FIELDS,
     SessionCommit,
     Alert,
     AlertFilters,
@@ -46,7 +54,9 @@ class ApiBackend:
     #: absorbs that compute while still bounding a genuinely stuck daemon.
     _HEAVY_ENDPOINT_TIMEOUT = 60
 
-    def __init__(self, base_url: str, api_key: str | None = None) -> None:
+    def __init__(
+        self, base_url: str, api_key: str | None = None, *, ingest_secret: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         headers: dict[str, str] = {}
         if api_key:
@@ -54,6 +64,16 @@ class ApiBackend:
         self.client = httpx.Client(
             base_url=self.base_url, headers=headers, timeout=self._DEFAULT_TIMEOUT
         )
+        # The always-on ingest secret (`[security] ingest_secret`), sent on
+        # the write routes `IngestAuthMiddleware` protects; the read-side
+        # API key is optional and off by default, so it cannot be what
+        # authorises a write (issue #770, Greptile P1).
+        self._ingest_secret = ingest_secret or None
+
+    def _write_headers(self) -> dict[str, str]:
+        if not self._ingest_secret:
+            return {}
+        return {"Authorization": f"Bearer {self._ingest_secret}"}
 
     def _get(
         self, path: str, params: dict | None = None, *, timeout: float | None = None
@@ -77,16 +97,26 @@ class ApiBackend:
         resp.raise_for_status()
         return resp.json()
 
-    def _post(self, path: str, body: dict) -> dict:
-        """POST `body` as JSON to `path` and return the parsed JSON response."""
-        resp = self.client.post(path, json=body)
+    def _post(self, path: str, body: dict, *, write: bool = False,
+              timeout: httpx.Timeout | None = None) -> dict:
+        """POST `body` as JSON to `path` and return the parsed JSON response.
+        `write=True` sends the ingest secret (the write routes' gate)."""
+        kwargs: dict[str, Any] = {"json": body}
+        if write:
+            kwargs["headers"] = self._write_headers()
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        resp = self.client.post(path, **kwargs)
         resp.raise_for_status()
         return resp.json()
 
-    def fetch_ingested_session_ids(self, session_ids: list[str]) -> set[str]:
-        """Subset of `session_ids` present in the daemon's sessions table.
+    def fetch_ingested_session_ids(
+        self, session_ids: list[str], *, missing_context: bool = False,
+    ) -> set[str]:
+        """Subset of `session_ids` present in the daemon's sessions table;
+        with `missing_context`, only those whose repo context is unresolved.
 
-        The serve-mode counterpart to `transcript_sync._ingested_session_ids`'s
+        The serve-mode counterpart to `transcript_sync.ingested_session_ids`'s
         direct SQL anti-join: when `tj serve` holds the DB write-lock the CLI
         gets an `ApiBackend` with no `.conn`, so `tj backfill status` reported
         `0 already ingested` on a fully-ingested install (#642). Routes the same
@@ -94,10 +124,28 @@ class ApiBackend:
         """
         if not session_ids:
             return set()
-        data = self._post(
-            "/api/v1/sessions/ingested-ids", {"session_ids": session_ids}
-        )
+        body: dict[str, Any] = {"session_ids": session_ids}
+        if missing_context:
+            body["missing_context"] = True
+        data = self._post("/api/v1/sessions/ingested-ids", body)
         return {str(s) for s in data.get("ingested", [])}
+
+    def upsert_session(
+        self, session: SessionRecord, *, accumulate_totals: bool = False,
+    ) -> None:
+        """One `upsert_session` carried to the daemon (`POST /sessions/upsert`).
+
+        The daemon runs the same `DuckDBBackend.upsert_session`, so the
+        semantics (fill-null-only context, never-downgrade plan tier, totals
+        replaced or accumulated) are its, not a reimplementation. Exists for
+        the transcript context refill; the span-ingesting backfill is routed
+        to the daemon as a whole instead (`request_claude_code_backfill`).
+        """
+        self._post(
+            "/api/v1/sessions/upsert",
+            {"session": session.to_dict(), "accumulate_totals": bool(accumulate_totals)},
+            write=True,
+        )
 
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
         params: dict[str, str | int] = {"limit": filters.limit, "offset": filters.offset}
@@ -588,6 +636,11 @@ class ApiBackend:
             error_count=s.get("error_count", 0) or 0,
             plan_tier=s.get("plan_tier") or "unknown",
             dominant_model=top,
+            source=s.get("source"),
+            # The eight ledger columns ride the detail payload verbatim
+            # (`session_context_payload`), so a shim read carries the same
+            # repo context the direct read does; parity-covered.
+            **{f: s.get(f) for f in SESSION_CONTEXT_FIELDS},
         )
 
     def get_session_commits(self, session_id: str) -> list[SessionCommit]:
@@ -608,6 +661,35 @@ class ApiBackend:
                 match_delta_s=c.get("match_delta_s"),
             ))
         return out
+
+    def request_claude_code_backfill(
+        self, *, since: datetime | None = None, root: str | None = None,
+        reingest: bool = False,
+    ) -> dict:
+        """Ask the daemon to run `tj backfill claude-code` itself
+        (`POST /api/v1/backfill/claude-code`). The backfill needs bulk span
+        writes the shim cannot carry, and the daemon already owns that job
+        as its transcript catch-up. Returns `{"started": bool, "running":
+        bool}`; the pass reports through `tj backfill status`."""
+        body: dict[str, Any] = {"reingest": bool(reingest)}
+        if since is not None:
+            body["since"] = since.isoformat()
+        if root:
+            body["root"] = root
+        return self._post("/api/v1/backfill/claude-code", body, write=True)
+
+    def request_commit_match(self, *, wait_s: float = 20.0) -> dict:
+        """Ask the daemon to refresh the session -> commit join
+        (`POST /api/v1/shipped/match`) and wait up to `wait_s` for it. The
+        matcher shells out to git, which a CLI without the DuckDB lock
+        cannot pair with a write; the daemon can (issue #770, fix 4).
+        Returns `{"started", "running", "completed", ...}`."""
+        resp = self.client.post(
+            "/api/v1/shipped/match", params={"wait_s": wait_s}, headers=self._write_headers(),
+            timeout=httpx.Timeout(self._DEFAULT_TIMEOUT, read=wait_s + self._DEFAULT_TIMEOUT),
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     def fetch_shipped(
         self, *, since: str = "30d", agent_id: str | None = None,
@@ -672,8 +754,11 @@ def _dict_to_span(d: dict) -> NormalizedSpan:
     )
 
 
-def probe_api(host: str, port: int, api_key: str | None = None) -> ApiBackend | None:
-    """Check if tj serve is running and return an ApiBackend if so."""
+def probe_api(
+    host: str, port: int, api_key: str | None = None, *, ingest_secret: str | None = None,
+) -> ApiBackend | None:
+    """Check if tj serve is running and return an ApiBackend if so.
+    `ingest_secret` is what the shim's write routes authenticate with."""
     base_url = f"http://{host}:{port}"
     try:
         headers: dict[str, str] = {}
@@ -682,7 +767,7 @@ def probe_api(host: str, port: int, api_key: str | None = None) -> ApiBackend | 
         resp = httpx.get(f"{base_url}/api/v1/traces", params={"limit": 1},
                          headers=headers, timeout=2)
         if resp.status_code in (200, 401):
-            return ApiBackend(base_url, api_key)
+            return ApiBackend(base_url, api_key, ingest_secret=ingest_secret)
     except (httpx.ConnectError, httpx.TimeoutException):
         pass
     return None
