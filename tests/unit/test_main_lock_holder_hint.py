@@ -67,7 +67,7 @@ def test_probe_failure_preserves_primary_database_lock_error(monkeypatch, code):
     monkeypatch.setattr(server_state.subprocess, "run", probe)
     monkeypatch.setattr("tokenjam.cli.main.load_config", lambda path: TjConfig(version="1"))
     monkeypatch.setattr("tokenjam.cli.main.open_db", Mock(side_effect=OSError("database lock")))
-    monkeypatch.setattr("tokenjam.core.api_backend.probe_api", lambda *args: None)
+    monkeypatch.setattr("tokenjam.core.api_backend.probe_api", lambda *args, **kwargs: None)
 
     result = CliRunner().invoke(cli, ["cost"])
 
