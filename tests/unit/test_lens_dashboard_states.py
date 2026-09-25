@@ -671,3 +671,24 @@ def test_no_dollar_surface_renders_a_suppressed_figure_with_no_explanation():
         ):
             result = _run_dedup_js(expr)
             assert result not in (None, ""), "%s produced no explanation: %r" % (expr, result)
+
+
+def test_the_hero_cta_goes_to_a_route_that_resolves_to_its_own_surface(html: str):
+    """The "Review N fixes" CTA used to point at `#/review`, a page retired when
+    the apply lifecycle moved onto the Optimize detail pages. `primaryKeyFor`
+    aliases `#/review` to the Dashboard so old bookmarks do not 404, which meant
+    the button re-rendered the page the reader was already on. Critical Rule
+    24(c): check the destination RESOLVES, not merely that a link exists.
+
+    The inverse of the defect is pinned, per Critical Rule 23: the hero's href
+    must be built from the top opportunity, and `#/review` must not appear as a
+    destination anywhere in the file.
+    """
+    assert 'const ctaHref = opps.length ? optimizeFindingHref(opps[0].name)' in html, (
+        "the hero CTA must target the biggest opportunity's detail page"
+    )
+    assert 'href=${ctaHref}' in html, "the hero CTA must render the computed href"
+    assert 'href="#/review"' not in html, (
+        "#/review aliases to the Dashboard; a link there is a no-op for a reader "
+        "already on the Dashboard"
+    )
