@@ -711,6 +711,7 @@ console.log(JSON.stringify({{ href, key: primaryKeyFor({{ view, param }}) }}));
     return json.loads(proc.stdout.strip())
 
 
+@_node
 @pytest.mark.parametrize("analyzer", [
     "downsize", "cache", "script", "trim", "reuse", "subagent", "verbosity",
     "deadweight", "placement", "resend", "cache-recommend",
@@ -725,6 +726,7 @@ def test_every_detail_analyzer_cta_resolves_to_its_own_optimize_page(analyzer: s
     assert got["href"] == f"#/optimize/{analyzer}"
 
 
+@_node
 @pytest.mark.parametrize("analyzer,expected_key", [
     ("relearn", "rules"),        # its surface is the Rules view, labelled Relearn
     ("summarize", "summarize"),  # its own view, not an OptimizeFinding card
