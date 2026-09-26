@@ -36,7 +36,7 @@ One command sets up live capture:
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 ```
 
-`tj onboard` asks how you use AI agents and wires that path: live capture, the analyzers your setup can act on, and Lens. Coding-agent users (Claude Code, Codex) also get their recent history backfilled and a zero-token status line wired in; restart the agent and you're live. SDK and API users add `@watch()` to their own code, or point an OTLP exporter at `tj serve`.
+`tj init` is the same command (`tj onboard` is its original name, still there). It asks how you use AI agents and wires that path: live capture, the analyzers your setup can act on, and Lens. Coding-agent users (Claude Code, Codex) also get their recent history backfilled and a zero-token status line wired in; restart the agent and you're live. SDK and API users add `@watch()` to their own code, or point an OTLP exporter at `tj serve`.
 
 Then open the dashboard:
 
@@ -126,8 +126,11 @@ subset with `tj optimize downsize resend relearn`.
 | `verbosity` | — | ✅ | Sessions whose output runs long against a per-(tool, task-shape) baseline |
 | `script` | — | ✅ | Deterministic tool sequences a plain script could replace |
 | `reuse` | — | ✅ | Sessions where your agent re-plans work it has already planned |
+| `shipped` | ✅ | ✅ | What your sessions left behind: commits joined to sessions, what the ones that shipped nothing cost, and what got rewritten |
 
 They find where your agents are overspending. They also tell you where they are not, so you don't spend a week optimizing something that was never costing you anything.
+
+`shipped` is the odd one out, and deliberately so. Every other analyzer asks what a session cost; this one asks what it produced. It joins each session to the commits it made, at a labelled confidence, and reports what the sessions that shipped nothing cost. Nothing in it is a saving: it is measured spend next to measured output, and a session can ship value without a commit. `tj init --hooks` makes commits you type by hand carry a session trailer, which raises how much of your work tj can join. [How the join works →](docs/ledger/overview.md)
 
 That balance is why some checks stay dark for you: when the lever that would recover a category of spend belongs to your harness rather than to you, quoting the figure only makes you feel worse. A check also stays dark when its evidence does not exist on your setup; `summarize` reads agent instruction files off disk, which an SDK or API workload does not have, so it is not offered there. It is also why a quiet result is an answer rather than a failed scan. Optimizing has a price of its own, paid in your attention and sometimes in the agent's output, and a bill lowered by making your agent terser or dumber was never a saving.
 
@@ -155,6 +158,9 @@ Bench reports measured pass-rate on a suite, never "certified" or "quality prese
 | Full CLI reference, every command and flag | [docs/cli-reference.md](docs/cli-reference.md) |
 | Downsize / Cache / Script / Trim deep-dives | [docs/optimize/](docs/optimize/) |
 | Reuse analyzer deep-dive | [docs/optimize/reuse.md](docs/optimize/reuse.md) |
+| The ledger: sessions joined to commits | [docs/ledger/overview.md](docs/ledger/overview.md) |
+| Commit hooks and git notes (`tj init --hooks` / `--notes`) | [docs/ledger/hooks-and-notes.md](docs/ledger/hooks-and-notes.md) |
+| TokenJam Cloud bridge, and what leaves your machine | [docs/ledger/cloud-bridge.md](docs/ledger/cloud-bridge.md) |
 | Prove a downsize candidate holds (TokenJam Bench) | [tokenjam-bench](https://github.com/Metabuilder-Labs/tokenjam-bench) |
 | Claude Code & Codex integration | [docs/claude-code-integration.md](docs/claude-code-integration.md) |
 | Claude Code vs. Codex vs. SDK vs. OTLP: capability matrix | [docs/agent-capability-matrix.md](docs/agent-capability-matrix.md) |

@@ -15,9 +15,13 @@ All commands support `--json` for machine-readable output. Commands that query a
 
 ## Commands
 
-### `tj onboard`
+### `tj init` (also `tj onboard`)
 
 Guided setup wizard. Creates config file, generates ingest secret, optionally installs background daemon.
+
+`tj init` is the primary name, the one every other developer tool uses for "set this up here."
+`tj onboard` is the same command under its original name: one command object registered twice, so
+the options, the prompts and the config it writes are identical and cannot drift.
 
 ```bash
 tj onboard                  # interactive setup
@@ -29,11 +33,51 @@ tj onboard --verify         # poll for the first span after setup and report con
 tj onboard --verify-only    # skip setup; just re-poll an existing install (post-restart re-check)
 tj init --cloud <key> --org <org>   # forward spans, sessions and commits to TokenJam Cloud (asks first; --yes skips)
 tj init --cloud off         # stop forwarding, keep the key
+tj init --add-project       # register another repo against a setup you already have
+tj init --claude-code --reconfigure   # re-prompt for plan tier and budget (needs --claude-code or --codex)
+tj init --hooks             # install the prepare-commit-msg hook in this repo
+tj init --notes             # also install the post-commit git-notes hook (implies --hooks)
+tj init --enforce           # turn on the enforcement proxy in suggest mode
 ```
 
 Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` skip every prompt; use these to run onboarding unattended (CI, Docker, a script). The project/dashboard-namespace name is never prompted for — it's always derived from the repo (git remote) or folder name. `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
 
 **`--cloud <key> --org <org>`** connects this machine to a TokenJam Cloud organization (`tj init` is the same command). It writes `[cloud]` into the config, prints exactly what leaves the machine (token counts, model names, cost, timestamps, tool names, file paths, session / repo / branch / commit identifiers, hashed developer id, git author email) and what never does by default (prompt text, completions, tool outputs, file contents, diffs, secrets), asks for a yes, then pushes the history already on disk; the daemon forwards new sessions every five minutes from then on. Both values are on Cloud's Connect screen; the key alone does not identify the organization. `--cloud-endpoint` points at a different API; `--cloud off` turns forwarding off in place. See [configuration.md](configuration.md#tokenjam-cloud-bridge).
+
+**`--hooks` and `--notes`** are the per-repo half of the same stamping. `--hooks` installs a
+`prepare-commit-msg` hook so a commit you make from a plain shell mid-session carries a
+`TokenJam-Session:` trailer, which joins it to the session at deterministic confidence. `--notes`
+adds a `post-commit` hook that writes the session's measured cost to `refs/notes/tokenjam`, and
+implies `--hooks`. Both write inside a managed block, keep a hook you already have, refuse a
+`core.hooksPath` inside the worktree, and are idempotent. Off by default. See
+[docs/ledger/hooks-and-notes.md](ledger/hooks-and-notes.md).
+
+**`--enforce`** turns on the enforcement proxy in **suggest mode** (`tj proxy enable`) and prints
+what it does and does not touch. Suggest mode forwards every request unmodified and records what a
+policy would have done; nothing is blocked or rewritten until you approve it. Subscription-plan
+traffic is never intercepted and subscription OAuth credentials are never proxied or forwarded.
+Composes with `--hooks`. See [docs/proxy/overview.md](proxy/overview.md).
+
+**`--add-project`** registers the current repo under a project namespace in an existing global
+config, without re-running the wizard: no plan or budget prompt, no backfill, no daemon restart. It
+needs `tj init` to have run once somewhere first.
+
+**`--reconfigure`** re-prompts for plan tier and budget against a config that already exists,
+skipping agent-runtime re-detection. **It must be paired with `--claude-code` or `--codex`:**
+
+```bash
+tj init --claude-code --reconfigure
+tj init --codex --reconfigure
+```
+
+Plan tier is per provider and lives in `[budget.<provider>]`, which only the provider-specific flows
+write, so a bare `tj init --reconfigure` against an existing config exits 1 with
+`--reconfigure has no effect without --claude-code or --codex` rather than silently doing nothing.
+
+**Scope flags.** `--plan` sets the plan tier non-interactively, `--analysis-span 30d|90d|all` sets
+how far back the analyzers look (storage retention is derived from it, and `all` disables deletion
+entirely, so history the analyzers use cannot be deleted underneath them), and
+`--backfill-days N` / `--backfill-all` set the history scope without the interactive prompt.
 
 **`--verify-only`** is the lightweight post-restart re-check: it skips the whole wizard (no config rewrite, no summary, no restart banner) and only polls an already-configured install for its first *live* span. Use it after you've restarted Claude Code / Codex; `tj onboard --claude-code --verify-only` (or `--codex`, or bare for an SDK install) reads that persona's existing config and reports confirmed / not-confirmed. Backfilled history doesn't count here; the poll waits for a new live span.
 
@@ -216,7 +260,13 @@ tj optimize --export-config claude-code    # write advisory routing recommendati
 tj optimize --json                         # machine-readable report
 ```
 
-Analyzer names: `downsize`, `cache`, `cache-recommend`, `resend`, `trim`, `reuse`, `script`, `subagent`, `summarize`, `verbosity`, `deadweight`, `relearn`, `budget-projection`.
+Analyzer names: `downsize`, `cache`, `cache-recommend`, `resend`, `trim`, `reuse`, `script`,
+`subagent`, `summarize`, `verbosity`, `deadweight`, `relearn`, `stream-usage`, `budget-projection`,
+`shipped`.
+
+`shipped` is the odd one out: it reports what your sessions left behind rather than what they could
+have cost less. It carries no savings figure and sits outside the recoverable-waste rollup. See
+[docs/optimize/shipped.md](optimize/shipped.md) and [docs/ledger/overview.md](ledger/overview.md).
 
 `relearn` finds failure signatures that recur across three or more sessions, the blockers an agent silently re-hits. Act on what it finds with `tj relearn`.
 
@@ -290,7 +340,19 @@ tj backfill helicone --source-url https://api.helicone.ai --api-key <key>
 tj backfill otlp --source-file spans.ndjson
 ```
 
-Subcommands: `claude-code`, `langfuse`, `helicone`, `otlp`.
+Subcommands: `claude-code`, `codex`, `langfuse`, `helicone`, `otlp`, `status`.
+
+`tj backfill status` shows which on-disk Claude Code sessions are **not** yet in the database.
+Claude Code prunes its own transcripts after roughly 30 days, so a session that never made it in is
+on a clock. Sessions are compared by the transcript's internal `sessionId` rather than by filename,
+because roughly half the `.jsonl` files under the projects root sit in nested `subagents/` folders
+and carry their parent's id, which makes a filename count wildly over-report the gap.
+
+```bash
+tj backfill status                 # the gap, with the ten largest missing sessions
+tj backfill status --since 30d     # scope the comparison window
+tj backfill status --json
+```
 
 Key flags: `--since` on all sources; `--root`, `--since-days`, and `--quiet` for `claude-code`; `--source-url`, `--source-file`, and `--api-key` for Langfuse and Helicone; `--source-url` and `--source-file` for OTLP.
 
@@ -369,6 +431,25 @@ Zero-model-token status line for Claude Code. Reads the session payload JSON Cla
 ```bash
 tj statusline   # reads payload JSON on stdin; not meant to be typed interactively
 ```
+
+It also writes the active-session record (`~/.tj/active_sessions.json`) the commit hook reads, which
+is how a commit made from a terminal Claude Code did not spawn still gets a session trailer.
+
+### `tj commit-note`
+
+Attaches a commit's session cost to `refs/notes/tokenjam` as a JSON note. Called by the `post-commit`
+hook `tj init --notes` installs, for a commit whose message carries a `TokenJam-Session:` trailer.
+Run it by hand on any trailered commit if you want.
+
+```bash
+tj commit-note          # HEAD
+tj commit-note <sha>
+tj --json commit-note   # machine-readable outcome
+```
+
+It never fails the commit it runs from: every outcome exits 0, and `tj -v commit-note` says what it
+did or why it did nothing. The only git write is the note on our own ref; the commit message is never touched
+here. See [docs/ledger/hooks-and-notes.md](ledger/hooks-and-notes.md).
 
 ### `tj resume-brief`
 

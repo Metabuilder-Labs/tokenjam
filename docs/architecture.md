@@ -428,6 +428,86 @@ Renderers (`tj optimize`, `tj cost`, the web UI cost views) read `pricing_mode` 
 
 ---
 
+## OTel semconv extensions: repo context and developer identity
+
+The shipped-value ledger needs to know which repo a session ran in and who ran it. That is a second
+group of attribute names, defined in `TjAttributes` and `ResourceAttributes` in
+`tokenjam/otel/semconv.py`, using the standard OTel spelling wherever one exists (`vcs.*`,
+`user.email`, `host.name`) and `tokenjam.*` for the rest. Every one of them is optional: a value
+that cannot be resolved is absent rather than a placeholder, so a downstream join can never match on
+something invented.
+
+**Where the values actually come from.** These names are not emitted by an agent wrapper. There are
+three paths, and it is worth being precise about which is which:
+
+- **Claude Code and Codex.** Nothing is stamped at emission time. The backfill and the daemon's
+  transcript catch-up derive the values from the transcript's `cwd` and branch
+  (`core/repo_context.py::session_context_for_cwd`) and write them straight onto the session row.
+  Sessions ingested before the columns existed are filled in later by
+  `core/transcript_sync.py::refill_session_context`.
+- **Producers that stamp the names themselves.** The ingest path reads them off with
+  `session_context_from_attrs` and stores them on the session. Nothing in the Python or TypeScript
+  SDK sets them for you today, so this is for a producer that chooses to send them, and **the level
+  they have to be set at depends on the route**:
+
+  | Route | Reads from |
+  |---|---|
+  | in-process SDK exporter (`otel/provider.py`) | **resource attributes only** |
+  | Claude Code OTLP logs route (`api/routes/logs.py`) | **resource attributes only** |
+  | OTLP JSON span ingest (`otel/otlp_parsing.py`) | resource **or** span attributes, merged, span wins on conflict |
+
+  Set them at resource level. That is the one placement every route reads. A producer that puts them
+  on individual spans and exports through the in-process SDK loses its repo and developer context
+  silently, because the resource carries none of them and nothing errors.
+- **Outbound to Cloud.** The bridge maps the stored session columns back onto these attribute names
+  on the wire, and adds `tokenjam.install_id` and `host.name` to the resource at that point.
+
+`tj otel-resource-attrs` is **not** part of this. It prints `service.name`, plus
+`service.namespace` when the project is set in config, and nothing else. The per-terminal `claude`
+wrapper exports its output as `OTEL_RESOURCE_ATTRIBUTES`, which is how concurrent terminals land as
+distinct tiles; the ledger columns arrive by the transcript path above, not through that variable.
+
+**The attribute names, per process:**
+
+| Attribute | Value | Source |
+|---|---|---|
+| `user.email` | git author email | `git config user.email` in the session cwd, else the global value, else absent |
+| `tokenjam.developer_id` | `sha256(lower(user.email))[:16]` | derived; the pseudonymous id every ledger surface uses |
+| `tokenjam.install_id` | uuid4, generated once | `~/.tj/install_id`; added to the resource by the Cloud bridge |
+| `host.name` | hostname | `socket.gethostname()`; added to the resource by the Cloud bridge |
+| `tokenjam.github_login` | GitHub login | reserved. Defined in `TjAttributes`, not set by this build |
+| `vcs.repository.url.full` | normalised remote, `https://github.com/org/repo`, no `.git`, no credentials, no query or fragment | `git remote get-url origin` |
+| `vcs.repository.name` | `org/repo` | derived from the remote |
+
+**The attribute names, per session:**
+
+| Attribute | Value |
+|---|---|
+| `vcs.ref.head.name` | branch at session start |
+| `vcs.ref.head.revision` | HEAD sha at session start, only when the source records it. Codex rollouts do; Claude Code transcripts do not, and it is absent rather than guessed. The join keys on repo, branch and time, never on this sha |
+| `tokenjam.repo_root` | absolute path of the repo root |
+| `tokenjam.session.branch_end` | branch at session end |
+| `tokenjam.session.head_end` | HEAD sha at session end |
+
+**Never stamped by the client:** team, department, cost centre, display name. Those are org-side
+maps and have no business on a local span.
+
+`user.email` is the one personal identifier here. It stays on your machine unless you connect
+[the Cloud bridge](ledger/cloud-bridge.md), which states it in the list it prints before the first
+byte leaves.
+
+### Ledger storage
+
+`sessions` carries the same values as nullable columns (`repo_remote`, `repo_root`, `branch_start`,
+`branch_end`, `head_sha_start`, `head_sha_end`, `developer_id`, `user_email`), and the
+`session_commits` table holds the join, keyed `(session_id, commit_sha)` with its `confidence`,
+`source`, author email, commit time and match delta. Three side tables keep every read in SQL: a
+default-branch commit index, per-commit file statistics for the rework figure, and a per-session
+scan watermark. Migrations are additive, as everywhere else in the schema. See
+[the ledger overview](ledger/overview.md).
+
+---
+
 ## SDK cost-attribution dimensions (multi-tenant cost breakdown)
 
 For a developer running LLM agents in production via an SDK, the dimension that actually answers "who/what is spending the money" is which CUSTOMER/TENANT, FEATURE, ENVIRONMENT, or PROMPT VERSION issued the call — dimensions a provider dashboard cannot answer because it groups by API key. TokenJam carries seven nullable, indexed columns on `spans` (migration 17) for exactly this:

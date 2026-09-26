@@ -24,12 +24,24 @@ written once at the best confidence found and never downgraded.
 |---|---|---|
 | deterministic | `tool_span_git_log` | a `git commit` Bash tool call in the session within 30s of the commit |
 | deterministic | `trailer_session` | the commit body carries `TokenJam-Session: <id>` or `Claude-Session: <url>` resolving to an ingested session |
-| deterministic | `git_note` | a `refs/notes/ai` (Git AI) or `refs/notes/exceeds-ink` note names a session tj ingested (read, never written) |
+| deterministic | `git_note` | a `refs/notes/ai` (Git AI), `refs/notes/exceeds-ink` or `refs/notes/tokenjam` note names a session tj ingested |
 | inferred | `trailer_window` | an AI co-author trailer, on the session's own branch, inside the session window, with no stronger evidence |
 
 A `Claude-Session:` trailer names the bridge session id, not the local session
 uuid, so the Claude Code backfill persists `bridge_session_id` from the
 transcript to make it resolvable.
+
+A trailer that names a different session than a tool span does is inherited
+evidence, not first-hand evidence: a subagent inherits its parent's session id,
+so a commit the subagent's own Bash tool ran still carries the parent's
+trailer. In that case the row is written at `inferred`, so a parent never
+absorbs its subagents' commits at the top confidence.
+
+`refs/notes/tokenjam` is written only when you opt in with `tj init --notes`;
+the other two refs are read and never written. Full detail on the join, the
+side tables and coverage is in [the ledger overview](../ledger/overview.md),
+and the hooks that raise your confidence are in
+[hooks and notes](../ledger/hooks-and-notes.md).
 
 ## Shipped state
 
