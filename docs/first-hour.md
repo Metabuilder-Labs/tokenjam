@@ -28,17 +28,30 @@ Lens will often point you at which analyzer is worth running first.
 ## 3. `tj optimize` — find the savings
 
 ```bash
-tj optimize                          # all thirteen analyzers
+tj optimize                          # every analyzer your setup can act on
 tj optimize downsize cache reuse     # just the ones you care about
 ```
 
-Runs the thirteen cost-optimization analyzers (Downsize, Cache, Cache-recommend, Resend, Script,
-Trim, Reuse, Subagent right-sizing, Summarize, Verbosity, Deadweight, Relearn, Budget-projection)
-against your real usage and surfaces candidates — never a guaranteed saving, always a
-"worth a look." See [docs/optimize/](optimize/) for what each analyzer looks for and how to read its
-output.
+Runs the cost-optimization analyzers (Downsize, Cache, Cache-recommend, Resend, Script, Trim,
+Reuse, Subagent right-sizing, Summarize, Verbosity, Deadweight, Relearn, Stream-usage,
+Budget-projection) against your real usage and surfaces candidates — never a guaranteed saving,
+always a "worth a look." See [docs/optimize/](optimize/) for what each analyzer looks for and how to
+read its output.
 
-## 4. `tj tokenmaxx` — the shareable summary
+## 4. `tj optimize shipped` — what the spend produced
+
+```bash
+tj optimize shipped
+```
+
+The one analyzer that is not about spending less. It joins your sessions to the commits they
+produced and reports how many shipped to the default branch, what the sessions that shipped nothing
+cost, and how much of that work was rewritten within two weeks. Every dollar in it is measured
+spend, not a saving, and a session can ship value without a commit. Read it as a question to ask.
+[docs/optimize/shipped.md](optimize/shipped.md) covers the finding;
+[docs/ledger/overview.md](ledger/overview.md) covers the join behind it.
+
+## 5. `tj tokenmaxx` — the shareable summary
 
 ```bash
 tj tokenmaxx

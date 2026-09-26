@@ -257,6 +257,8 @@ forward_content = false
 
 The block holds a live per-organization ingest key. `.tj/config.toml` is untracked for exactly this reason; keep it that way.
 
+Full detail on the wire format, the resume state and the failure modes is in [docs/ledger/cloud-bridge.md](ledger/cloud-bridge.md).
+
 ## Pricing overrides
 
 `tj` ships a packaged pricing table (`tokenjam/pricing/models.toml`, USD per

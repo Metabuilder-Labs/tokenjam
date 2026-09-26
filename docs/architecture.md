@@ -428,6 +428,57 @@ Renderers (`tj optimize`, `tj cost`, the web UI cost views) read `pricing_mode` 
 
 ---
 
+## OTel semconv extensions: repo context and developer identity
+
+The shipped-value ledger needs to know which repo a session ran in and who ran it, so `tj init`
+stamps a second group of attributes. Standard OTel names are used wherever one exists (`vcs.*`,
+`user.email`, `host.name`); the rest live under `tokenjam.*` in `TjAttributes`. Every one of them is
+optional: a failure to resolve a value yields absence, never a placeholder, so a downstream join can
+never match on something invented.
+
+**Resource attributes** (per process):
+
+| Attribute | Value | Source |
+|---|---|---|
+| `user.email` | git author email | `git config user.email` in the session cwd, else the global value, else absent |
+| `tokenjam.developer_id` | `sha256(lower(user.email))[:16]` | derived; the pseudonymous id every ledger surface uses |
+| `tokenjam.github_login` | GitHub login | `gh api user` when `gh` is authenticated, cached for 24h. Optional |
+| `tokenjam.install_id` | uuid4, generated once | `~/.tj/install_id` |
+| `host.name` | hostname | `socket.gethostname()` |
+| `vcs.repository.url.full` | normalised remote, `https://github.com/org/repo`, no `.git`, no credentials, no query or fragment | `git remote get-url origin` |
+| `vcs.repository.name` | `org/repo` | derived from the remote |
+
+**Session attributes** (per session, set on the live path and the backfill path alike):
+
+| Attribute | Value |
+|---|---|
+| `vcs.ref.head.name` | branch at session start |
+| `vcs.ref.head.revision` | HEAD sha at session start, only when the source records it. Codex rollouts do; Claude Code transcripts do not, and it is absent rather than guessed. The join keys on repo, branch and time, never on this sha |
+| `tokenjam.repo_root` | absolute path of the repo root |
+| `tokenjam.session.branch_end` | branch at session end |
+| `tokenjam.session.head_end` | HEAD sha at session end |
+
+**Never stamped by the client:** team, department, cost centre, display name. Those are org-side
+maps and have no business on a local span.
+
+`user.email` is the one personal identifier here. It stays on your machine unless you connect
+[the Cloud bridge](ledger/cloud-bridge.md), which states it in the list it prints before the first
+byte leaves.
+
+`tj otel-resource-attrs` prints the resolved set for the current project.
+
+### Ledger storage
+
+`sessions` carries the same values as nullable columns (`repo_remote`, `repo_root`, `branch_start`,
+`branch_end`, `head_sha_start`, `head_sha_end`, `developer_id`, `user_email`), and the
+`session_commits` table holds the join, keyed `(session_id, commit_sha)` with its `confidence`,
+`source`, author email, commit time and match delta. Three side tables keep every read in SQL: a
+default-branch commit index, per-commit file statistics for the rework figure, and a per-session
+scan watermark. Migrations are additive, as everywhere else in the schema. See
+[the ledger overview](ledger/overview.md).
+
+---
+
 ## SDK cost-attribution dimensions (multi-tenant cost breakdown)
 
 For a developer running LLM agents in production via an SDK, the dimension that actually answers "who/what is spending the money" is which CUSTOMER/TENANT, FEATURE, ENVIRONMENT, or PROMPT VERSION issued the call — dimensions a provider dashboard cannot answer because it groups by API key. TokenJam carries seven nullable, indexed columns on `spans` (migration 17) for exactly this:
