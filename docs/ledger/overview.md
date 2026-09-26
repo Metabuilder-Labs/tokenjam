@@ -43,7 +43,8 @@ These columns are derived at ingest, from the transcript's own `cwd` and branch,
 stamped by the agent. Nothing has to be added to your `OTEL_RESOURCE_ATTRIBUTES` for them to appear,
 and `tj otel-resource-attrs` does not print them: that command emits `service.name` and, when the
 project is set in config, `service.namespace`. An SDK or OTLP producer that wants to supply the
-values itself can stamp the matching attribute names and the ingest path will read them. The full
+values itself can stamp the matching attribute names at **resource** level, which is the one
+placement every ingest route reads. The full
 name list, and which path sets what, is in
 [architecture.md](../architecture.md#otel-semconv-extensions-repo-context-and-developer-identity).
 

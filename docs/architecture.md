@@ -445,10 +445,20 @@ three paths, and it is worth being precise about which is which:
   (`core/repo_context.py::session_context_for_cwd`) and write them straight onto the session row.
   Sessions ingested before the columns existed are filled in later by
   `core/transcript_sync.py::refill_session_context`.
-- **SDK and OTLP producers.** If a producer stamps these attribute names on its resource or spans,
-  the ingest path reads them off (`session_context_from_attrs`) and stores them on the session.
-  Nothing in the Python or TypeScript SDK sets them for you today, so this path is for a producer
-  that chooses to send them.
+- **Producers that stamp the names themselves.** The ingest path reads them off with
+  `session_context_from_attrs` and stores them on the session. Nothing in the Python or TypeScript
+  SDK sets them for you today, so this is for a producer that chooses to send them, and **the level
+  they have to be set at depends on the route**:
+
+  | Route | Reads from |
+  |---|---|
+  | in-process SDK exporter (`otel/provider.py`) | **resource attributes only** |
+  | Claude Code OTLP logs route (`api/routes/logs.py`) | **resource attributes only** |
+  | OTLP JSON span ingest (`otel/otlp_parsing.py`) | resource **or** span attributes, merged, span wins on conflict |
+
+  Set them at resource level. That is the one placement every route reads. A producer that puts them
+  on individual spans and exports through the in-process SDK loses its repo and developer context
+  silently, because the resource carries none of them and nothing errors.
 - **Outbound to Cloud.** The bridge maps the stored session columns back onto these attribute names
   on the wire, and adds `tokenjam.install_id` and `host.name` to the resource at that point.
 
