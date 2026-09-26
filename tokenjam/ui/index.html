@@ -7389,6 +7389,17 @@ function HeroBand({ fig, framing, cost }) {
   }
   const opps = heroOpps(fig, framing);
   const topName = opps.length ? opps[0].title : '';
+  // The CTA goes to the surface that renders the BIGGEST opportunity, where
+  // the apply lifecycle actually lives. `analyzerSurfaceHref` resolves it:
+  // relearn and summarize have their own views, and an analyzer with no
+  // surface falls back to the ranked Optimize landing rather than a detail
+  // route that would render "no finding in the latest scan". It used to point at `#/review`, a page retired
+  // when that lifecycle moved onto the Optimize details: `primaryKeyFor`
+  // aliases `#/review` to the Dashboard so old bookmarks do not 404, so the
+  // button re-rendered the page the reader was already on (Critical Rule 24c:
+  // the destination did not resolve). With no priced opportunity the hero
+  // renders its empty state above and never reaches here.
+  const ctaHref = opps.length ? analyzerSurfaceHref(opps[0].name) : '#/optimize';
   // The share phrase ("of $Y spent · Z%") only makes sense in dollar mode —
   // in local/token-only mode there is no marginal spend to divide by, and
   // the hero figure itself already fell back to a token count via
@@ -7418,7 +7429,7 @@ function HeroBand({ fig, framing, cost }) {
           <div class="hero-sentence">${heroSentence}</div>
         </div>
         <div class="hero-actions">
-          <a class="hero-cta" href="#/review">${ctaLabel} <span class="mono">→</span></a>
+          <a class="hero-cta" href=${ctaHref}>${ctaLabel} <span class="mono">→</span></a>
           ${topName ? html`<div class="hero-cta-sub">starts with the biggest one: ${topName}</div>` : null}
         </div>
       </div>
@@ -7451,6 +7462,20 @@ const DETAIL_ANALYZER_NAMES = new Set([
 // already used inline; pulled out once so the breadcrumb chip nav and the
 // filtered `order` array can't drift apart).
 const OPT_DETAIL_ORDER = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement'];
+
+// Where an analyzer's fix actually lives. Most render an OptimizeFinding
+// detail card (DETAIL_ANALYZER_NAMES); `summarize` has its own view and
+// `relearn` is the Rules view (the sidebar labels that route "Relearn"). An
+// analyzer with no surface of its own resolves to the Optimize landing, which
+// ranks every finding — never to a route that renders "no finding in the
+// latest scan" under a button promising a fix (Critical Rule 24c). Used by the
+// Dashboard hero CTA, whose target is whichever analyzer is biggest.
+function analyzerSurfaceHref(name, since) {
+  if (name === 'summarize') return '#/optimize/summarize';
+  if (name === 'relearn') return '#/optimize/rules';
+  if (DETAIL_ANALYZER_NAMES.has(name)) return optimizeFindingHref(name, since);
+  return '#/optimize';
+}
 
 // The mech badge (design's apply/snippet/read pill) is a static
 // classification of an analyzer's fix MECHANISM, not a per-instance

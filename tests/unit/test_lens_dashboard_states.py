@@ -671,3 +671,83 @@ def test_no_dollar_surface_renders_a_suppressed_figure_with_no_explanation():
         ):
             result = _run_dedup_js(expr)
             assert result not in (None, ""), "%s produced no explanation: %r" % (expr, result)
+
+
+def _cta_destination_source() -> str:
+    """`analyzerSurfaceHref` + `optimizeFindingHref` + `primaryKeyFor` + the
+    constants they read, lifted verbatim from the served page, so a test can
+    RESOLVE a CTA rather than pattern-match the source that builds it."""
+    src = _UI.read_text(encoding="utf-8")
+    pieces = []
+    for start_marker, end_marker in (
+        ("const DEFAULT_SINCE", "\n"),
+        ("const DETAIL_ANALYZER_NAMES = new Set([", "]);"),
+        ("function analyzerSurfaceHref", "\n}"),
+        ("function optimizeFindingHref", "\n}"),
+        ("const SESSIONS_SDK_TAB_VIEWS", "\n"),
+        ("const UNSURFACED_VIEWS", "\n"),
+        ("function primaryKeyFor", "\n}"),
+    ):
+        i = src.index(start_marker)
+        j = src.index(end_marker, i) + len(end_marker)
+        pieces.append(src[i:j])
+    return "\n".join(pieces)
+
+
+def _resolve(analyzer: str) -> dict:
+    """The href the hero CTA builds for `analyzer`, and the primary view key
+    the router resolves it to. A CTA whose key is 'dashboard' is the defect."""
+    script = _cta_destination_source() + f"""
+const href = analyzerSurfaceHref({analyzer!r});
+const hash = href.replace(/^#\//, '');
+const [path, qs] = hash.split('?');
+const [view, param] = path.split('/');
+console.log(JSON.stringify({{ href, key: primaryKeyFor({{ view, param }}) }}));
+"""
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(proc.stdout.strip())
+
+
+@_node
+@pytest.mark.parametrize("analyzer", [
+    "downsize", "cache", "script", "trim", "reuse", "subagent", "verbosity",
+    "deadweight", "placement", "resend", "cache-recommend",
+])
+def test_every_detail_analyzer_cta_resolves_to_its_own_optimize_page(analyzer: str):
+    """Critical Rule 24(c): check the destination RESOLVES, not that a link
+    exists. The defect this replaced put `#/review` here, which `primaryKeyFor`
+    aliases to 'dashboard', so the button re-rendered the page the reader was
+    already on."""
+    got = _resolve(analyzer)
+    assert got["key"] == "optimize", f"{analyzer} CTA resolved to {got['key']} via {got['href']}"
+    assert got["href"] == f"#/optimize/{analyzer}"
+
+
+@_node
+@pytest.mark.parametrize("analyzer,expected_key", [
+    ("relearn", "rules"),        # its surface is the Rules view, labelled Relearn
+    ("summarize", "summarize"),  # its own view, not an OptimizeFinding card
+    ("shipped", "optimize"),     # no detail card: the ranked landing, never a dead route
+])
+def test_analyzers_without_a_detail_card_reach_a_surface_that_renders_them(
+    analyzer: str, expected_key: str,
+):
+    """An analyzer with no OptimizeFinding card must not get `#/optimize/<name>`:
+    that route renders "no finding in the latest scan" under a button promising
+    a fix. Relearn is the live case, it can be the biggest contributor and has
+    no detail card."""
+    got = _resolve(analyzer)
+    assert got["key"] == expected_key, f"{analyzer} resolved to {got['key']} via {got['href']}"
+    assert got["key"] != "dashboard"
+
+
+def test_the_hero_cta_is_computed_and_review_is_not_a_link_target(html: str):
+    """The inverse of the original defect, pinned per Critical Rule 23 rather
+    than deleted: the href must be built from the top opportunity, and no link
+    anywhere may target the retired `#/review` route."""
+    assert "const ctaHref = opps.length ? analyzerSurfaceHref(opps[0].name)" in html
+    assert "href=${ctaHref}" in html
+    assert 'href="#/review"' not in html
