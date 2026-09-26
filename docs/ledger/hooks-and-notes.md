@@ -71,8 +71,10 @@ tj commit-note <sha>
 ```
 
 That works on any commit carrying the trailer, with or without the hook installed and with or
-without a daemon. It never fails the commit it is called from: every outcome exits 0, and
-`tj -v commit-note` says what it did or why it did nothing.
+without a daemon. The one case it cannot cover is a database locked by a daemon that is no longer
+answering, since neither route into the store is available then; stop the daemon and run it again.
+It never fails the commit it is called from: every outcome exits 0, and `tj -v commit-note` says
+what it did or why it did nothing.
 
 The hook stays silent about all of this by design: its stdout is the commit's stdout.
 
