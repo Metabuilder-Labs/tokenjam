@@ -56,8 +56,24 @@ trailer. That writes one JSON object to `refs/notes/tokenjam`:
 `cost_usd` is the session's measured cost and `pricing_mode` rides with it, so a reader never
 renders a subscription session's figure as per-token spend.
 
-`tj commit-note` can also be run by hand on any commit that carries the trailer. It never fails the
-commit it is called from: every outcome exits 0, and `-v` says what it did or why it did nothing.
+**The hook needs `tj serve` running.** The cost is read through the daemon, so the hook checks for a
+live one first and returns in a few milliseconds when there is none, rather than starting Python on
+every commit. That is deliberate, and it means a commit made while the daemon is down gets no note.
+The trailer is unaffected: `prepare-commit-msg` writes it either way, so the session still joins at
+deterministic confidence and only the cost annotation is missing.
+
+To write a note for such a commit afterwards, run the command by hand once the daemon is up:
+
+```bash
+tj serve                     # if it is not already running
+tj commit-note <sha>
+```
+
+`tj commit-note` works on any commit that carries the trailer, with or without the hook installed.
+It never fails the commit it is called from: every outcome exits 0, and `tj -v commit-note` says
+what it did or why it did nothing.
+
+The hook stays silent about all of this by design: its stdout is the commit's stdout.
 
 ### Which refs are read
 

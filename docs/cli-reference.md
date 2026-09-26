@@ -34,7 +34,7 @@ tj onboard --verify-only    # skip setup; just re-poll an existing install (post
 tj init --cloud <key> --org <org>   # forward spans, sessions and commits to TokenJam Cloud (asks first; --yes skips)
 tj init --cloud off         # stop forwarding, keep the key
 tj init --add-project       # register another repo against a setup you already have
-tj init --reconfigure       # re-prompt for plan tier and budget against an existing config
+tj init --claude-code --reconfigure   # re-prompt for plan tier and budget (needs --claude-code or --codex)
 tj init --hooks             # install the prepare-commit-msg hook in this repo
 tj init --notes             # also install the post-commit git-notes hook (implies --hooks)
 tj init --enforce           # turn on the enforcement proxy in suggest mode
@@ -60,8 +60,19 @@ Composes with `--hooks`. See [docs/proxy/overview.md](proxy/overview.md).
 
 **`--add-project`** registers the current repo under a project namespace in an existing global
 config, without re-running the wizard: no plan or budget prompt, no backfill, no daemon restart. It
-needs `tj init` to have run once somewhere first. **`--reconfigure`** is the inverse: it re-prompts
-for plan tier and budget against a config that already exists, skipping agent-runtime re-detection.
+needs `tj init` to have run once somewhere first.
+
+**`--reconfigure`** re-prompts for plan tier and budget against a config that already exists,
+skipping agent-runtime re-detection. **It must be paired with `--claude-code` or `--codex`:**
+
+```bash
+tj init --claude-code --reconfigure
+tj init --codex --reconfigure
+```
+
+Plan tier is per provider and lives in `[budget.<provider>]`, which only the provider-specific flows
+write, so a bare `tj init --reconfigure` against an existing config exits 1 with
+`--reconfigure has no effect without --claude-code or --codex` rather than silently doing nothing.
 
 **Scope flags.** `--plan` sets the plan tier non-interactively, `--analysis-span 30d|90d|all` sets
 how far back the analyzers look (storage retention is derived from it, and `all` disables deletion

@@ -39,8 +39,12 @@ Sessions that were ingested before repo context existed are refilled by the daem
 catch-up, and by `tj init --cloud` before its first push, so an older install fills in rather than
 starting from the day you upgraded.
 
-`tj otel-resource-attrs` prints the resource attributes for the current project, including the
-ledger ones. The full attribute list is in
+These columns are derived at ingest, from the transcript's own `cwd` and branch, rather than being
+stamped by the agent. Nothing has to be added to your `OTEL_RESOURCE_ATTRIBUTES` for them to appear,
+and `tj otel-resource-attrs` does not print them: that command emits `service.name` and, when the
+project is set in config, `service.namespace`. An SDK or OTLP producer that wants to supply the
+values itself can stamp the matching attribute names and the ingest path will read them. The full
+name list, and which path sets what, is in
 [architecture.md](../architecture.md#otel-semconv-extensions-repo-context-and-developer-identity).
 
 ## The join

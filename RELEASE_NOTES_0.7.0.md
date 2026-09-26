@@ -55,8 +55,10 @@ caveat prints on every surface, and the finding sits outside the recoverable-was
 - **`tj init --notes`** adds a `post-commit` hook that writes the session's measured cost to
   `refs/notes/tokenjam`. It implies `--hooks` and is off unless you ask for it. tj reads
   `refs/notes/ai` (Git AI) and `refs/notes/exceeds-ink` too, so a repo already annotated by one of
-  those gets a stronger join with no setup.
-- **`tj commit-note [sha]`** writes that note by hand. It never fails the commit it runs from.
+  those gets a stronger join with no setup. The hook reads the cost through the daemon, so it skips
+  in a few milliseconds when `tj serve` is not running and the commit gets its trailer but no note.
+- **`tj commit-note [sha]`** writes that note by hand, for a commit the hook skipped or for a repo
+  with no hook installed. It never fails the commit it runs from.
 - **`tj init --enforce`** turns on the enforcement proxy in suggest mode and prints what it does
   and does not touch. Suggest mode forwards every request unmodified and records what a policy
   would have done. Nothing is blocked or rewritten until you approve it. Subscription-plan traffic
