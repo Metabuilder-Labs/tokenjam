@@ -278,8 +278,8 @@ class CostEngine:
         # session kept the upstream number while the span row carried ours.
         # Incrementing by the DELTA keeps the live session total aligned with
         # the post-hook span cost under every combination (unpriced, pre-priced,
-        # or re-priced) with no special case and no extra read. Repair paths
-        # recompute from canonical logical observations.
+        # or re-priced) with no special case and no extra read. Repair and late
+        # attribution paths recompute from canonical logical observations.
         prior_cost = span.cost_usd or 0.0
 
         cost = calculate_cost(
@@ -317,8 +317,9 @@ class CostEngine:
 
         # Move the session total by exactly what this span's stored cost moved.
         # A zero delta (we agreed with the incoming figure, or the span is being
-        # reprocessed with the same rates) writes nothing. Repair paths use
-        # canonical logical observations instead of a raw span sum.
+        # reprocessed with the same rates) writes nothing. Repair and late
+        # attribution paths use canonical logical observations instead of a raw
+        # span sum.
         delta = cost - prior_cost
         if span.session_id and delta:
             self.db.increment_session_cost(span.session_id, delta)

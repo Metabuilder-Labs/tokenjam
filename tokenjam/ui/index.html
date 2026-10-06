@@ -3485,6 +3485,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
 
   if (!data) return html`<div class="page-title">Sessions</div>${CardGridSkeleton(6)}`;
   const sdkServices = data.sdk_services || [];
+  const unattributedSpend = data.unattributed_spend;
   // Persona decides which zones this page HAS, so the heading below must be
   // derived from it too: a page showing one zone must not open by promising
   // two. Alerts reuse `personaHides` rather than a second persona literal, so
@@ -3506,7 +3507,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
   // list says nothing about whether an alert fired or a cap was set — swapping
   // the whole page for "No agents found" would take those away on the strength
   // of a different question's answer.
-  if (!showSdkZone && !data.agents.length && !(data.archived || []).length && !sdkServices.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
+  if (!showSdkZone && !data.agents.length && !(data.archived || []).length && !sdkServices.length && !unattributedSpend) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
   const agents = agentId ? data.agents.filter(a => a.agent_id === agentId) : data.agents;
   // Coding zone = interactive coding agents (cards) + coding archive.
@@ -3670,6 +3671,21 @@ function StatusView({ params, persona, personaKnown, routeView }) {
         <span class="zone-count" style="align-self:center">${codingAgents.length} active · ${archivedCountLabel(codingArchived.length, data.archived_total)} archived</span>` : null}
     </div>
     ${agentId ? html`<div style="font-size:12px;color:var(--text-dim);margin:2px 0 16px;font-family:'Geist Mono',monospace">Filtered to <span class="mono">${agentId}</span> · <a href="#/sessions" style="color:var(--brand)">show all</a></div>` : null}
+
+    ${unattributedSpend ? html`
+      <div class="section-gap"></div>
+      <div class="panel">
+        <div class="panel-head">
+          <span>Unattributed spend</span>
+          <span class="range">tj cost --group-by session</span>
+        </div>
+        <div class="panel-body">
+          <div class="card-row"><span class="label">Not assigned to a named session</span><span class="value">${fmtFramedDollar(unattributedSpend.cost_usd, data.framing)}</span></div>
+          <div class="card-row"><span class="label">Affected telemetry</span><span class="value">${unattributedSpend.span_count || 0} span(s) · ${unattributedSpend.trace_count || 0} trace(s)</span></div>
+          <div style="margin-top:8px;color:var(--text-dim);font-size:12px">The grand total can exceed the sum of named sessions.</div>
+        </div>
+      </div>
+    ` : null}
 
     ${codingZoneShown ? html`
       ${showSdkZone ? html`

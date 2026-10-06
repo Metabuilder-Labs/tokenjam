@@ -932,6 +932,14 @@ async def get_cost(
     # (above) and the `series` (below) are window-scoped.
     conn = getattr(db, "conn", None)
     framing = _framing_block(db, config, agent_id, total, total_tokens)
+    unattributed_spend = None
+    if hasattr(db, "get_unattributed_spend"):
+        try:
+            unattributed_spend = db.get_unattributed_spend(
+                since=since_dt, until=until_dt, agent_id=agent_id,
+            )
+        except Exception:
+            unattributed_spend = None
     return {
         "rows": [
             {
@@ -951,6 +959,7 @@ async def get_cost(
         "total_tokens": total_tokens,
         "total_cache_tokens": sum(r.cache_tokens for r in rows),
         "total_cache_write_tokens": sum(r.cache_write_tokens for r in rows),
+        "unattributed_spend": unattributed_spend,
         **_window_series(conn, agent_id, since_dt, until_dt),
         "cycle": _cycle_block(config),
         "framing": framing,

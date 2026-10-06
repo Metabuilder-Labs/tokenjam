@@ -34,8 +34,9 @@ def _span_dict(**overrides):
 
 
 def test_dict_to_span_parses_a_present_start_time():
-    span = _dict_to_span(_span_dict())
+    span = _dict_to_span(_span_dict(attribution_step="step1_parent"))
     assert span.start_time.isoformat() == "2026-03-14T12:00:00+00:00"
+    assert span.attribution_step == "step1_parent"
 
 
 def test_dict_to_span_raises_when_start_time_is_missing():

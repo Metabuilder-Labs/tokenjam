@@ -527,6 +527,15 @@ async def get_status(
     # honestly instead of presenting the capped page as the whole archive.
     archived_total = _count_archived(db, current_cutoff, agent_id, persona)
 
+    unattributed_spend = None
+    if hasattr(db, "get_unattributed_spend"):
+        try:
+            unatt = db.get_unattributed_spend(agent_id=agent_id)
+            if unatt and float(unatt.get("cost_usd") or 0.0) > 0.0:
+                unattributed_spend = unatt
+        except Exception:
+            unattributed_spend = None
+
     return {
         "agents": agents_data,
         "archived": archived,
@@ -534,4 +543,5 @@ async def get_status(
         "sdk_services": sdk_services,
         "has_active_alerts": has_active_alerts,
         "framing": framing.to_dict(),
+        "unattributed_spend": unattributed_spend,
     }
