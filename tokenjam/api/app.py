@@ -150,8 +150,11 @@ def create_app(
             try:
                 _ui_cache["html"] = index_path.read_text()
                 _ui_cache["mtime_ns"] = mtime_ns
-            except OSError:
-                pass  # e.g. caught mid-write; retry on the next request
+            except (OSError, UnicodeDecodeError):
+                # Caught mid-write or saved with invalid bytes. Keep serving the
+                # last good copy and leave the cached mtime alone so the next
+                # request retries.
+                pass
         return _ui_cache["html"]
 
     _load_index_html()  # warm the cache at startup

@@ -78,3 +78,20 @@ def test_missing_index_html_keeps_serving_last_good_copy(tmp_path, monkeypatch, 
 
     assert resp.status_code == 200
     assert "v1" in resp.text
+
+
+def test_undecodable_index_html_keeps_last_good_copy_then_recovers(tmp_path, monkeypatch, db):
+    index = tmp_path / "index.html"
+    _write(index, "<html><head></head><body>v1</body></html>", 1_000_000_000)
+
+    with _client(tmp_path, monkeypatch, db) as client:
+        # A save caught mid-character leaves invalid UTF-8 on disk.
+        index.write_bytes(b"<html><head></head><body>\xe2\x82")
+        os.utime(index, ns=(2_000_000_000, 2_000_000_000))
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "v1" in resp.text
+
+        # Once the file is fixed, the next request picks it up.
+        _write(index, "<html><head></head><body>v2</body></html>", 3_000_000_000)
+        assert "v2" in client.get("/").text
