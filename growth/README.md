@@ -28,11 +28,17 @@ workflow's commit lands without a PR or required checks.
 > `traffic-data` branch went missing at some point after the 2026-06-21 run, and
 > every weekly run from then until 2026-10-06 failed on `fatal: Remote branch
 > traffic-data not found in upstream origin` — *after* the collect step had
-> already succeeded. Fifteen weeks of traffic were gathered and discarded, and
-> since the API retains only 14 days none of it is recoverable. Any growth
-> analysis crossing that range has no clone or view data for it; do not read the
-> absence as a decline. The publish step now creates the branch when it is
-> missing, so this particular failure cannot repeat.
+> already succeeded. Fifteen weeks of snapshots were gathered and discarded.
+>
+> **The last 14 days are still recoverable; everything before them is not.** The
+> Traffic API serves a rolling two-week window, so a `workflow_dispatch` run
+> captures whatever is in that window right now — and the sooner it runs, the
+> less of it has aged out. It cannot reconstruct the weekly snapshots themselves,
+> because each one is a point-in-time capture of a window that has long since
+> rolled past. So: run it, and treat W26 through the fortnight before that run as
+> permanently absent. Any growth analysis crossing that range has no clone or view
+> data for it; do not read the absence as a decline. The publish step now creates
+> the branch when it is missing, so this particular failure cannot repeat.
 >
 > It went unnoticed for fifteen weeks because nothing watches this workflow — see
 > the scope note above: the health check that would have opened an issue was

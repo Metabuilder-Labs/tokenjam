@@ -64,14 +64,33 @@ jobs:
           # branch disappeared once (deleted, or never recreated after a repo
           # operation) and every weekly run from 2026-W26 to 2026-W41 then
           # failed on `fatal: Remote branch traffic-data not found`, AFTER the
-          # collect step had succeeded. Fifteen weeks of traffic were gathered
-          # and thrown away, and because the Traffic API only retains 14 days
-          # none of it can be recovered. A missing branch is a recoverable
-          # state, so recover from it: the archive's whole purpose is to
-          # outlive that 14-day window, and a publisher that cannot create its
-          # own destination defeats it on the one day it matters.
-          if git ls-remote --exit-code --heads "$remote" traffic-data >/dev/null 2>&1; then
+          # collect step had succeeded. Fifteen weeks of snapshots were
+          # gathered and thrown away; the Traffic API retains only 14 days, so
+          # every week before the current window is gone for good. A missing
+          # branch is a recoverable state, so recover from it: the archive's
+          # whole purpose is to outlive that 14-day window, and a publisher
+          # that cannot create its own destination defeats it on the one day
+          # it matters.
+          #
+          # Distinguish "no such branch" from "could not ask". `ls-remote
+          # --exit-code` returns 2 for no matching ref and 128 for a transport
+          # or auth failure, so swallowing every non-zero status would let a
+          # momentary network blip start a fresh local history against a branch
+          # that already exists -- the push then fails as a non-fast-forward,
+          # and the run looks like the very bug this step fixes. Only 2 means
+          # create; anything else re-raises with git's own message.
+          set +e
+          git ls-remote --exit-code --heads "$remote" traffic-data >/dev/null
+          ls_status=$?
+          set -e
+          if [ "$ls_status" -eq 0 ]; then
             git clone --quiet --depth 1 --branch traffic-data "$remote" "$tmp"
+          elif [ "$ls_status" -ne 2 ]; then
+            echo "error: could not reach ${GH_REPO} to check for traffic-data" \
+                 "(git ls-remote exit ${ls_status}). Refusing to guess that the" \
+                 "branch is missing." >&2
+            git ls-remote --heads "$remote" traffic-data >/dev/null
+            exit "$ls_status"
           else
             echo "traffic-data does not exist on ${GH_REPO} — creating it."
             git -C "$tmp" init --quiet --initial-branch=traffic-data
