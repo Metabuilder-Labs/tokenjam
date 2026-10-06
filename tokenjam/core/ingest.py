@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import queue
@@ -51,6 +52,7 @@ DUPLICATE_SUPPRESSION_MEMO_MAXSIZE = 10_000
 # at any time). Staleness costs at most this much suppression, which
 # `tj doctor --repair` then collapses — never a lost span.
 _OTHER_SOURCE_PROBE_INTERVAL_S = 60.0
+_PARENT_CACHE_MAXSIZE = 20_000
 
 
 class SpanRejectedError(Exception):
@@ -268,6 +270,12 @@ class IngestPipeline:
         self._other_source_seen: bool | None = None
         self._other_source_checked_at = 0.0
 
+        # Bounded LRU cache of (trace_id, span_id) -> (parent_span_id, session_id, attribution_step)
+        # to avoid O(n^2) full-trace hydration during parent chain resolution (Issue #749).
+        self._parent_cache: collections.OrderedDict[
+            tuple[str, str], tuple[str | None, str | None, str | None]
+        ] = collections.OrderedDict()
+
     def process(self, span: NormalizedSpan) -> None:
         """
         Full ingest pipeline for one span:
@@ -311,11 +319,88 @@ class IngestPipeline:
             )
             return
 
+        # Reconciliation is required when a trace gains a *new* marker span,
+        # not for every later span that carries the same conversation-derived
+        # session. The latter cannot change the ownership ladder, and clearing
+        # the trace's parent cache after it turns a repeated known-conversation
+        # child into unnecessary parent lookups on subsequent descendants.
+        is_new_marker_span = False
+        if self._is_session_marker(span) and span.trace_id:
+            # A child that merely inherited a known conversation is not a new
+            # reconciliation marker; it cannot change ownership and should not
+            # evict the parent cache. Root conversation markers still reconcile
+            # late trace-only spans, while explicit session markers are always
+            # identified by their span id so repeated session ids are handled.
+            if not (span.attribution_step == "conversation" and span.parent_span_id):
+                should_reconcile = getattr(
+                    self.db, "should_reconcile_trace_session_attribution", None,
+                )
+                if should_reconcile is not None:
+                    is_new_marker_span = should_reconcile(
+                        span.trace_id, span.span_id, span.session_id,
+                    )
+                else:
+                    # Preserve compatibility with minimal backends that expose
+                    # the older targeted lookups but not the combined probe.
+                    get_span = getattr(self.db, "get_span", None)
+                    is_new_span = (
+                        get_span(span.trace_id, span.span_id) is None
+                        if get_span is not None else True
+                    )
+                    if not is_new_span:
+                        is_new_marker_span = False
+                    else:
+                        marker_lookup = getattr(
+                            self.db, "get_marker_session_ids_for_trace", None,
+                        )
+                        if marker_lookup is None:
+                            is_new_marker_span = True
+                        else:
+                            marker_ids = marker_lookup(span.trace_id)
+                            is_new_marker_span = span.session_id not in marker_ids
+                            if not is_new_marker_span:
+                                get_trace_spans = getattr(self.db, "get_trace_spans", None)
+                                if get_trace_spans is not None:
+                                    is_new_marker_span = any(
+                                        candidate.session_id is None
+                                        or candidate.attribution_step
+                                        not in {"explicit", "conversation"}
+                                        for candidate in get_trace_spans(span.trace_id)
+                                    )
+
         # 4. Write span
         self.db.insert_span(span)
+        if span.trace_id and span.span_id:
+            self._parent_cache[(span.trace_id, span.span_id)] = (
+                span.parent_span_id, span.session_id, span.attribution_step,
+            )
+            if len(self._parent_cache) > _PARENT_CACHE_MAXSIZE:
+                self._parent_cache.popitem(last=False)
 
         # 5. Session upsert (update running totals)
         session = self._build_or_update_session(span)
+
+        # A marker can arrive after trace-only spans. Reconcile provisional or
+        # trace-derived ownership now that the marker is durable, before the
+        # session lifecycle hooks inspect the totals.
+        if is_new_marker_span:
+            reconcile = getattr(self.db, "reconcile_trace_session_attribution", None)
+            if reconcile is not None:
+                if session is not None:
+                    self.db.upsert_session(session)
+                try:
+                    reconcile(span.trace_id)
+                    refreshed = self.db.get_session(span.session_id) if span.session_id else None
+                    if refreshed is not None:
+                        session = refreshed
+                except Exception as exc:
+                    from tokenjam.core.db import handle_if_fatal
+
+                    if not handle_if_fatal(exc, what="reconcile_trace_session_attribution"):
+                        logger.warning("Trace session reconciliation failed: %s", exc)
+                keys_to_del = [k for k in self._parent_cache if k[0] == span.trace_id and k[1] != span.span_id]
+                for k in keys_to_del:
+                    self._parent_cache.pop(k, None)
 
         # 5b. Session lifecycle.
         #
@@ -331,7 +416,7 @@ class IngestPipeline:
         # was force-completed on its first prompt (so the dashboard showed
         # active work as "completed" with 0 duration), and the drift/alert
         # session-end hooks fired on every single turn.
-        if self._is_session_end(span):
+        if session is not None and self._is_session_end(span):
             session.status = "completed"
             self.db.upsert_session(session)
             if self.drift_detector and span.agent_id:
@@ -344,7 +429,7 @@ class IngestPipeline:
                     self.alert_engine.evaluate_session_end(session)
                 except Exception as exc:
                     logger.warning("AlertEngine session-end hook failed: %s", exc)
-        else:
+        elif session is not None:
             # Any other span is ongoing activity. Streaming telemetry (the logs
             # path) never sends an explicit end event, so a session that keeps
             # receiving spans is still alive — re-activate a record that was
@@ -511,38 +596,134 @@ class IngestPipeline:
             and span.end_time > span.start_time
         )
 
+    @staticmethod
+    def _is_session_marker(span: NormalizedSpan) -> bool:
+        """True when a span carries an explicit session identity.
+
+        A generated session for a marker without an identity is provisional,
+        not evidence that the trace belongs to that session. Only explicit or
+        conversation-derived markers participate in late trace reconciliation.
+        """
+        return (
+            span.session_id is not None
+            and span.attribution_step in {"explicit", "conversation"}
+        )
+
+    def _session_from_parent_chain(
+        self, span: NormalizedSpan,
+    ) -> tuple[str, bool] | None:
+        """Return one parent session and whether its ownership is provisional.
+
+        Uses the bounded in-memory parent cache and targeted get_span lookups
+        to avoid O(n^2) full-trace hydration (Issue #749).
+        """
+        if not span.parent_span_id or not span.trace_id:
+            return None
+
+        derived_sessions: set[str] = set()
+        seen: set[str] = set()
+        parent_id: str | None = span.parent_span_id
+
+        for _ in range(128):
+            if parent_id is None or parent_id in seen:
+                break
+            seen.add(parent_id)
+
+            cache_key = (span.trace_id, parent_id)
+            cached = self._parent_cache.get(cache_key)
+            if cached is not None:
+                self._parent_cache.move_to_end(cache_key)
+                next_parent_id, parent_session_id, parent_attr_step = cached
+            else:
+                get_span_fn = getattr(self.db, "get_span", None)
+                parent_span = get_span_fn(span.trace_id, parent_id) if get_span_fn else None
+                if parent_span is None:
+                    break
+                next_parent_id = parent_span.parent_span_id
+                parent_session_id = parent_span.session_id
+                parent_attr_step = parent_span.attribution_step
+                self._parent_cache[cache_key] = (next_parent_id, parent_session_id, parent_attr_step)
+                if len(self._parent_cache) > _PARENT_CACHE_MAXSIZE:
+                    self._parent_cache.popitem(last=False)
+
+            if parent_session_id:
+                if (
+                    parent_attr_step in {"explicit", "conversation", "step1_parent"}
+                    or (parent_attr_step is None and parent_session_id)
+                ):
+                    return parent_session_id, False
+                if parent_attr_step in {"provisional", "step2_marker"}:
+                    derived_sessions.add(parent_session_id)
+
+            parent_id = next_parent_id
+
+        if len(derived_sessions) == 1:
+            return next(iter(derived_sessions)), True
+        return None
+
     def _resolve_session(self, span: NormalizedSpan) -> NormalizedSpan:
         """
         Resolve or create a session_id for the span.
 
-        Resolution order:
-        1. Span already carries a session_id — keep it.
-        2. Span carries a conversation_id that matches an existing session — use that.
-        3. Span carries a trace_id that matches spans already written for a known
-           session — attach to that session (#326).
-        4. None of the above — mint a fresh session_id.
+        Ownership 3-step ladder (first match wins):
+        1. Explicit session_id, then a known conversation_id on span.
+        2. Step 1: Parent-span ownership (child attaches to parent span's session if resolved).
+        3. Step 2: Sole-marker ownership (trace carries exactly 1 explicit session marker).
+        4. Step 3: Unattributed (more than 1 marker & no parentage -> genuinely ambiguous, goes to named unattributed bucket, never split or dropped).
+        5. Zero markers on trace: attach to trace's existing provisional session (#326), or mint a fresh provisional session.
         """
         if span.session_id:
+            span.attribution_step = "explicit"
             return span
 
         if span.conversation_id:
             existing = self.db.get_session_by_conversation(span.conversation_id)
             if existing is not None:
                 span.session_id = existing.session_id
+                span.attribution_step = "conversation"
                 return span
 
-        # Look up session via trace_id sibling.
+        # Step 1: Parent resolution (child attaches to parent span's session if resolved)
+        parent_resolution = self._session_from_parent_chain(span)
+        if parent_resolution:
+            parent_session_id, parent_is_provisional = parent_resolution
+            span.session_id = parent_session_id
+            span.attribution_step = "provisional" if parent_is_provisional else "step1_parent"
+            return span
+
+        # Trace markers
         if span.trace_id:
-            session_id = self.db.get_session_id_for_trace(span.trace_id)
-            if session_id:
-                span.session_id = session_id
+            marker_lookup = getattr(self.db, "get_marker_session_ids_for_trace", None)
+            marker_ids = (
+                marker_lookup(span.trace_id) if marker_lookup is not None else []
+            )
+            # Step 2: Sole-marker ownership
+            if len(marker_ids) == 1:
+                span.session_id = marker_ids[0]
+                span.attribution_step = "step2_marker"
+                return span
+            # Step 3: Unattributed (>1 marker & no parentage)
+            if len(marker_ids) > 1:
+                span.session_id = None
+                span.attribution_step = "step3_unattributed"
                 return span
 
-        # No existing session found — create a new session_id
+            # 0 markers on trace: preserve #326 behavior (attach to trace's existing session if any)
+            trace_session_lookup = getattr(self.db, "get_session_id_for_trace", None)
+            existing_trace_session = (
+                trace_session_lookup(span.trace_id) if trace_session_lookup is not None else None
+            )
+            if existing_trace_session is not None:
+                span.session_id = existing_trace_session
+                span.attribution_step = "provisional"
+                return span
+
+        # Standalone span without markers or existing session — mint fresh session
         span.session_id = new_uuid()
+        span.attribution_step = "conversation" if span.conversation_id else "provisional"
         return span
 
-    def _build_or_update_session(self, span: NormalizedSpan) -> SessionRecord:
+    def _build_or_update_session(self, span: NormalizedSpan) -> SessionRecord | None:
         """
         Fetch the current session record and update its running totals
         from this span's token counts, cost, error status, etc.
@@ -552,7 +733,8 @@ class IngestPipeline:
         only update plan_tier if it's currently 'unknown' (e.g. tool spans
         arrived before an LLM span on a fresh session).
         """
-        assert span.session_id is not None
+        if span.session_id is None:
+            return None
 
         existing = self.db.get_session(span.session_id)
         if existing is not None:

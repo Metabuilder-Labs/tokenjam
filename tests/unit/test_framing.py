@@ -345,6 +345,20 @@ def test_plan_determination_mix_ignores_time_window():
     assert params == ["agent-x"]
 
 
+def test_plan_tier_mix_excludes_superseded_sessions():
+    from tokenjam.core.db import InMemoryBackend
+    from tokenjam.core.framing import plan_tier_mix
+    from tests.factories import make_session
+
+    db = InMemoryBackend()
+    db.upsert_session(make_session(session_id="s1", plan_tier="max_5x", status="active"))
+    db.upsert_session(make_session(session_id="s2", plan_tier="max_5x", status="superseded"))
+    db.upsert_session(make_session(session_id="s3", plan_tier="api", status="completed"))
+
+    mix = plan_tier_mix(db.conn)
+    assert mix == {"max_5x": 1, "api": 1}
+
+
 def test_framing_to_dict_has_contract_fields():
     f = compute_framing(
         _Config(),
