@@ -24,6 +24,28 @@ It lives on its own branch (not `main`) because `main` is protected and blocks
 automated direct pushes; `traffic-data` is intentionally unprotected so the
 workflow's commit lands without a PR or required checks.
 
+> **There is a hole in the archive from 2026-W26 to 2026-W41.** The
+> `traffic-data` branch went missing at some point after the 2026-06-21 run, and
+> every weekly run from then until 2026-10-06 failed on `fatal: Remote branch
+> traffic-data not found in upstream origin` — *after* the collect step had
+> already succeeded. Fifteen weeks of snapshots were gathered and discarded.
+>
+> **The last 14 days are still recoverable; everything before them is not.** The
+> Traffic API serves a rolling two-week window, so a `workflow_dispatch` run
+> captures whatever is in that window right now — and the sooner it runs, the
+> less of it has aged out. It cannot reconstruct the weekly snapshots themselves,
+> because each one is a point-in-time capture of a window that has long since
+> rolled past. So: run it, and treat W26 through the fortnight before that run as
+> permanently absent. Any growth analysis crossing that range has no clone or view
+> data for it; do not read the absence as a decline. The publish step now creates
+> the branch when it is missing, so this particular failure cannot repeat.
+>
+> It went unnoticed for fifteen weeks because nothing watches this workflow — see
+> the scope note above: the health check that would have opened an issue was
+> descoped, and the collect script's docstring claimed one existed. A red run in
+> the Actions tab is the only signal, and nobody reads the Actions tab of a
+> weekly cron.
+
 ### File schema
 
 ```json

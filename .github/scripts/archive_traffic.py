@@ -14,8 +14,12 @@ automatically by GitHub Actions). The default workflow token works because the
 workflow grants `administration: read`, which the Traffic API requires.
 
 Failure mode: any API error raises and the process exits non-zero, so the run
-shows red in the Actions tab (the Cowork health check then alerts on the missing
-file). No-data weeks still write the file — its existence is the success signal.
+shows red in the Actions tab. **Nothing else watches it** — the health check that
+this docstring used to promise was descoped before the workflow shipped (see
+growth/README.md), and that gap is why a broken publish step went unnoticed from
+2026-W26 to 2026-W41 while this script kept succeeding every week. If you are
+relying on this archive, check the branch rather than assuming a green pipeline.
+No-data weeks still write the file — its existence is the success signal.
 """
 from __future__ import annotations
 

@@ -56,15 +56,60 @@ jobs:
           GH_REPO: ${{ github.repository }}
           WEEK: ${{ steps.archive.outputs.iso_week }}
         run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git"
           tmp="$(mktemp -d)"
-          git clone --quiet --depth 1 --branch traffic-data \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" "$tmp"
+
+          # Create traffic-data if it is missing rather than dying on it. The
+          # branch disappeared once (deleted, or never recreated after a repo
+          # operation) and every weekly run from 2026-W26 to 2026-W41 then
+          # failed on `fatal: Remote branch traffic-data not found`, AFTER the
+          # collect step had succeeded. Fifteen weeks of snapshots were
+          # gathered and thrown away; the Traffic API retains only 14 days, so
+          # every week before the current window is gone for good. A missing
+          # branch is a recoverable state, so recover from it: the archive's
+          # whole purpose is to outlive that 14-day window, and a publisher
+          # that cannot create its own destination defeats it on the one day
+          # it matters.
+          #
+          # Distinguish "no such branch" from "could not ask". `ls-remote
+          # --exit-code` returns 2 for no matching ref and 128 for a transport
+          # or auth failure, so swallowing every non-zero status would let a
+          # momentary network blip start a fresh local history against a branch
+          # that already exists -- the push then fails as a non-fast-forward,
+          # and the run looks like the very bug this step fixes. Only 2 means
+          # create; anything else re-raises with git's own message.
+          set +e
+          git ls-remote --exit-code --heads "$remote" traffic-data >/dev/null
+          ls_status=$?
+          set -e
+          if [ "$ls_status" -eq 0 ]; then
+            git clone --quiet --depth 1 --branch traffic-data "$remote" "$tmp"
+          elif [ "$ls_status" -ne 2 ]; then
+            echo "error: could not reach ${GH_REPO} to check for traffic-data" \
+                 "(git ls-remote exit ${ls_status}). Refusing to guess that the" \
+                 "branch is missing." >&2
+            git ls-remote --heads "$remote" traffic-data >/dev/null
+            exit "$ls_status"
+          else
+            echo "traffic-data does not exist on ${GH_REPO} — creating it."
+            git -C "$tmp" init --quiet --initial-branch=traffic-data
+            git -C "$tmp" remote add origin "$remote"
+            printf '%s\n' \
+              '# traffic-data' '' \
+              'Data-only orphan branch. Weekly GitHub Traffic API snapshots live under' \
+              '`traffic/<ISO-year>-W<week>.json`, written by .github/workflows/traffic-archive.yml' \
+              'on main. Nothing here is source; do not merge this branch into main.' \
+              > "$tmp/README.md"
+            git -C "$tmp" add README.md
+          fi
+
           mkdir -p "$tmp/traffic"
           cp "traffic/${WEEK}.json" "$tmp/traffic/${WEEK}.json"
           git -C "$tmp" config user.name  "github-actions[bot]"
           git -C "$tmp" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C "$tmp" add traffic/
-          if git -C "$tmp" diff --cached --quiet; then
+          if git -C "$tmp" diff --cached --quiet && git -C "$tmp" rev-parse HEAD >/dev/null 2>&1; then
             echo "No changes — archive already current for ${WEEK}."
             exit 0
           fi
