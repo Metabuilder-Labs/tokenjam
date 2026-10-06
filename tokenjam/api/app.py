@@ -148,7 +148,16 @@ def create_app(
             return _ui_cache["html"]
         if mtime_ns != _ui_cache["mtime_ns"]:
             try:
-                _ui_cache["html"] = index_path.read_text()
+                # encoding= is load-bearing, not house style. index.html holds
+                # ~3KB of non-ASCII, and read_text() without it uses the LOCALE
+                # default, so under LC_ALL=C (a bare container, a systemd unit
+                # with no locale) the read raises UnicodeDecodeError. Before the
+                # cache existed that was a loud crash at create_app() naming the
+                # file; the except below would now swallow it and serve the empty
+                # initial cache, i.e. HTTP 200 with a zero-length body — a blank
+                # dashboard with nothing in the console, which is the failure
+                # Critical Rule 50 exists for.
+                _ui_cache["html"] = index_path.read_text(encoding="utf-8")
                 _ui_cache["mtime_ns"] = mtime_ns
             except (OSError, UnicodeDecodeError):
                 # Caught mid-write or saved with invalid bytes. Keep serving the
