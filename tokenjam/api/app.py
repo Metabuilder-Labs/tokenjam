@@ -132,13 +132,44 @@ def create_app(
     app.include_router(otlp_router)  # /v1/traces, /v1/metrics, /v1/logs — no prefix
 
     # --- Web UI ---
-    _index_html = ""
+    # index.html is cached in memory, but re-read whenever its mtime changes so
+    # editing the file against a running `tj serve` shows up on the next reload
+    # (no restart, no phantom "browser cache" debugging). One stat() per request
+    # is negligible for a single-file SPA. The token <meta> injection below runs
+    # on every response, so it applies to the re-read HTML too.
     index_path = _UI_DIR / "index.html"
-    if index_path.exists():
-        _index_html = index_path.read_text()
+    _ui_cache: dict[str, Any] = {"html": "", "mtime_ns": None}
+
+    def _load_index_html() -> str:
+        try:
+            mtime_ns = index_path.stat().st_mtime_ns
+        except OSError:
+            # File missing/unreadable: keep serving whatever we last had.
+            return _ui_cache["html"]
+        if mtime_ns != _ui_cache["mtime_ns"]:
+            try:
+                # encoding= is load-bearing, not house style. index.html holds
+                # ~3KB of non-ASCII, and read_text() without it uses the LOCALE
+                # default, so under LC_ALL=C (a bare container, a systemd unit
+                # with no locale) the read raises UnicodeDecodeError. Before the
+                # cache existed that was a loud crash at create_app() naming the
+                # file; the except below would now swallow it and serve the empty
+                # initial cache, i.e. HTTP 200 with a zero-length body — a blank
+                # dashboard with nothing in the console, which is the failure
+                # Critical Rule 50 exists for.
+                _ui_cache["html"] = index_path.read_text(encoding="utf-8")
+                _ui_cache["mtime_ns"] = mtime_ns
+            except (OSError, UnicodeDecodeError):
+                # Caught mid-write or saved with invalid bytes. Keep serving the
+                # last good copy and leave the cached mtime alone so the next
+                # request retries.
+                pass
+        return _ui_cache["html"]
+
+    _load_index_html()  # warm the cache at startup
 
     def _serve_ui() -> HTMLResponse:
-        html = _index_html
+        html = _load_index_html()
         if config.api.auth.enabled and config.api.auth.api_key:
             html = html.replace(
                 "</head>",

@@ -28,8 +28,11 @@ the sidebar wordmark, and the OpenAPI title, but never in module names, route pa
 Screens: **Overview** (the default landing route — a triage front door), Status, Traces, Cost,
 Alerts, Drift, Optimize (with **Summarize** and **Rules** sub-views), Budget.
 
-`app.py` reads `index.html` into a module string once at `create_app()` time, so editing it requires
-a `tj serve` restart to take effect; tests read the file from disk directly and aren't affected.
+`app.py` caches `index.html` in memory but re-reads it whenever the file's mtime changes (one `stat()` per
+request), so edits show up on the next page reload against a running `tj serve` — no restart needed. The
+`tj-api-key` / `tj-write-token` `<meta>` injection runs on every response, so it applies to the re-read HTML
+too. Changes to `ui/vendor/*` are plain `StaticFiles` and were never cached by the app. Tests read the file
+from disk directly and aren't affected.
 
 - **Offline-first (Critical Rule 18, `.claude/rules/web-ui.md`):** every JS/CSS dep is vendored under `vendor/` — Preact + hooks + htm (ESM via `<script type="importmap">`) and **uPlot** (vendored IIFE global `uPlot` + CSS, pinned in `docs/internal/lens-vendor-versions.md`). No render-time external HTTP. `tests/unit/test_ui_offline.py` enforces this; clickable `<a href>` links are the only allowed external URLs.
 - **Single compute path:** the UI reads everything from the REST API and **never re-implements analysis, aggregation, or plan-tier framing in JS** — it consumes the `framing` block (see `core/framing.py`). If the UI needs a number, extend the endpoint; don't compute it client-side. This applies to gating/filter sets too, not just numbers: if a Python-side map decides which analyzers/findings apply to a persona (e.g. `core/optimize/runner.py`'s `PERSONA_DISABLED_ANALYZERS`), the API already publishes the resolved set (`persona_disabled_analyzers` on `/optimize`) — read that field everywhere the gate is needed, never re-declare the map as a second JS literal. Two call sites deriving the same set from two different sources will silently desync the moment either side edits its copy.
