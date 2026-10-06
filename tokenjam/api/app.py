@@ -132,13 +132,32 @@ def create_app(
     app.include_router(otlp_router)  # /v1/traces, /v1/metrics, /v1/logs — no prefix
 
     # --- Web UI ---
-    _index_html = ""
+    # index.html is cached in memory, but re-read whenever its mtime changes so
+    # editing the file against a running `tj serve` shows up on the next reload
+    # (no restart, no phantom "browser cache" debugging). One stat() per request
+    # is negligible for a single-file SPA. The token <meta> injection below runs
+    # on every response, so it applies to the re-read HTML too.
     index_path = _UI_DIR / "index.html"
-    if index_path.exists():
-        _index_html = index_path.read_text()
+    _ui_cache: dict[str, Any] = {"html": "", "mtime_ns": None}
+
+    def _load_index_html() -> str:
+        try:
+            mtime_ns = index_path.stat().st_mtime_ns
+        except OSError:
+            # File missing/unreadable: keep serving whatever we last had.
+            return _ui_cache["html"]
+        if mtime_ns != _ui_cache["mtime_ns"]:
+            try:
+                _ui_cache["html"] = index_path.read_text()
+                _ui_cache["mtime_ns"] = mtime_ns
+            except OSError:
+                pass  # e.g. caught mid-write; retry on the next request
+        return _ui_cache["html"]
+
+    _load_index_html()  # warm the cache at startup
 
     def _serve_ui() -> HTMLResponse:
-        html = _index_html
+        html = _load_index_html()
         if config.api.auth.enabled and config.api.auth.api_key:
             html = html.replace(
                 "</head>",
