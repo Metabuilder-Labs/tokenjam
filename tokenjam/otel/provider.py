@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 
 import logging
 from datetime import datetime, timezone
@@ -277,7 +278,7 @@ def _build_tj_resource() -> Resource:
     """
     import tokenjam
 
-    resource = Resource.create({"service.name": "tokenjam"})
+    resource = Resource.create({"service.name": os.environ.get("OTEL_SERVICE_NAME", "tokenjam")})
     if ResourceAttributes.SERVICE_VERSION not in resource.attributes:
         # Bare Resource(), NOT Resource.create(): .create() unconditionally
         # defaults a missing service.name to "unknown_service" on ANY resource
