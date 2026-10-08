@@ -43,3 +43,104 @@ def test_no_authorization_header_when_secret_missing(empty_secret) -> None:
     assert "Authorization" not in exporter._headers
     assert all(not v.startswith("Bearer ") for v in exporter._headers.values())
     assert exporter._headers.get("Content-Type") == "application/json"
+
+
+# ---------------------------------------------------------------------------
+# service.name derivation from gen_ai.agent.id (PR: fix http_exporter)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch, MagicMock
+from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
+from opentelemetry.sdk.resources import Resource
+from tokenjam.otel.semconv import GenAIAttributes
+
+
+def _make_span(agent_id: str | None = None) -> ReadableSpan:
+    """Build a minimal ended ReadableSpan with optional gen_ai.agent.id."""
+    provider = TracerProvider(resource=Resource.create({}))
+    tracer = provider.get_tracer("test")
+    attrs = {}
+    if agent_id is not None:
+        attrs[GenAIAttributes.AGENT_ID] = agent_id
+    span = tracer.start_span("gen_ai.llm.call", attributes=attrs)
+    span.end()
+    return span  # type: ignore[return-value]
+
+
+def test_export_uses_agent_id_as_service_name() -> None:
+    """gen_ai.agent.id on the span becomes service.name on the wire."""
+    exporter = TjHttpExporter(ENDPOINT, "secret")
+    captured: list[dict] = []
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.append(json)
+        resp = MagicMock()
+        resp.status_code = 200
+        return resp
+
+    with patch("tokenjam.sdk.http_exporter.httpx.post", side_effect=fake_post):
+        exporter.export([_make_span(agent_id="my-agent")])
+
+    assert len(captured) == 1
+    resource_spans = captured[0]["resourceSpans"]
+    assert len(resource_spans) == 1
+    attrs = {a["key"]: a["value"]["stringValue"]
+             for a in resource_spans[0]["resource"]["attributes"]}
+    assert attrs["service.name"] == "my-agent"
+
+
+def test_export_falls_back_to_tokenjam_when_no_agent_id() -> None:
+    """Spans without gen_ai.agent.id fall back to service.name=tokenjam."""
+    exporter = TjHttpExporter(ENDPOINT, "secret")
+    captured: list[dict] = []
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.append(json)
+        resp = MagicMock()
+        resp.status_code = 200
+        return resp
+
+    with patch("tokenjam.sdk.http_exporter.httpx.post", side_effect=fake_post):
+        exporter.export([_make_span(agent_id=None)])
+
+    resource_spans = captured[0]["resourceSpans"]
+    attrs = {a["key"]: a["value"]["stringValue"]
+             for a in resource_spans[0]["resource"]["attributes"]}
+    assert attrs["service.name"] == "tokenjam"
+
+
+def test_export_groups_spans_by_agent_id() -> None:
+    """Spans from different agents are sent in separate resourceSpans entries."""
+    exporter = TjHttpExporter(ENDPOINT, "secret")
+    captured: list[dict] = []
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.append(json)
+        resp = MagicMock()
+        resp.status_code = 200
+        return resp
+
+    spans = [
+        _make_span(agent_id="agent-a"),
+        _make_span(agent_id="agent-b"),
+        _make_span(agent_id="agent-a"),
+    ]
+
+    with patch("tokenjam.sdk.http_exporter.httpx.post", side_effect=fake_post):
+        exporter.export(spans)
+
+    resource_spans = captured[0]["resourceSpans"]
+    service_names = {
+        next(a["value"]["stringValue"] for a in rs["resource"]["attributes"]
+             if a["key"] == "service.name")
+        for rs in resource_spans
+    }
+    assert service_names == {"agent-a", "agent-b"}
+    # agent-a has 2 spans, agent-b has 1
+    counts = {
+        next(a["value"]["stringValue"] for a in rs["resource"]["attributes"]
+             if a["key"] == "service.name"): len(rs["scopeSpans"][0]["spans"])
+        for rs in resource_spans
+    }
+    assert counts["agent-a"] == 2
+    assert counts["agent-b"] == 1

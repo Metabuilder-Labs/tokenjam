@@ -39,15 +39,22 @@ class TjHttpExporter(SpanExporter):
         self.dropped_auth_failures = 0
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        otlp_spans = [_span_to_otlp(s) for s in spans]
-        payload = {
-            "resourceSpans": [{
+        otlp_spans_by_agent: dict[str, list] = {}
+        for span in spans:
+            attrs = span.attributes or {}
+            agent_id = str(attrs.get("gen_ai.agent.id") or "tokenjam")
+            otlp_spans_by_agent.setdefault(agent_id, []).append(_span_to_otlp(span))
+
+        resource_spans = []
+        for agent_id, otlp_spans in otlp_spans_by_agent.items():
+            resource_spans.append({
                 "resource": {"attributes": [
-                    {"key": "service.name", "value": {"stringValue": "tokenjam"}},
+                    {"key": "service.name", "value": {"stringValue": agent_id}},
                 ]},
                 "scopeSpans": [{"spans": otlp_spans}],
-            }],
-        }
+            })
+
+        payload = {"resourceSpans": resource_spans}
         try:
             resp = httpx.post(
                 self._endpoint, json=payload, headers=self._headers, timeout=5.0,

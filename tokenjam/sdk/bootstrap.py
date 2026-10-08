@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import threading
 
 
@@ -112,7 +113,7 @@ def _try_http_mode(config) -> bool:
     exporter = TjHttpExporter(endpoint, config.security.ingest_secret)
 
     resource = Resource.create({
-        "service.name": "tokenjam",
+        "service.name": os.environ.get("OTEL_SERVICE_NAME", "tokenjam"),
         "service.version": tokenjam.__version__,
     })
     provider = TracerProvider(resource=resource)
