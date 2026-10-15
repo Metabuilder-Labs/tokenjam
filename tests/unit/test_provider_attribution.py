@@ -9,11 +9,26 @@ ReadableSpan carrying the given resource/span attrs and assert what
 """
 from __future__ import annotations
 
+import pytest
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 
 from tokenjam.otel.provider import _build_tj_resource, convert_otel_span
 from tokenjam.otel.semconv import GenAIAttributes, ResourceAttributes, TjAttributes
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_otel_service_name(monkeypatch):
+    """Clear the service-name env vars for every test in this module.
+
+    `_build_tj_resource` now lets the OTel detector resolve `service.name`
+    from OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES (issue #781), so any
+    assertion about the undeclared case would otherwise depend on the
+    developer's shell. Clearing by default means a test opts IN to an env
+    var to be affected by one, rather than opting out to be safe.
+    """
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
 
 
 def _span_with_attrs(resource_attrs: dict, span_attrs: dict | None = None) -> object:
@@ -96,5 +111,43 @@ class TestBuildTjResource:
         resource = _build_tj_resource()
         assert resource.attributes[ResourceAttributes.SERVICE_VERSION] == "9.9.9"
         assert resource.attributes[ResourceAttributes.DEPLOYMENT_ENVIRONMENT_NAME] == "production"
-        # service.name stays tokenjam's own — that identity isn't overridden.
+        # This env string declares no service.name, so tj's own default stands.
+        # (A declared service.name DOES win — see the env tests below.)
         assert resource.attributes["service.name"] == "tokenjam"
+
+
+# ---------------------------------------------------------------------------
+# Standard OTel service-name env vars (issue #781)
+# ---------------------------------------------------------------------------
+
+def test_otel_service_name_env_is_honoured(monkeypatch) -> None:
+    """The documented variable names the service.
+
+    `_build_tj_resource` used to pass "service.name" in the explicit dict,
+    which overrides whatever `Resource.create()` detected — so this variable
+    did nothing at all.
+    """
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "my-agent")
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+    assert _build_tj_resource().attributes["service.name"] == "my-agent"
+
+
+def test_otel_resource_attributes_service_name_is_honoured(monkeypatch) -> None:
+    """The other standard spelling, which reading one variable by hand misses."""
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=my-agent")
+    assert _build_tj_resource().attributes["service.name"] == "my-agent"
+
+
+def test_otel_service_name_wins_over_resource_attributes(monkeypatch) -> None:
+    """Spec precedence, which `os.environ.get` on one variable cannot express."""
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "from-name")
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=from-attrs")
+    assert _build_tj_resource().attributes["service.name"] == "from-name"
+
+
+def test_defaults_to_tokenjam_when_nothing_is_declared(monkeypatch) -> None:
+    """No declaration means tj names itself, never OTel's unknown_service."""
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+    assert _build_tj_resource().attributes["service.name"] == "tokenjam"
