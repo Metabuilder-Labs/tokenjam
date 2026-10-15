@@ -13,8 +13,13 @@ Contract enforced here:
 """
 from __future__ import annotations
 
-import pytest
+from unittest.mock import MagicMock, patch
 
+import pytest
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+
+from tokenjam.otel.semconv import GenAIAttributes
 from tokenjam.sdk.http_exporter import TjHttpExporter
 
 ENDPOINT = "http://127.0.0.1:7391/api/v1/spans"
@@ -49,10 +54,22 @@ def test_no_authorization_header_when_secret_missing(empty_secret) -> None:
 # service.name derivation from gen_ai.agent.id (PR: fix http_exporter)
 # ---------------------------------------------------------------------------
 
-from unittest.mock import patch, MagicMock
-from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
-from opentelemetry.sdk.resources import Resource
-from tokenjam.otel.semconv import GenAIAttributes
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_otel_service_name(monkeypatch):
+    """Clear the service-name env vars for every test in this module.
+
+    `_build_tj_resource` and `Resource.create()` now let the OTel detector
+    resolve `service.name` from OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES
+    (issue #781), which makes any assertion about the undeclared case depend
+    on the developer's shell. Clearing by default means a test has to opt IN
+    to an env var to be affected by one, rather than opting out to be safe.
+    """
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+
+
 
 
 def _make_span(agent_id: str | None = None, service_name: str | None = None) -> ReadableSpan:
@@ -124,8 +141,17 @@ def test_export_uses_the_declared_service_name_when_no_agent_id() -> None:
     assert _sent_service_name(_make_span(agent_id=None, service_name="my-agent")) == "my-agent"
 
 
-def test_export_falls_back_to_tokenjam_when_nothing_is_declared() -> None:
-    """With no agent id AND no declared service name, tj names itself."""
+def test_export_falls_back_to_tokenjam_when_nothing_is_declared(monkeypatch) -> None:
+    """With no agent id AND no declared service name, tj names itself.
+
+    The env must be cleared explicitly: `_make_span()` builds its resource
+    with `Resource.create({})`, which reads OTEL_SERVICE_NAME and
+    OTEL_RESOURCE_ATTRIBUTES from the ambient environment. A developer who
+    exports either one would otherwise see this fail, and the failure would
+    be the test reading their shell rather than the code being wrong.
+    """
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
     assert _sent_service_name(_make_span(agent_id=None)) == "tokenjam"
 
 
