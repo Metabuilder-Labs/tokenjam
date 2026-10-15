@@ -98,3 +98,40 @@ class TestBuildTjResource:
         assert resource.attributes[ResourceAttributes.DEPLOYMENT_ENVIRONMENT_NAME] == "production"
         # service.name stays tokenjam's own — that identity isn't overridden.
         assert resource.attributes["service.name"] == "tokenjam"
+
+
+# ---------------------------------------------------------------------------
+# Standard OTel service-name env vars (issue #781)
+# ---------------------------------------------------------------------------
+
+def test_otel_service_name_env_is_honoured(monkeypatch) -> None:
+    """The documented variable names the service.
+
+    `_build_tj_resource` used to pass "service.name" in the explicit dict,
+    which overrides whatever `Resource.create()` detected — so this variable
+    did nothing at all.
+    """
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "my-agent")
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+    assert _build_tj_resource().attributes["service.name"] == "my-agent"
+
+
+def test_otel_resource_attributes_service_name_is_honoured(monkeypatch) -> None:
+    """The other standard spelling, which reading one variable by hand misses."""
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=my-agent")
+    assert _build_tj_resource().attributes["service.name"] == "my-agent"
+
+
+def test_otel_service_name_wins_over_resource_attributes(monkeypatch) -> None:
+    """Spec precedence, which `os.environ.get` on one variable cannot express."""
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "from-name")
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=from-attrs")
+    assert _build_tj_resource().attributes["service.name"] == "from-name"
+
+
+def test_defaults_to_tokenjam_when_nothing_is_declared(monkeypatch) -> None:
+    """No declaration means tj names itself, never OTel's unknown_service."""
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+    assert _build_tj_resource().attributes["service.name"] == "tokenjam"

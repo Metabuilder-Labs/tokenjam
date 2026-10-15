@@ -55,9 +55,11 @@ from opentelemetry.sdk.resources import Resource
 from tokenjam.otel.semconv import GenAIAttributes
 
 
-def _make_span(agent_id: str | None = None) -> ReadableSpan:
-    """Build a minimal ended ReadableSpan with optional gen_ai.agent.id."""
-    provider = TracerProvider(resource=Resource.create({}))
+def _make_span(agent_id: str | None = None, service_name: str | None = None) -> ReadableSpan:
+    """A minimal ended ReadableSpan, optionally carrying an agent id and/or a
+    declared service name on its resource."""
+    res = Resource.create({"service.name": service_name}) if service_name else Resource.create({})
+    provider = TracerProvider(resource=res)
     tracer = provider.get_tracer("test")
     attrs = {}
     if agent_id is not None:
@@ -89,8 +91,7 @@ def test_export_uses_agent_id_as_service_name() -> None:
     assert attrs["service.name"] == "my-agent"
 
 
-def test_export_falls_back_to_tokenjam_when_no_agent_id() -> None:
-    """Spans without gen_ai.agent.id fall back to service.name=tokenjam."""
+def _sent_service_name(span: ReadableSpan) -> str:
     exporter = TjHttpExporter(ENDPOINT, "secret")
     captured: list[dict] = []
 
@@ -101,12 +102,38 @@ def test_export_falls_back_to_tokenjam_when_no_agent_id() -> None:
         return resp
 
     with patch("tokenjam.sdk.http_exporter.httpx.post", side_effect=fake_post):
-        exporter.export([_make_span(agent_id=None)])
-
-    resource_spans = captured[0]["resourceSpans"]
+        exporter.export([span])
     attrs = {a["key"]: a["value"]["stringValue"]
-             for a in resource_spans[0]["resource"]["attributes"]}
-    assert attrs["service.name"] == "tokenjam"
+             for a in captured[0]["resourceSpans"][0]["resource"]["attributes"]}
+    return attrs["service.name"]
+
+
+def test_export_uses_the_declared_service_name_when_no_agent_id() -> None:
+    """The reported bug (issue #781), as a test.
+
+    `patch_anthropic()` with no `@watch()` above it produces spans with no
+    `gen_ai.agent.id`. Before the fix this fell straight to the literal
+    "tokenjam", so a service that had declared its own name — via
+    OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES, or an explicit Resource —
+    still reported as tokenjam no matter what it set.
+
+    This asserted "tokenjam" in its first form, which pinned the defect the PR
+    was opened to remove (Critical Rule 23: invert such an assertion, never
+    delete it). The case is worth keeping; the expected value was wrong.
+    """
+    assert _sent_service_name(_make_span(agent_id=None, service_name="my-agent")) == "my-agent"
+
+
+def test_export_falls_back_to_tokenjam_when_nothing_is_declared() -> None:
+    """With no agent id AND no declared service name, tj names itself."""
+    assert _sent_service_name(_make_span(agent_id=None)) == "tokenjam"
+
+
+def test_agent_id_wins_over_a_declared_service_name() -> None:
+    """A span that names its own agent is not overridden by the resource."""
+    assert _sent_service_name(
+        _make_span(agent_id="from-watch", service_name="from-env")
+    ) == "from-watch"
 
 
 def test_export_groups_spans_by_agent_id() -> None:
