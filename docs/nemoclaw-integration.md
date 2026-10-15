@@ -22,7 +22,7 @@ The NemoClaw observer listens on the OpenShell Gateway WebSocket for sandbox enf
 | Syscall denied | `syscall_denied` | critical |
 | Inference rerouted | `inference_rerouted` | warning |
 
-These alerts flow through the standard alert pipeline — cooldown, dispatch to configured channels (ntfy, Discord, Telegram, webhook), and persistence to the database.
+These alerts flow through the standard alert pipeline — cooldown, dispatch to configured channels (ntfy, Mast, Discord, Telegram, webhook), and persistence to the database.
 
 ## Configuration
 
