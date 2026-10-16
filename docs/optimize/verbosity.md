@@ -84,10 +84,11 @@ surfaced in every render mode:
 
 ## Remedy — surfaced, not applied
 
-The finding carries a terse system-prompt snippet and a suggested `max_tokens`
-cap (the cohort baseline). Both are advisory strings — you apply them and
-measure the result. Enforcing a brevity policy fleet-wide is a Cloud concern,
+The finding points directly to capping the flagged agent via `[agents.<agent_id>] max_output_tokens`
+near the cohort baseline `suggested_max_tokens`. Both are advisory — you apply them and
+measure the result with `tj optimize --validate`. Enforcing a brevity policy fleet-wide is a Cloud concern,
 not something the OSS analyzer does.
+
 
 ## See also
 

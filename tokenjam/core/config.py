@@ -69,6 +69,8 @@ class AgentConfig:
     # string substitution in a clean git repo); with no source_path a downsize
     # card stays advise-only and just prints the one-paste fix.
     source_path:      str | None           = None
+    # Maximum output tokens cap for this agent (verbosity remedy lever, #576).
+    max_output_tokens: int | None          = None
 
 
 @dataclass
@@ -837,6 +839,10 @@ def _parse(raw: dict) -> TjConfig:
             SensitiveAction(**sa) for sa in agent_raw.get("sensitive_actions", [])
         ]
         drift = DriftConfig(**agent_raw.get("drift", {}))
+        max_output_raw = agent_raw.get("max_output_tokens")
+        max_output_tokens = (
+            int(max_output_raw) if max_output_raw is not None else None
+        )
         agents[agent_id] = AgentConfig(
             description=agent_raw.get("description", ""),
             budget=budget,
@@ -845,6 +851,7 @@ def _parse(raw: dict) -> TjConfig:
             drift=drift,
             project=agent_raw.get("project"),
             source_path=agent_raw.get("source_path"),
+            max_output_tokens=max_output_tokens,
         )
 
     storage_raw = raw.get("storage", {})
