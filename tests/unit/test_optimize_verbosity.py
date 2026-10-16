@@ -343,11 +343,13 @@ def test_remedy_names_agent_id_and_max_output_tokens_config_key(capsys):
         "Remedy line must not use generic 'add a terse system-prompt line and/or a max_tokens cap'"
     )
 
-    # Must name the concrete agent and config key
+    # Must name the concrete agent and config key, point to application code, and measure with tj optimize verbosity
     assert "code-reviewer" in out, "Remedy output must name the concrete agent_id"
     assert "max_output_tokens" in out, (
         "Remedy output must reference the config key 'max_output_tokens'"
     )
+    assert "application code" in out, "Remedy output must reference application code"
+    assert "tj optimize verbosity" in out, "Remedy must tell user to measure with tj optimize verbosity"
 
 
 def test_remedy_names_fallback_when_agent_id_is_none(capsys):
@@ -384,5 +386,40 @@ def test_remedy_names_fallback_when_agent_id_is_none(capsys):
     assert "add a terse system-prompt line and/or a max_tokens cap" not in out
     assert "[agents.<agent_id>]" in out
     assert "max_output_tokens" in out
+    assert "application code" in out
+    assert "tj optimize verbosity" in out
+
+
+def test_analyzer_respects_agent_max_output_tokens(db):
+    """When an agent config declares max_output_tokens, the verbosity analyzer
+    uses that as the baseline limit rather than flagging against median alone."""
+    from tokenjam.core.config import AgentConfig, TjConfig
+    cfg = TjConfig(
+        version="1",
+        agents={"code-reviewer": AgentConfig(max_output_tokens=150)},
+    )
+    for i in range(MIN_COHORT_SESSIONS):
+        _seed_session(db, f"base-{i}", output_tokens=300, i=i)
+
+    # Session for code-reviewer with 450 output tokens:
+    sess = make_session(session_id="agent-verbose", plan_tier="api", duration_seconds=30.0)
+    db.upsert_session(sess)
+    llm = make_llm_span(
+        agent_id="code-reviewer", model="claude-haiku-4-5",
+        input_tokens=100, output_tokens=450,
+    )
+    llm.session_id = "agent-verbose"
+    llm.start_time = BASE + timedelta(minutes=60)
+    db.insert_span(llm)
+    tool = make_tool_span(tool_name="bash")
+    tool.session_id = "agent-verbose"
+    tool.start_time = BASE + timedelta(minutes=60, seconds=1)
+    tool.attributes = {GenAIAttributes.TOOL_INPUT: {"command": "git pull"}}
+    db.insert_span(tool)
+
+    finding = _run(db, config=cfg)
+    assert any(c.session_id == "agent-verbose" for c in finding.candidates)
+    c = next(c for c in finding.candidates if c.session_id == "agent-verbose")
+    assert c.baseline_output_tokens == 150
 
 

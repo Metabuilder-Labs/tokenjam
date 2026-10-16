@@ -2959,21 +2959,22 @@ def _render_verbosity(
             dict.fromkeys(c.agent_id for c in finding.candidates if c.agent_id)
         )
         if flagged_agents:
-            agent_ref = " / ".join(
-                f"[bold]{_rich_escape(f'[agents.{a}]')}[/bold]" for a in flagged_agents
+            agent_refs = " / ".join(
+                f"agent [bold]{_rich_escape(a)}[/bold] (or [bold]{_rich_escape(f'[agents.{a}]')}[/bold] [bold]max_output_tokens[/bold])"
+                for a in flagged_agents
             )
             console.print(
-                f"     [dim]Remedy to review (not applied): set "
-                f"[bold]max_output_tokens[/bold] near ~{format_tokens(finding.suggested_max_tokens)} "
-                f"under {agent_ref}, then measure with "
-                f"[bold]tj optimize --validate[/bold].[/dim]"
+                f"     [dim]Remedy to review (not applied): cap "
+                f"[bold]max_tokens[/bold] near ~{format_tokens(finding.suggested_max_tokens)} "
+                f"in {agent_refs} application code, then measure with "
+                f"[bold]tj optimize verbosity[/bold].[/dim]"
             )
         else:
             console.print(
-                f"     [dim]Remedy to review (not applied): set "
-                f"[bold]max_output_tokens[/bold] near ~{format_tokens(finding.suggested_max_tokens)} "
-                f"under [bold]{_rich_escape('[agents.<agent_id>]')}[/bold], then measure with "
-                f"[bold]tj optimize --validate[/bold].[/dim]"
+                f"     [dim]Remedy to review (not applied): cap "
+                f"[bold]max_tokens[/bold] near ~{format_tokens(finding.suggested_max_tokens)} "
+                f"in agent application code (or [bold]{_rich_escape('[agents.<agent_id>]')}[/bold] [bold]max_output_tokens[/bold]), "
+                f"then measure with [bold]tj optimize verbosity[/bold].[/dim]"
             )
 
 
