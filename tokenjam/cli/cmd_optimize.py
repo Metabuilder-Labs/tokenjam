@@ -672,6 +672,8 @@ def _refresh_shipped_via_daemon(db: Any, *, since: str, agent_id: str | None) ->
         payload = db.fetch_shipped(since=since, agent_id=agent_id)
     except Exception:  # noqa: BLE001 - the stored finding is still a valid answer
         return None
+    if not isinstance(payload, dict):
+        return None
     for key in ("since", "window_start", "window_end", "framing"):
         payload.pop(key, None)
     return payload
