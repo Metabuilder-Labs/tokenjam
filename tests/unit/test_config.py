@@ -279,6 +279,7 @@ class TestSerialise:
                     description="A test agent",
                     budget=BudgetConfig(daily_usd=5.0),
                     sensitive_actions=[SensitiveAction(name="rm_rf", severity="critical")],
+                    max_output_tokens=1500,
                 )
             },
             security=SecurityConfig(ingest_secret="secret123"),
@@ -291,6 +292,7 @@ class TestSerialise:
         assert restored.agents["test"].description == "A test agent"
         assert restored.agents["test"].budget.daily_usd == 5.0
         assert restored.agents["test"].sensitive_actions[0].name == "rm_rf"
+        assert restored.agents["test"].max_output_tokens == 1500
         assert restored.security.ingest_secret == "secret123"
         assert restored.capture.prompts is True
 

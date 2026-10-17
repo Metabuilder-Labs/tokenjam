@@ -7994,7 +7994,9 @@ function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onP
         <div class="table-wrap"><table class="opt-table"><thead><tr><th>Session</th><th>Output</th><th>vs baseline</th><th>Recoverable</th></tr></thead>
           <tbody>${fd.candidates.map(c => html`<tr><td class="mono">${(c.session_id || '').slice(0, 8)}…</td><td>${fmtTokens(c.output_tokens)}</td><td>${fmtTokens(c.baseline_output_tokens)} median, ${c.over_baseline_multiple}×</td><td>${fmtFramedSavings(c.recoverable_usd, c.over_baseline_tokens, framing)}</td></tr>`)}</tbody></table></div>`
         : html`<div class="opt-line dim">${fd.sessions_examined === 0 ? 'No LLM spans in this window.' : `Examined ${fd.sessions_examined} session${fd.sessions_examined !== 1 ? 's' : ''} across ${fd.cohorts_examined} task-shape cohort${fd.cohorts_examined !== 1 ? 's' : ''}; no session's output ran high enough vs its cohort median to flag.`}</div>`;
-      inlineFix = fd.suggested_max_tokens ? html`<div class="opt-fix-empty">Remedy to review (not applied): a terse system-prompt line and/or a max_tokens cap near ~${fmtTokens(fd.suggested_max_tokens)}. tokenjam doesn't write this automatically — terser output is only a saving if the answer still holds.</div>` : null;
+      const flaggedAgents = Array.from(new Set((fd.candidates || []).map(c => c.agent_id).filter(Boolean)));
+      const agentRef = flaggedAgents.length ? flaggedAgents.map(a => `agent ${a} application code (or [agents.${a}] max_output_tokens)`).join(' / ') : 'agent application code (or [agents.<agent_id>] max_output_tokens)';
+      inlineFix = fd.suggested_max_tokens ? html`<div class="opt-fix-empty">Remedy to review (not applied): cap max_tokens near ~${fmtTokens(fd.suggested_max_tokens)} in ${agentRef}, then measure with tj optimize verbosity. tokenjam doesn't write this automatically — terser output is only a saving if the answer still holds.</div>` : null;
       caveatText = fd.caveat;
     } else if (name === 'deadweight') {
       // Plugin lane (Part D web parity): same three-state gating as the CLI

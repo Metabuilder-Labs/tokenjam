@@ -307,12 +307,23 @@ def run(ctx: AnalyzerContext) -> None:
         if median <= 0:
             continue
         cohorts_examined += 1
-        baselines.append(int(round(median)))
-        threshold = median * HIGH_VERBOSITY_MULTIPLE
         for m in members:
-            if m.output_tokens <= threshold:
+            # Check if agent has a declared max_output_tokens in AgentConfig (#576)
+            agent_cfg = (
+                ctx.config.agents.get(m.agent_id)
+                if (ctx.config and hasattr(ctx.config, "agents") and m.agent_id)
+                else None
+            )
+            cap_limit = (
+                agent_cfg.max_output_tokens
+                if (agent_cfg and agent_cfg.max_output_tokens is not None)
+                else None
+            )
+            effective_baseline = min(median, cap_limit) if cap_limit is not None else median
+            baselines.append(int(round(effective_baseline)))
+            if m.output_tokens <= (effective_baseline * HIGH_VERBOSITY_MULTIPLE):
                 continue
-            over = int(round(m.output_tokens - median))
+            over = int(round(m.output_tokens - effective_baseline))
             if over <= 0:
                 continue
             rates = rates_at(
@@ -334,9 +345,9 @@ def run(ctx: AnalyzerContext) -> None:
                 task_shape=_signature_repr(signature),
                 cohort_sessions=len(members),
                 output_tokens=m.output_tokens,
-                baseline_output_tokens=int(round(median)),
+                baseline_output_tokens=int(round(effective_baseline)),
                 over_baseline_tokens=over,
-                over_baseline_multiple=round(m.output_tokens / median, 2),
+                over_baseline_multiple=round(m.output_tokens / effective_baseline, 2),
                 # Weakest signal, descriptive only.
                 output_input_ratio=(
                     round(m.output_tokens / m.input_tokens, 2)
