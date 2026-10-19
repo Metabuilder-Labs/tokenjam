@@ -111,10 +111,15 @@ def _try_http_mode(config) -> bool:
     endpoint = f"{base_url}/api/v1/spans"
     exporter = TjHttpExporter(endpoint, config.security.ingest_secret)
 
-    resource = Resource.create({
-        "service.name": "tokenjam",
-        "service.version": tokenjam.__version__,
-    })
+    # Same shape as `otel/provider.py::_build_tj_resource`, and for the same
+    # reason: an explicit "service.name" in this dict overrides whatever the
+    # detector read from OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES, which is
+    # what made both variables inert on this path (issue #781).
+    from tokenjam.otel.provider import DEFAULT_SERVICE_NAME, is_unset_service_name
+
+    resource = Resource.create({"service.version": tokenjam.__version__})
+    if is_unset_service_name(resource.attributes.get("service.name")):
+        resource = resource.merge(Resource({"service.name": DEFAULT_SERVICE_NAME}))
     provider = TracerProvider(resource=resource)
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace_api.set_tracer_provider(provider)
