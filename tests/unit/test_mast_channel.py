@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from tokenjam.core.alerts import MastChannel, _build_channel
+from tokenjam.core.alerts import CooldownTracker, MastChannel, _build_channel
 from tokenjam.core.config import AlertChannelConfig
 from tokenjam.core.models import Alert, AlertType, Severity
 from tokenjam.utils.time_parse import utcnow
@@ -61,6 +61,7 @@ def _alert(
     agent_id: str | None = "my-agent",
     title: str = "Budget exceeded",
     alert_type: AlertType = AlertType.COST_BUDGET_DAILY,
+    session_id: str | None = None,
 ) -> Alert:
     return Alert(
         alert_id="al_1",
@@ -70,6 +71,7 @@ def _alert(
         title=title,
         detail=detail if detail is not None else {"message": "daily spend over limit"},
         agent_id=agent_id,
+        session_id=session_id,
     )
 
 
@@ -140,14 +142,73 @@ def test_send_posts_to_the_channel_url_with_title_and_body(fake_http):
     assert call["json"]["body"] == "daily spend over limit"
 
 
-def test_dedupe_key_folds_repeats_of_the_same_agent_and_type(fake_http):
-    _channel().send(_alert())
-    assert fake_http.calls[0]["json"]["key"] == "cost_budget_daily:my-agent"
+def _key(fake_http, **alert_args: Any) -> str:
+    _channel().send(_alert(**alert_args))
+    return fake_http.calls[-1]["json"]["key"]
 
 
-def test_dedupe_key_survives_an_alert_with_no_agent(fake_http):
-    _channel().send(_alert(agent_id=None))
-    assert fake_http.calls[0]["json"]["key"] == "cost_budget_daily:unknown"
+def test_repeats_of_the_same_alert_share_a_key(fake_http):
+    first = _key(fake_http)
+    assert first.startswith("cost_budget_daily:")
+    assert _key(fake_http) == first
+
+
+def test_an_alert_with_no_agent_still_gets_a_key(fake_http):
+    assert _key(fake_http, agent_id=None).startswith("cost_budget_daily:")
+
+
+def test_different_agents_get_different_keys(fake_http):
+    assert _key(fake_http, agent_id="a") != _key(fake_http, agent_id="b")
+
+
+def test_two_sessions_over_budget_get_two_cards(fake_http):
+    # Mast would fold the second into the first and only bump its counter,
+    # so the second session's alert would never show.
+    one = _key(fake_http, alert_type=AlertType.COST_BUDGET_SESSION, session_id="s1")
+    two = _key(fake_http, alert_type=AlertType.COST_BUDGET_SESSION, session_id="s2")
+    assert one != two
+
+
+def test_session_id_is_ignored_for_types_that_are_not_per_session(fake_http):
+    one = _key(fake_http, session_id="s1")
+    two = _key(fake_http, session_id="s2")
+    assert one == two
+
+
+def test_long_agent_ids_with_a_shared_prefix_dont_collide(fake_http):
+    prefix = "x" * 200
+    assert _key(fake_http, agent_id=prefix + "-a") != _key(fake_http, agent_id=prefix + "-b")
+
+
+def test_key_fits_in_mast_limit(fake_http):
+    longest = max(AlertType, key=lambda t: len(t.value))
+    key = _key(fake_http, agent_id="x" * 1000, alert_type=longest, session_id="y" * 1000)
+    assert len(key) <= 120
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ({}, {}),
+        ({}, {"agent_id": "other"}),
+        ({}, {"alert_type": AlertType.RETRY_LOOP}),
+        ({"session_id": "s1"}, {"session_id": "s2"}),
+        (
+            {"alert_type": AlertType.COST_BUDGET_SESSION, "session_id": "s1"},
+            {"alert_type": AlertType.COST_BUDGET_SESSION, "session_id": "s2"},
+        ),
+        (
+            {"alert_type": AlertType.SESSION_DURATION, "session_id": "s1"},
+            {"alert_type": AlertType.SESSION_DURATION, "session_id": "s1"},
+        ),
+    ],
+)
+def test_key_matches_what_the_cooldown_treats_as_the_same_alert(fake_http, first, second):
+    a, b = _alert(**first), _alert(**second)
+    tracker = CooldownTracker(cooldown_seconds=300)
+    tracker.record(a.agent_id, a.type, a.session_id)
+    same_for_cooldown = tracker.is_suppressed(b.agent_id, b.type, b.session_id)
+    assert (_key(fake_http, **first) == _key(fake_http, **second)) == same_for_cooldown
 
 
 def test_title_and_body_are_cut_to_mast_limits(fake_http):

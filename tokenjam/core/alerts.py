@@ -5,6 +5,7 @@ Called as a post-ingest hook by IngestPipeline.process().
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -56,6 +57,20 @@ _SESSION_SCOPED_ALERT_TYPES = frozenset({
     AlertType.COST_BUDGET_SESSION,
     AlertType.SESSION_DURATION,
 })
+
+
+def _alert_identity(
+    agent_id: str | None, alert_type: AlertType, session_id: str | None = None,
+) -> tuple[str, str, str]:
+    """What makes two alerts "the same one" for cooldown purposes.
+
+    Session-scoped types include the session id, so two sessions of one agent
+    that each go over their own budget are two alerts. Everything else is per
+    agent and type. MastChannel builds its dedupe key from this too.
+    """
+    scope = session_id if alert_type in _SESSION_SCOPED_ALERT_TYPES else ""
+    return (agent_id or "", alert_type.value, scope or "")
+
 
 # Row cap for the startup queries that rebuild CooldownTracker/_failure_rate_fired
 # from the alerts table (#592). Generous rather than exact: missing a stale row
@@ -213,9 +228,7 @@ class CooldownTracker:
     def is_suppressed(
         self, agent_id: str | None, alert_type: AlertType, session_id: str | None = None,
     ) -> bool:
-        scope = session_id if alert_type in _SESSION_SCOPED_ALERT_TYPES else ""
-        key = (agent_id or "", alert_type.value, scope or "")
-        last = self._last_fired.get(key)
+        last = self._last_fired.get(_alert_identity(agent_id, alert_type, session_id))
         if last is None:
             return False
         return (utcnow() - last).total_seconds() < self.cooldown_seconds
@@ -223,9 +236,7 @@ class CooldownTracker:
     def record(
         self, agent_id: str | None, alert_type: AlertType, session_id: str | None = None,
     ) -> None:
-        scope = session_id if alert_type in _SESSION_SCOPED_ALERT_TYPES else ""
-        key = (agent_id or "", alert_type.value, scope or "")
-        self._last_fired[key] = utcnow()
+        self._last_fired[_alert_identity(agent_id, alert_type, session_id)] = utcnow()
 
     def hydrate(self, alerts: list[Alert]) -> None:
         """Seed `_last_fired` from persisted, non-suppressed alert rows.
@@ -237,8 +248,7 @@ class CooldownTracker:
         for alert in alerts:
             if alert.suppressed:
                 continue
-            scope = alert.session_id if alert.type in _SESSION_SCOPED_ALERT_TYPES else ""
-            key = (alert.agent_id or "", alert.type.value, scope or "")
+            key = _alert_identity(alert.agent_id, alert.type, alert.session_id)
             existing = self._last_fired.get(key)
             if existing is None or alert.fired_at > existing:
                 self._last_fired[key] = alert.fired_at
@@ -998,11 +1008,7 @@ class MastChannel(AlertChannel):
             "title": alert.title[: self.TITLE_MAXLEN],
             "body": body[: self.BODY_MAXLEN],
             "priority": self.priority or _MAST_SEVERITY_PRIORITY.get(alert.severity, "normal"),
-            # Same agent+type pair the cooldown tracks. Mast folds repeats of
-            # a key into the card that's already on the phone, so when the
-            # cooldown lapses mid-incident we update that card instead of
-            # adding a second one.
-            "key": f"{alert.type.value}:{alert.agent_id or 'unknown'}"[:120],
+            "key": _mast_dedupe_key(alert),
         }
         with httpx.Client(timeout=5.0) as client:
             response = client.post(self.channel_url, json=payload)
@@ -1042,6 +1048,20 @@ def _mast_error_message(response: Any) -> str:
     if isinstance(error, dict):
         return str(error.get("message") or "")
     return ""
+
+
+def _mast_dedupe_key(alert: Alert) -> str:
+    """Dedupe key for a Mast send: the alert type, then a hash of its identity.
+
+    Mast folds a repeat of a key into the card already on the phone (it bumps
+    a counter and keeps the first card's text), so the key has to tell apart
+    exactly the alerts the cooldown tells apart. Hashed because agent ids can
+    be any length and Mast caps keys at 120 characters; cutting the string
+    instead would merge two long agent ids that share a prefix.
+    """
+    agent, kind, scope = _alert_identity(alert.agent_id, alert.type, alert.session_id)
+    digest = hashlib.sha256("\0".join((kind, agent, scope)).encode()).hexdigest()
+    return f"{kind}:{digest[:32]}"
 
 
 # Mast has a fourth priority, "page", that repeats until someone acks it and
