@@ -318,6 +318,13 @@ def _channel_summary(ch: AlertChannelConfig) -> str:
         parts.append("webhook_url=<set>")
     elif ch.type == "telegram" and ch.chat_id:
         parts.append(f"chat_id={ch.chat_id}")
+    elif ch.type == "mast":
+        if ch.priority:
+            parts.append(f"priority={ch.priority}")
+        if ch.channel_url:
+            # The URL contains the channel key, which is the whole
+            # credential, so don't print it.
+            parts.append("channel_url=<set>")
     return ", ".join(parts)
 
 

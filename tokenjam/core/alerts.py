@@ -5,6 +5,7 @@ Called as a post-ingest hook by IngestPipeline.process().
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -56,6 +57,20 @@ _SESSION_SCOPED_ALERT_TYPES = frozenset({
     AlertType.COST_BUDGET_SESSION,
     AlertType.SESSION_DURATION,
 })
+
+
+def _alert_identity(
+    agent_id: str | None, alert_type: AlertType, session_id: str | None = None,
+) -> tuple[str, str, str]:
+    """What makes two alerts "the same one" for cooldown purposes.
+
+    Session-scoped types include the session id, so two sessions of one agent
+    that each go over their own budget are two alerts. Everything else is per
+    agent and type. MastChannel builds its dedupe key from this too.
+    """
+    scope = session_id if alert_type in _SESSION_SCOPED_ALERT_TYPES else ""
+    return (agent_id or "", alert_type.value, scope or "")
+
 
 # Row cap for the startup queries that rebuild CooldownTracker/_failure_rate_fired
 # from the alerts table (#592). Generous rather than exact: missing a stale row
@@ -213,9 +228,7 @@ class CooldownTracker:
     def is_suppressed(
         self, agent_id: str | None, alert_type: AlertType, session_id: str | None = None,
     ) -> bool:
-        scope = session_id if alert_type in _SESSION_SCOPED_ALERT_TYPES else ""
-        key = (agent_id or "", alert_type.value, scope or "")
-        last = self._last_fired.get(key)
+        last = self._last_fired.get(_alert_identity(agent_id, alert_type, session_id))
         if last is None:
             return False
         return (utcnow() - last).total_seconds() < self.cooldown_seconds
@@ -223,9 +236,7 @@ class CooldownTracker:
     def record(
         self, agent_id: str | None, alert_type: AlertType, session_id: str | None = None,
     ) -> None:
-        scope = session_id if alert_type in _SESSION_SCOPED_ALERT_TYPES else ""
-        key = (agent_id or "", alert_type.value, scope or "")
-        self._last_fired[key] = utcnow()
+        self._last_fired[_alert_identity(agent_id, alert_type, session_id)] = utcnow()
 
     def hydrate(self, alerts: list[Alert]) -> None:
         """Seed `_last_fired` from persisted, non-suppressed alert rows.
@@ -237,8 +248,7 @@ class CooldownTracker:
         for alert in alerts:
             if alert.suppressed:
                 continue
-            scope = alert.session_id if alert.type in _SESSION_SCOPED_ALERT_TYPES else ""
-            key = (alert.agent_id or "", alert.type.value, scope or "")
+            key = _alert_identity(alert.agent_id, alert.type, alert.session_id)
             existing = self._last_fired.get(key)
             if existing is None or alert.fired_at > existing:
                 self._last_fired[key] = alert.fired_at
@@ -767,6 +777,8 @@ def _build_channel(
             return DiscordChannel(config, include_captured_content)
         case "telegram":
             return TelegramChannel(config, include_captured_content)
+        case "mast":
+            return MastChannel(config, include_captured_content)
         case _:
             raise ValueError(f"Unknown alert channel type: {config.type!r}")
 
@@ -966,9 +978,100 @@ class TelegramChannel(AlertChannel):
             client.post(url, json=payload)
 
 
+class MastChannel(AlertChannel):
+    """POST to a Mast channel URL, which pages a phone (https://tissue.systems/mast)."""
+
+    # Mast refuses a longer title or body with a 400 naming the field.
+    TITLE_MAXLEN = 250
+    BODY_MAXLEN = 4096
+
+    PRIORITIES = ("quiet", "normal", "loud", "page")
+
+    def __init__(self, config: AlertChannelConfig, include_captured_content: bool) -> None:
+        self.channel_url = config.channel_url or ""
+        # Checked here, like min_severity, so a typo fails at startup instead
+        # of as a 400 in the log the first time an alert fires.
+        if config.priority is not None and config.priority not in self.PRIORITIES:
+            raise ValueError(
+                f"Mast channel priority must be one of {', '.join(self.PRIORITIES)}, "
+                f"not {config.priority!r}"
+            )
+        self.priority = config.priority
+        self._include_captured_content = include_captured_content
+        self.min_severity = Severity(config.min_severity)
+
+    def send(self, alert: Alert) -> None:
+        if not self.channel_url:
+            return
+        body = _format_detail_text(alert, strip=not self._include_captured_content)
+        payload = {
+            "title": alert.title[: self.TITLE_MAXLEN],
+            "body": body[: self.BODY_MAXLEN],
+            "priority": self.priority or _MAST_SEVERITY_PRIORITY.get(alert.severity, "normal"),
+            "key": _mast_dedupe_key(alert),
+        }
+        with httpx.Client(timeout=5.0) as client:
+            response = client.post(self.channel_url, json=payload)
+        # 202 means stored. Log anything else, because nobody notices a
+        # pager that fails quietly, and include the error message from the
+        # body: it says what was actually wrong (rotated key, field over its
+        # limit, rate limit) where the status alone doesn't. A 5xx gets
+        # different wording since the message may have been stored before
+        # things went wrong, and retrying on the strength of the log could
+        # page someone twice.
+        if response.status_code in (200, 202):
+            return
+        detail = _mast_error_message(response)
+        if response.status_code >= 500:
+            logger.warning(
+                "Mast gave HTTP %s for alert %s; it may or may not have gone out%s",
+                response.status_code, alert.alert_id, f": {detail}" if detail else "",
+            )
+        else:
+            logger.warning(
+                "Mast rejected alert %s (HTTP %s%s)",
+                alert.alert_id, response.status_code, f": {detail}" if detail else "",
+            )
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 _SEVERITY_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
+
+def _mast_error_message(response: Any) -> str:
+    """Pull error.message out of a Mast error body. Empty string if there isn't one."""
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        return str(error.get("message") or "")
+    return ""
+
+
+def _mast_dedupe_key(alert: Alert) -> str:
+    """Dedupe key for a Mast send: the alert type, then a hash of its identity.
+
+    Mast folds a repeat of a key into the card already on the phone (it bumps
+    a counter and keeps the first card's text), so the key has to tell apart
+    exactly the alerts the cooldown tells apart. Hashed because agent ids can
+    be any length and Mast caps keys at 120 characters; cutting the string
+    instead would merge two long agent ids that share a prefix.
+    """
+    agent, kind, scope = _alert_identity(alert.agent_id, alert.type, alert.session_id)
+    digest = hashlib.sha256("\0".join((kind, agent, scope)).encode()).hexdigest()
+    return f"{kind}:{digest[:32]}"
+
+
+# Mast has a fourth priority, "page", that repeats until someone acks it and
+# ignores mute and quiet hours. Nothing maps to it; you have to ask for it
+# with priority= on the channel.
+_MAST_SEVERITY_PRIORITY = {
+    Severity.INFO:     "quiet",
+    Severity.WARNING:  "normal",
+    Severity.CRITICAL: "loud",
+}
 
 
 def _severity_rank(sev: Severity) -> int:
