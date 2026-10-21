@@ -39,15 +39,33 @@ class TjHttpExporter(SpanExporter):
         self.dropped_auth_failures = 0
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        otlp_spans = [_span_to_otlp(s) for s in spans]
-        payload = {
-            "resourceSpans": [{
+        # Identity, most specific first: the span's own agent id, then the
+        # service name on the resource its provider was built with, then tj's
+        # own name. Falling straight to a literal is what kept OTEL_SERVICE_NAME
+        # off the wire on this path even once the resource carried it
+        # (issue #781): the name was resolved and nothing here read it.
+        from tokenjam.otel.provider import resolve_service_name
+
+        otlp_spans_by_agent: dict[str, list] = {}
+        for span in spans:
+            attrs = span.attributes or {}
+            agent_id = str(attrs.get("gen_ai.agent.id") or "")
+            if not agent_id:
+                res = getattr(span, "resource", None)
+                declared = (getattr(res, "attributes", None) or {}).get("service.name")
+                agent_id = resolve_service_name(declared)
+            otlp_spans_by_agent.setdefault(agent_id, []).append(_span_to_otlp(span))
+
+        resource_spans = []
+        for agent_id, otlp_spans in otlp_spans_by_agent.items():
+            resource_spans.append({
                 "resource": {"attributes": [
-                    {"key": "service.name", "value": {"stringValue": "tokenjam"}},
+                    {"key": "service.name", "value": {"stringValue": agent_id}},
                 ]},
                 "scopeSpans": [{"spans": otlp_spans}],
-            }],
-        }
+            })
+
+        payload = {"resourceSpans": resource_spans}
         try:
             resp = httpx.post(
                 self._endpoint, json=payload, headers=self._headers, timeout=5.0,
