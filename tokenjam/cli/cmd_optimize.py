@@ -672,8 +672,6 @@ def _refresh_shipped_via_daemon(db: Any, *, since: str, agent_id: str | None) ->
         payload = db.fetch_shipped(since=since, agent_id=agent_id)
     except Exception:  # noqa: BLE001 - the stored finding is still a valid answer
         return None
-    if not isinstance(payload, dict):
-        return None
     for key in ("since", "window_start", "window_end", "framing"):
         payload.pop(key, None)
     return payload
@@ -2960,24 +2958,19 @@ def _render_verbosity(
         flagged_agents = list(
             dict.fromkeys(c.agent_id for c in finding.candidates if c.agent_id)
         )
-        if flagged_agents:
-            agent_refs = " / ".join(
-                f"agent [bold]{_rich_escape(a)}[/bold] (or [bold]{_rich_escape(f'[agents.{a}]')}[/bold] [bold]max_output_tokens[/bold])"
-                for a in flagged_agents
-            )
-            console.print(
-                f"     [dim]Remedy to review (not applied): cap "
-                f"[bold]max_tokens[/bold] near ~{format_tokens(finding.suggested_max_tokens)} "
-                f"in {agent_refs} application code, then measure with "
-                f"[bold]tj optimize verbosity[/bold].[/dim]"
-            )
+        if len(flagged_agents) == 1:
+            target = f"agent [bold]{_rich_escape(flagged_agents[0])}[/bold]"
+        elif len(flagged_agents) > 1:
+            joined = ", ".join(f"[bold]{_rich_escape(a)}[/bold]" for a in flagged_agents[:-1])
+            target = f"agents {joined} and [bold]{_rich_escape(flagged_agents[-1])}[/bold]"
         else:
-            console.print(
-                f"     [dim]Remedy to review (not applied): cap "
-                f"[bold]max_tokens[/bold] near ~{format_tokens(finding.suggested_max_tokens)} "
-                f"in agent application code (or [bold]{_rich_escape('[agents.<agent_id>]')}[/bold] [bold]max_output_tokens[/bold]), "
-                f"then measure with [bold]tj optimize verbosity[/bold].[/dim]"
-            )
+            target = "agent"
+        console.print(
+            f"     [dim]Remedy to review (not applied): add a terse system-prompt line "
+            f"and/or cap [bold]max_tokens[/bold] near "
+            f"~{format_tokens(finding.suggested_max_tokens)} in {target} application code, "
+            f"then measure with [bold]tj optimize verbosity[/bold].[/dim]"
+        )
 
 
     if finding.caveat:

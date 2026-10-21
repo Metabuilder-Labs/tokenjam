@@ -294,26 +294,24 @@ def test_truncates_display_candidates_but_reports_true_total(db):
     assert len(restored.candidates) == MAX_EXAMPLES
 
 
-# -- Issue #576: Remedy names concrete agent and config key --
+# -- Issue #576: Remedy names concrete agent and application code --
 
-def test_remedy_names_agent_id_and_max_output_tokens_config_key(capsys):
+def _flat(out: str) -> str:
+    """Collapse Rich's terminal-width wrapping so a phrase can be asserted
+    whole regardless of the runner's column count."""
+    return " ".join(out.split())
+
+
+def test_remedy_names_agent_id_and_application_code(capsys):
     """Issue #576: verbosity remedy output must name the concrete agent (via
-    VerbosityCandidate.agent_id) and the exact config key that caps that agent's
-    output tokens (max_output_tokens), replacing the generic 'add a terse
-    system-prompt line and/or a max_tokens cap' prose."""
+    VerbosityCandidate.agent_id) and point to application code and system prompt,
+    instructing the user to measure with `tj optimize verbosity`."""
     from tokenjam.cli.cmd_optimize import _render_verbosity
-    from tokenjam.core.config import AgentConfig
     from tokenjam.core.optimize.analyzers.output_verbosity import (
         VerbosityCandidate,
         VerbosityFinding,
     )
 
-    # 1. AgentConfig must support max_output_tokens field
-    assert hasattr(AgentConfig, "max_output_tokens"), (
-        "AgentConfig must have a max_output_tokens field to cap agent output tokens"
-    )
-
-    # 2. Rendering must name agent_id and max_output_tokens in remedy output
     candidate = VerbosityCandidate(
         session_id="sess-verbose-1",
         agent_id="code-reviewer",
@@ -336,24 +334,72 @@ def test_remedy_names_agent_id_and_max_output_tokens_config_key(capsys):
     )
 
     _render_verbosity(finding, pricing_mode="api", marker="①")
-    out = capsys.readouterr().out
+    out = _flat(capsys.readouterr().out)
 
-    # Must NOT contain the old generic phrasing
-    assert "add a terse system-prompt line and/or a max_tokens cap" not in out, (
-        "Remedy line must not use generic 'add a terse system-prompt line and/or a max_tokens cap'"
+    # Must name the concrete agent, point to application code, and measure with tj optimize verbosity
+    assert "agent code-reviewer application code" in out, (
+        "Remedy output must name 'agent code-reviewer application code'"
+    )
+    assert "max_tokens" in out, "Remedy output must reference 'max_tokens'"
+    assert "system-prompt line" in out, "Remedy output must reference system-prompt line"
+    assert "tj optimize verbosity" in out, (
+        "Remedy must tell user to measure with 'tj optimize verbosity'"
+    )
+    assert "--validate" not in out, "Remedy must not advertise dead '--validate' command"
+
+
+def test_remedy_names_multiple_agents_cleanly(capsys):
+    """When multiple distinct agents are flagged, list them cleanly without repetitive phrasing."""
+    from tokenjam.cli.cmd_optimize import _render_verbosity
+    from tokenjam.core.optimize.analyzers.output_verbosity import (
+        VerbosityCandidate,
+        VerbosityFinding,
     )
 
-    # Must name the concrete agent and config key, point to application code, and measure with tj optimize verbosity
-    assert "code-reviewer" in out, "Remedy output must name the concrete agent_id"
-    assert "max_output_tokens" in out, (
-        "Remedy output must reference the config key 'max_output_tokens'"
+    c1 = VerbosityCandidate(
+        session_id="sess-1",
+        agent_id="reviewer",
+        model="claude-haiku-4-5",
+        task_shape=[],
+        cohort_sessions=10,
+        output_tokens=5000,
+        baseline_output_tokens=500,
+        over_baseline_tokens=4500,
+        over_baseline_multiple=10.0,
+        output_input_ratio=2.5,
+        recoverable_usd=0.045,
     )
-    assert "application code" in out, "Remedy output must reference application code"
-    assert "tj optimize verbosity" in out, "Remedy must tell user to measure with tj optimize verbosity"
+    c2 = VerbosityCandidate(
+        session_id="sess-2",
+        agent_id="planner",
+        model="claude-haiku-4-5",
+        task_shape=[],
+        cohort_sessions=10,
+        output_tokens=4000,
+        baseline_output_tokens=500,
+        over_baseline_tokens=3500,
+        over_baseline_multiple=8.0,
+        output_input_ratio=2.0,
+        recoverable_usd=0.035,
+    )
+    finding = VerbosityFinding(
+        candidates=[c1, c2],
+        total_candidates=2,
+        sessions_examined=20,
+        cohorts_examined=2,
+        suggested_max_tokens=500,
+    )
+
+    _render_verbosity(finding, pricing_mode="api", marker="①")
+    out = _flat(capsys.readouterr().out)
+
+    assert "agents reviewer and planner application code" in out
+    assert "tj optimize verbosity" in out
+    assert "--validate" not in out
 
 
-def test_remedy_names_fallback_when_agent_id_is_none(capsys):
-    """When candidates have no agent_id, fallback to <agent_id> placeholder."""
+def test_remedy_fallback_when_agent_id_is_none(capsys):
+    """When candidates have no agent_id, fallback to generic 'agent application code'."""
     from tokenjam.cli.cmd_optimize import _render_verbosity
     from tokenjam.core.optimize.analyzers.output_verbosity import (
         VerbosityCandidate,
@@ -382,44 +428,11 @@ def test_remedy_names_fallback_when_agent_id_is_none(capsys):
     )
 
     _render_verbosity(finding, pricing_mode="api", marker="①")
-    out = capsys.readouterr().out
-    assert "add a terse system-prompt line and/or a max_tokens cap" not in out
-    assert "[agents.<agent_id>]" in out
-    assert "max_output_tokens" in out
-    assert "application code" in out
+    out = _flat(capsys.readouterr().out)
+    assert "agent application code" in out
+    assert "max_tokens" in out
+    assert "system-prompt line" in out
     assert "tj optimize verbosity" in out
-
-
-def test_analyzer_respects_agent_max_output_tokens(db):
-    """When an agent config declares max_output_tokens, the verbosity analyzer
-    uses that as the baseline limit rather than flagging against median alone."""
-    from tokenjam.core.config import AgentConfig, TjConfig
-    cfg = TjConfig(
-        version="1",
-        agents={"code-reviewer": AgentConfig(max_output_tokens=150)},
-    )
-    for i in range(MIN_COHORT_SESSIONS):
-        _seed_session(db, f"base-{i}", output_tokens=300, i=i)
-
-    # Session for code-reviewer with 450 output tokens:
-    sess = make_session(session_id="agent-verbose", plan_tier="api", duration_seconds=30.0)
-    db.upsert_session(sess)
-    llm = make_llm_span(
-        agent_id="code-reviewer", model="claude-haiku-4-5",
-        input_tokens=100, output_tokens=450,
-    )
-    llm.session_id = "agent-verbose"
-    llm.start_time = BASE + timedelta(minutes=60)
-    db.insert_span(llm)
-    tool = make_tool_span(tool_name="bash")
-    tool.session_id = "agent-verbose"
-    tool.start_time = BASE + timedelta(minutes=60, seconds=1)
-    tool.attributes = {GenAIAttributes.TOOL_INPUT: {"command": "git pull"}}
-    db.insert_span(tool)
-
-    finding = _run(db, config=cfg)
-    assert any(c.session_id == "agent-verbose" for c in finding.candidates)
-    c = next(c for c in finding.candidates if c.session_id == "agent-verbose")
-    assert c.baseline_output_tokens == 150
+    assert "--validate" not in out
 
 
