@@ -259,6 +259,27 @@ def _ns_to_datetime(ns: int) -> datetime:
     return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc)
 
 
+#: What tj calls itself when the caller declared no service name of their own.
+DEFAULT_SERVICE_NAME = "tokenjam"
+
+#: `Resource.create()` stamps one of these when `service.name` is undeclared:
+#: a bare "unknown_service", or "unknown_service:<argv[0]>". Both mean "nobody
+#: said", so both are treated as absent rather than as a chosen name.
+_UNKNOWN_SERVICE = "unknown_service"
+
+
+def is_unset_service_name(name: object) -> bool:
+    """True when `name` is OTel's "nobody declared one" sentinel, or empty."""
+    if not name or not isinstance(name, str):
+        return True
+    return name == _UNKNOWN_SERVICE or name.startswith(_UNKNOWN_SERVICE + ":")
+
+
+def resolve_service_name(declared: object) -> str:
+    """`declared` when the caller really declared one, else tj's own name."""
+    return DEFAULT_SERVICE_NAME if is_unset_service_name(declared) else str(declared)
+
+
 def _build_tj_resource() -> Resource:
     """Build the Resource stamped on tj's own TracerProvider.
 
@@ -274,10 +295,26 @@ def _build_tj_resource() -> Resource:
     which is exactly the SDK cost-attribution "service version" dimension.
     Stamp tokenjam's own package version only as a fallback default, so an
     explicitly-declared caller value always wins.
+
+    "service.name" is resolved the same way, and for the same reason. Passing
+    it in the explicit dict is what made `OTEL_SERVICE_NAME` and
+    `OTEL_RESOURCE_ATTRIBUTES=service.name=...` inert: the detector read them
+    and the dict overrode the result, so a service running its own agent under
+    its own name still reported as "tokenjam" (issue #781). Reading one
+    variable by hand fixes only half of that — it leaves
+    `OTEL_RESOURCE_ATTRIBUTES` ignored and cannot express the spec's
+    precedence when both are set. Letting the detector run and defaulting only
+    when it found nothing handles both spellings and gets the precedence for
+    free.
     """
     import tokenjam
 
-    resource = Resource.create({"service.name": "tokenjam"})
+    resource = Resource.create()
+    if is_unset_service_name(resource.attributes.get("service.name")):
+        # Bare Resource(), NOT Resource.create(), for the reason given below.
+        resource = resource.merge(
+            Resource({"service.name": DEFAULT_SERVICE_NAME})
+        )
     if ResourceAttributes.SERVICE_VERSION not in resource.attributes:
         # Bare Resource(), NOT Resource.create(): .create() unconditionally
         # defaults a missing service.name to "unknown_service" on ANY resource
