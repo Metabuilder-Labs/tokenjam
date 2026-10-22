@@ -2955,12 +2955,24 @@ def _render_verbosity(
             f"{c.over_baseline_multiple}×{ratio})[/dim] → {recov} above baseline"
         )
     if finding.suggested_max_tokens:
-        console.print(
-            f"     [dim]Remedy to review (not applied): add a terse "
-            f"system-prompt line and/or a max_tokens cap near "
-            f"~{format_tokens(finding.suggested_max_tokens)}, then measure with "
-            f"[bold]tj optimize --validate[/bold].[/dim]"
+        flagged_agents = list(
+            dict.fromkeys(c.agent_id for c in finding.candidates if c.agent_id)
         )
+        if len(flagged_agents) == 1:
+            target = f"agent [bold]{_rich_escape(flagged_agents[0])}[/bold]"
+        elif len(flagged_agents) > 1:
+            joined = ", ".join(f"[bold]{_rich_escape(a)}[/bold]" for a in flagged_agents[:-1])
+            target = f"agents {joined} and [bold]{_rich_escape(flagged_agents[-1])}[/bold]"
+        else:
+            target = "agent"
+        console.print(
+            f"     [dim]Remedy to review (not applied): add a terse system-prompt line "
+            f"and/or cap [bold]max_tokens[/bold] near "
+            f"~{format_tokens(finding.suggested_max_tokens)} in {target} application code, "
+            f"then measure with [bold]tj optimize verbosity[/bold].[/dim]"
+        )
+
+
     if finding.caveat:
         _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
