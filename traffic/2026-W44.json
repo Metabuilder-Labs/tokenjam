@@ -1,0 +1,241 @@
+{
+  "archived_at": "2026-11-01T17:37:43Z",
+  "iso_week": "2026-W44",
+  "repo": "Metabuilder-Labs/tokenjam",
+  "views": {
+    "count": 554,
+    "uniques": 468,
+    "daily": [
+      {
+        "timestamp": "2026-10-18T00:00:00Z",
+        "count": 6,
+        "uniques": 3
+      },
+      {
+        "timestamp": "2026-10-19T00:00:00Z",
+        "count": 1,
+        "uniques": 1
+      },
+      {
+        "timestamp": "2026-10-20T00:00:00Z",
+        "count": 4,
+        "uniques": 4
+      },
+      {
+        "timestamp": "2026-10-21T00:00:00Z",
+        "count": 7,
+        "uniques": 4
+      },
+      {
+        "timestamp": "2026-10-22T00:00:00Z",
+        "count": 14,
+        "uniques": 1
+      },
+      {
+        "timestamp": "2026-10-23T00:00:00Z",
+        "count": 2,
+        "uniques": 2
+      },
+      {
+        "timestamp": "2026-10-24T00:00:00Z",
+        "count": 3,
+        "uniques": 3
+      },
+      {
+        "timestamp": "2026-10-25T00:00:00Z",
+        "count": 19,
+        "uniques": 6
+      },
+      {
+        "timestamp": "2026-10-26T00:00:00Z",
+        "count": 1,
+        "uniques": 1
+      },
+      {
+        "timestamp": "2026-10-27T00:00:00Z",
+        "count": 10,
+        "uniques": 10
+      },
+      {
+        "timestamp": "2026-10-28T00:00:00Z",
+        "count": 77,
+        "uniques": 74
+      },
+      {
+        "timestamp": "2026-10-29T00:00:00Z",
+        "count": 360,
+        "uniques": 323
+      },
+      {
+        "timestamp": "2026-10-30T00:00:00Z",
+        "count": 50,
+        "uniques": 44
+      },
+      {
+        "timestamp": "2026-10-31T00:00:00Z",
+        "count": 0,
+        "uniques": 0
+      }
+    ]
+  },
+  "clones": {
+    "count": 1091,
+    "uniques": 224,
+    "daily": [
+      {
+        "timestamp": "2026-10-18T00:00:00Z",
+        "count": 47,
+        "uniques": 27
+      },
+      {
+        "timestamp": "2026-10-19T00:00:00Z",
+        "count": 60,
+        "uniques": 33
+      },
+      {
+        "timestamp": "2026-10-20T00:00:00Z",
+        "count": 52,
+        "uniques": 15
+      },
+      {
+        "timestamp": "2026-10-21T00:00:00Z",
+        "count": 43,
+        "uniques": 16
+      },
+      {
+        "timestamp": "2026-10-22T00:00:00Z",
+        "count": 457,
+        "uniques": 13
+      },
+      {
+        "timestamp": "2026-10-23T00:00:00Z",
+        "count": 45,
+        "uniques": 17
+      },
+      {
+        "timestamp": "2026-10-24T00:00:00Z",
+        "count": 26,
+        "uniques": 18
+      },
+      {
+        "timestamp": "2026-10-25T00:00:00Z",
+        "count": 12,
+        "uniques": 9
+      },
+      {
+        "timestamp": "2026-10-26T00:00:00Z",
+        "count": 210,
+        "uniques": 32
+      },
+      {
+        "timestamp": "2026-10-27T00:00:00Z",
+        "count": 30,
+        "uniques": 14
+      },
+      {
+        "timestamp": "2026-10-28T00:00:00Z",
+        "count": 36,
+        "uniques": 7
+      },
+      {
+        "timestamp": "2026-10-29T00:00:00Z",
+        "count": 24,
+        "uniques": 12
+      },
+      {
+        "timestamp": "2026-10-30T00:00:00Z",
+        "count": 30,
+        "uniques": 24
+      },
+      {
+        "timestamp": "2026-10-31T00:00:00Z",
+        "count": 19,
+        "uniques": 10
+      }
+    ]
+  },
+  "referrers": [
+    {
+      "referrer": "aocr.org",
+      "count": 436,
+      "uniques": 444
+    },
+    {
+      "referrer": "github.com",
+      "count": 16,
+      "uniques": 10
+    },
+    {
+      "referrer": "Google",
+      "count": 4,
+      "uniques": 4
+    },
+    {
+      "referrer": "t.co",
+      "count": 2,
+      "uniques": 1
+    }
+  ],
+  "paths": [
+    {
+      "path": "/Metabuilder-Labs/tokenjam",
+      "title": "Overview",
+      "count": 30,
+      "uniques": 22
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/pulls",
+      "title": "/pulls",
+      "count": 10,
+      "uniques": 3
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/issues",
+      "title": "/issues",
+      "count": 9,
+      "uniques": 3
+    },
+    {
+      "path": "/metabuilder-labs/tokenjam",
+      "title": "Overview",
+      "count": 8,
+      "uniques": 7
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/pull/783",
+      "title": "/pull/783",
+      "count": 6,
+      "uniques": 1
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/pull/784",
+      "title": "/pull/784",
+      "count": 5,
+      "uniques": 4
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/issues/116",
+      "title": "/issues/116",
+      "count": 4,
+      "uniques": 4
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/issues/154",
+      "title": "/issues/154",
+      "count": 4,
+      "uniques": 4
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/issues/200",
+      "title": "/issues/200",
+      "count": 4,
+      "uniques": 4
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/issues/786",
+      "title": "/issues/786",
+      "count": 4,
+      "uniques": 2
+    }
+  ]
+}
