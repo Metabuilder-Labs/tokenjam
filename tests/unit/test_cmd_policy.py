@@ -157,6 +157,24 @@ def test_alerts_row_summarises_channel_count_and_flags():
     assert "path=/tmp/alerts.log" in ch1.setting
 
 
+def test_channel_summary_redacts_the_mast_channel_key():
+    # The URL carries the channel key, so it must not show up in the table.
+    summary = _channel_summary(AlertChannelConfig(
+        type="mast",
+        channel_url="https://mast.tissue.dev/mk_0123456789abcdef",
+    ))
+    assert "type=mast" in summary
+    assert "channel_url=<set>" in summary
+    assert "mk_0123456789abcdef" not in summary
+
+
+def test_channel_summary_shows_a_mast_priority_override():
+    summary = _channel_summary(AlertChannelConfig(
+        type="mast", channel_url="https://mast.tissue.dev/mk_x", priority="page",
+    ))
+    assert "priority=page" in summary
+
+
 def test_drift_overrides_default_detects_change():
     assert _drift_overrides_default(DriftConfig()) is False
     assert _drift_overrides_default(DriftConfig(token_threshold=3.0)) is True

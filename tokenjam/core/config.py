@@ -159,6 +159,13 @@ class AlertChannelConfig:
     # telegram
     bot_token: str | None = None
     chat_id:   str | None = None
+    # mast
+    channel_url: str | None = None
+    # Pins every alert on this channel to one Mast priority. Leave it unset
+    # and severity picks: info -> quiet, warning -> normal, critical -> loud.
+    # "page" repeats until acked and ignores quiet hours, so nothing maps to
+    # it on its own; this is the only way to get it.
+    priority:    str | None = None
     # shared
     min_severity: str = "info"
 

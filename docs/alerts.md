@@ -30,6 +30,12 @@ Configure where alerts go in `.tj/config.toml`. Multiple channels work simultane
 type = "ntfy"
 topic = "my-agent-alerts"
 
+# Mast pager app for iPhone and Android. Free, with or without an account (limits below).
+# The key in the URL is the only credential.
+[[alerts.channels]]
+type = "mast"
+channel_url = "https://mast.tissue.dev/mk_0123456789abcdef0123456789abcdef01234567"
+
 # Discord webhook
 [[alerts.channels]]
 type = "discord"
@@ -55,6 +61,51 @@ path = "~/.tj/alerts.log"
 [[alerts.channels]]
 type = "stdout"
 ```
+
+### Mast
+
+[Mast](https://tissue.systems/mast) is a pager app for iPhone and Android. Install it, make a
+channel, and paste the channel URL into the config above. It works without an account, but a
+channel made that way is lost if the app is reinstalled, and the only sign on this side is a
+"No such channel." line in the log. Sign in to a free Tissue account if you want the channel
+to survive that.
+
+Both ways are free but capped. With no account you get 2 channels and 1,000 messages a month;
+a free account gets 10 channels and 10,000 messages. Mast keeps accepting sends past the monthly
+number, but if your agents alert a lot, check [Mast's limits](https://tissue.systems/mast/docs/limits/)
+before relying on it.
+
+`tj` posts a JSON body with `title`, `body`, `priority` and `key`. Mast documents those fields
+on its [sending page](https://tissue.systems/mast/docs/send/), which is the place to look if
+sends start failing.
+
+`tj` maps severity onto three of Mast's four priorities: `info` sends `quiet`, `warning`
+sends `normal`, `critical` sends `loud`. Nothing maps to the fourth, `page`. It repeats until
+someone acks it and ignores mute and quiet hours, so you have to ask for it, which is what
+you'd do on a channel that's meant to wake someone up:
+
+```toml
+[[alerts.channels]]
+type         = "mast"
+channel_url  = "https://mast.tissue.dev/mk_..."
+priority     = "page"
+min_severity = "critical"
+```
+
+Each channel also has a ceiling, shown as **Highest priority** in the app, and a send that
+asks for more than that is delivered at the ceiling. It's set when the channel is created. The
+iOS app doesn't go below `loud`, the Android app uses whatever default priority you picked, and
+a channel made from an API token starts at `loud`. So a channel created on Android with the
+default of `Normal` will deliver `critical` alerts as `normal`, and `priority = "page"` won't
+page anyone until you raise the ceiling on the phone. Worth checking before you rely on it.
+
+Each send carries a dedupe key built from the same things the cooldown uses: the alert type,
+the agent, and for `cost_budget_session` and `session_duration` the session too. If the same
+alert fires again inside the channel's dedupe window (5 minutes unless you change it), Mast
+adds to the count on the card already on the phone instead of sending a new one. Two sessions
+over their own budget are different alerts, so they get separate cards. The default cooldown
+is 60 seconds, so a repeat usually lands inside the window; if you raise `cooldown_seconds`
+past the window, repeats arrive as new cards.
 
 ## Sensitive actions
 
@@ -88,7 +139,7 @@ Cooldown state survives a daemon restart: `AlertEngine` rehydrates it from the p
 
 ## Content stripping
 
-By default, alert payloads sent to external channels (Discord, Telegram, webhook, ntfy) have sensitive content stripped: `prompt_content`, `completion_content`, `tool_input`, `tool_output`. To include full content:
+By default, alert payloads sent to external channels (Discord, Telegram, webhook, ntfy, Mast) have sensitive content stripped: `prompt_content`, `completion_content`, `tool_input`, `tool_output`. To include full content:
 
 ```toml
 [alerts]

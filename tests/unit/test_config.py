@@ -246,6 +246,24 @@ class TestParse:
         assert len(config.alerts.channels) == 2
         assert config.alerts.channels[1].topic == "my-topic"
 
+    def test_alerts_mast_channel_parsed(self):
+        raw = {
+            "alerts": {
+                "channels": [
+                    {
+                        "type": "mast",
+                        "channel_url": "https://mast.tissue.dev/mk_abc",
+                        "priority": "page",
+                    },
+                ],
+            }
+        }
+        config = _parse(raw)
+        channel = config.alerts.channels[0]
+        assert channel.type == "mast"
+        assert channel.channel_url == "https://mast.tissue.dev/mk_abc"
+        assert channel.priority == "page"
+
     def test_default_alert_channel_is_stdout(self):
         config = _parse({})
         assert len(config.alerts.channels) == 1

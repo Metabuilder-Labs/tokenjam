@@ -35,7 +35,7 @@ flowchart TD
     Ingest["IngestPipeline\nSanitization · Session continuity · Attribute extraction"]
 
     Ingest --> Cost["CostEngine\npricing.toml"]
-    Ingest --> Alerts["AlertEngine\n13 types · 6 channels"]
+    Ingest --> Alerts["AlertEngine\n13 types · 7 channels"]
     Ingest --> Schema["SchemaValidator\nexplicit JSON Schema"]
 
     Cost --> DB["DuckDB\nlocal · embedded"]
@@ -179,7 +179,7 @@ The alert engine evaluates rules after every span ingest. Alert types fall into 
 
 ### Dispatch and cooldown
 
-`AlertDispatcher` routes fired alerts to 6 channel types: stdout, file, ntfy, webhook, Discord, Telegram. `CooldownTracker` prevents alert storms by suppressing repeat alerts of the same type for the same agent within a configurable window. Suppressed alerts are still persisted to the database but not dispatched.
+`AlertDispatcher` routes fired alerts to 7 channel types: stdout, file, ntfy, webhook, Discord, Telegram, Mast. `CooldownTracker` prevents alert storms by suppressing repeat alerts of the same type for the same agent within a configurable window. Suppressed alerts are still persisted to the database but not dispatched.
 
 Content stripping removes `prompt_content`, `completion_content`, `tool_input`, `tool_output` from payloads sent to external channels unless `alerts.include_captured_content = true`. Stdout and file channels always receive the full payload.
 

@@ -91,6 +91,10 @@ include_captured_content = false
   type = "discord"
   webhook_url = "https://discord.com/api/webhooks/..."
 
+  [[alerts.channels]]
+  type = "mast"
+  channel_url = "https://mast.tissue.dev/mk_..."   # iPhone/Android pager app, free; see docs/alerts.md
+
 [export]
   [export.otlp]
   endpoint = ""           # set to forward spans to an external OTel backend
@@ -225,7 +229,7 @@ The four flags are independent: capture prompts without completions, or tool inp
 
 **Where the gate runs.** All spans flow through `IngestPipeline.process()`, which calls `strip_captured_content()` once before any DB write. The receiver, the OTLP HTTP endpoint, and the Claude Code JSONL backfill all go through this single gate — there's no per-source duplication.
 
-**Precedence with alert channels.** `alerts.include_captured_content = true` lets external alert channels (webhook, Discord, Telegram, ntfy) receive full payloads. If the corresponding `[capture]` flag is `false`, the content is already stripped at ingest, so the alert flag is moot — channels can't include what was never captured. Stdout and file alert channels always receive full payloads from the in-memory span before the DB strip, so they still see content during the brief in-process window.
+**Precedence with alert channels.** `alerts.include_captured_content = true` lets external alert channels (webhook, Discord, Telegram, ntfy, Mast) receive full payloads. If the corresponding `[capture]` flag is `false`, the content is already stripped at ingest, so the alert flag is moot — channels can't include what was never captured. Stdout and file alert channels always receive full payloads from the in-memory span before the DB strip, so they still see content during the brief in-process window.
 
 **What this means for downstream analyzers.**
 
