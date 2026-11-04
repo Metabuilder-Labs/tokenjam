@@ -22,9 +22,9 @@ least defensible of any analyzer. Two consequences are baked in:
   grounded in like-for-like tasks. A high output:input ratio is carried as a
   descriptive field only; it never flags a session on its own (a legitimately
   long answer to a short prompt is not waste).
-- The recoverable figure is a **soft upper bound**, and `--validate` (measuring
-  a brevity constraint on your own calls) is load-bearing, not optional, before
-  anyone claims a dollar saving.
+- The recoverable figure is a **soft upper bound**, and measuring with
+  `tj optimize verbosity` after applying a brevity constraint on your own calls
+  is load-bearing, not optional, before anyone claims a dollar saving.
 
 ## What it flags
 
@@ -84,10 +84,12 @@ surfaced in every render mode:
 
 ## Remedy — surfaced, not applied
 
-The finding carries a terse system-prompt snippet and a suggested `max_tokens`
-cap (the cohort baseline). Both are advisory strings — you apply them and
-measure the result. Enforcing a brevity policy fleet-wide is a Cloud concern,
-not something the OSS analyzer does.
+The finding points to capping the flagged agent via the `max_tokens` parameter
+in application code and/or adding a terse system-prompt line near the cohort
+baseline `suggested_max_tokens`. Both are advisory — you apply them and measure
+the result with `tj optimize verbosity`. Enforcing a brevity policy fleet-wide
+is a Cloud concern, not something the OSS analyzer does.
+
 
 ## See also
 

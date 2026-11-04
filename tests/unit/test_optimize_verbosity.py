@@ -292,3 +292,147 @@ def test_truncates_display_candidates_but_reports_true_total(db):
     restored = report_from_dict(report_to_dict(report)).findings["verbosity"]
     assert restored.total_candidates == n_high
     assert len(restored.candidates) == MAX_EXAMPLES
+
+
+# -- Issue #576: Remedy names concrete agent and application code --
+
+def _flat(out: str) -> str:
+    """Collapse Rich's terminal-width wrapping so a phrase can be asserted
+    whole regardless of the runner's column count."""
+    return " ".join(out.split())
+
+
+def test_remedy_names_agent_id_and_application_code(capsys):
+    """Issue #576: verbosity remedy output must name the concrete agent (via
+    VerbosityCandidate.agent_id) and point to application code and system prompt,
+    instructing the user to measure with `tj optimize verbosity`."""
+    from tokenjam.cli.cmd_optimize import _render_verbosity
+    from tokenjam.core.optimize.analyzers.output_verbosity import (
+        VerbosityCandidate,
+        VerbosityFinding,
+    )
+
+    candidate = VerbosityCandidate(
+        session_id="sess-verbose-1",
+        agent_id="code-reviewer",
+        model="claude-haiku-4-5",
+        task_shape=[{"tool": "bash", "args": ["git diff"]}],
+        cohort_sessions=10,
+        output_tokens=5000,
+        baseline_output_tokens=500,
+        over_baseline_tokens=4500,
+        over_baseline_multiple=10.0,
+        output_input_ratio=2.5,
+        recoverable_usd=0.045,
+    )
+    finding = VerbosityFinding(
+        candidates=[candidate],
+        total_candidates=1,
+        sessions_examined=15,
+        cohorts_examined=2,
+        suggested_max_tokens=500,
+    )
+
+    _render_verbosity(finding, pricing_mode="api", marker="①")
+    out = _flat(capsys.readouterr().out)
+
+    # Must name the concrete agent, point to application code, and measure with tj optimize verbosity
+    assert "agent code-reviewer application code" in out, (
+        "Remedy output must name 'agent code-reviewer application code'"
+    )
+    assert "max_tokens" in out, "Remedy output must reference 'max_tokens'"
+    assert "system-prompt line" in out, "Remedy output must reference system-prompt line"
+    assert "tj optimize verbosity" in out, (
+        "Remedy must tell user to measure with 'tj optimize verbosity'"
+    )
+    assert "--validate" not in out, "Remedy must not advertise dead '--validate' command"
+
+
+def test_remedy_names_multiple_agents_cleanly(capsys):
+    """When multiple distinct agents are flagged, list them cleanly without repetitive phrasing."""
+    from tokenjam.cli.cmd_optimize import _render_verbosity
+    from tokenjam.core.optimize.analyzers.output_verbosity import (
+        VerbosityCandidate,
+        VerbosityFinding,
+    )
+
+    c1 = VerbosityCandidate(
+        session_id="sess-1",
+        agent_id="reviewer",
+        model="claude-haiku-4-5",
+        task_shape=[],
+        cohort_sessions=10,
+        output_tokens=5000,
+        baseline_output_tokens=500,
+        over_baseline_tokens=4500,
+        over_baseline_multiple=10.0,
+        output_input_ratio=2.5,
+        recoverable_usd=0.045,
+    )
+    c2 = VerbosityCandidate(
+        session_id="sess-2",
+        agent_id="planner",
+        model="claude-haiku-4-5",
+        task_shape=[],
+        cohort_sessions=10,
+        output_tokens=4000,
+        baseline_output_tokens=500,
+        over_baseline_tokens=3500,
+        over_baseline_multiple=8.0,
+        output_input_ratio=2.0,
+        recoverable_usd=0.035,
+    )
+    finding = VerbosityFinding(
+        candidates=[c1, c2],
+        total_candidates=2,
+        sessions_examined=20,
+        cohorts_examined=2,
+        suggested_max_tokens=500,
+    )
+
+    _render_verbosity(finding, pricing_mode="api", marker="①")
+    out = _flat(capsys.readouterr().out)
+
+    assert "agents reviewer and planner application code" in out
+    assert "tj optimize verbosity" in out
+    assert "--validate" not in out
+
+
+def test_remedy_fallback_when_agent_id_is_none(capsys):
+    """When candidates have no agent_id, fallback to generic 'agent application code'."""
+    from tokenjam.cli.cmd_optimize import _render_verbosity
+    from tokenjam.core.optimize.analyzers.output_verbosity import (
+        VerbosityCandidate,
+        VerbosityFinding,
+    )
+
+    candidate = VerbosityCandidate(
+        session_id="sess-no-agent",
+        agent_id=None,
+        model="claude-haiku-4-5",
+        task_shape=[],
+        cohort_sessions=10,
+        output_tokens=5000,
+        baseline_output_tokens=500,
+        over_baseline_tokens=4500,
+        over_baseline_multiple=10.0,
+        output_input_ratio=2.5,
+        recoverable_usd=0.045,
+    )
+    finding = VerbosityFinding(
+        candidates=[candidate],
+        total_candidates=1,
+        sessions_examined=15,
+        cohorts_examined=2,
+        suggested_max_tokens=500,
+    )
+
+    _render_verbosity(finding, pricing_mode="api", marker="①")
+    out = _flat(capsys.readouterr().out)
+    assert "agent application code" in out
+    assert "max_tokens" in out
+    assert "system-prompt line" in out
+    assert "tj optimize verbosity" in out
+    assert "--validate" not in out
+
+
