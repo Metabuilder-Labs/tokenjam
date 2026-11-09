@@ -7,13 +7,15 @@ Imports [Langfuse](https://langfuse.com) observations into the local TokenJam DB
 ```bash
 tj backfill langfuse \
   --source-url https://cloud.langfuse.com \
-  --api-key lf_pk_... \
+  --api-key pk-lf-...:sk-lf-... \
   --since 30d
 ```
 
-Reads from Langfuse's public REST endpoint (`/api/public/observations`) with Bearer-auth. Follows pagination automatically.
+Reads from Langfuse's Observations API v2 (`/api/public/v2/observations`) and follows its cursors automatically. The key is the project's public and secret key joined with a colon (`PUBLIC_KEY:SECRET_KEY`) and is sent with Basic auth. A Bearer public key only gets a scores-only scope in Langfuse, so it cannot read observations; a value without a colon is still sent as a Bearer token for proxies that expect one.
 
-The `--source-url` value can be the bare base URL (`https://cloud.langfuse.com`) — the adapter appends `/api/public/observations`. Self-hosted Langfuse instances work the same way.
+Langfuse Cloud removes the older observations endpoint on 16 November 2026, so v2 is the endpoint to rely on. For a self-hosted server that has no v2 endpoint (it answers 404), the adapter falls back to `/api/public/observations` with page numbers.
+
+The `--source-url` value can be the bare base URL (`https://cloud.langfuse.com`) — the adapter appends the API path. A URL that already ends in `/api/public/observations` still works. Self-hosted Langfuse instances work the same way.
 
 `--since` accepts the same syntax as `tj cost --since`: `30d`, `24h`, or an ISO-8601 timestamp.
 
@@ -45,9 +47,9 @@ Each Langfuse `Observation` becomes one TokenJam span:
 | `type` (`GENERATION` / `SPAN` / `EVENT`) | `kind` + `name` |
 | `startTime` / `endTime` | `start_time` / `end_time` |
 | `model` | `model`, `provider` (derived), `billing_account` (derived) |
-| `usage.input` / `usage.output` | `input_tokens` / `output_tokens` |
+| `usageDetails.input` / `usageDetails.output` (v2), or `usage.input` / `usage.output` (v1) | `input_tokens` / `output_tokens` |
 | `usageDetails.input_cache_read` | `cache_tokens` |
-| `calculatedTotalCost` | `cost_usd` |
+| `totalCost` (v2) or `calculatedTotalCost` (v1) | `cost_usd` |
 | `level` / `statusMessage` | `status_code` / `status_message` |
 
 `billing_account` is derived from the model name (`claude-*` → `anthropic`, `gpt-*`/`o3`/`o4` → `openai`, `gemini-*` → `google`). Unknown models leave it `NULL`; affected sessions will surface as `plan_tier = 'unknown'` in `tj optimize`.
