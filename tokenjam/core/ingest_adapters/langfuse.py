@@ -8,8 +8,9 @@ Idempotent: span_id is a deterministic hash of (langfuse_trace_id,
 observation_id), so re-runs skip rows already present.
 
 Two input modes:
-  - --source-url <url>  : GET /api/public/observations against a live
-                          Langfuse instance with --api-key Bearer auth
+  - --source-url <url>  : GET /api/public/v2/observations against a live
+                          Langfuse instance (v1 on servers without v2) with
+                          --api-key PUBLIC_KEY:SECRET_KEY (Basic auth)
   - --source-file <path>: read a JSON dump from disk (testing, offline use)
 
 Langfuse `Observation` envelope (relevant fields):
@@ -23,6 +24,7 @@ We tolerate both.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -221,12 +223,90 @@ def _load_file(path: Path) -> Any:
     return records
 
 
-def _fetch_url(url: str, api_key: str | None, since: datetime | None) -> Any:
+_V2_FIELDS = "core,basic,time,model,usage"
+_V2_PAGE_LIMIT = 1000  # documented maximum for GET /api/public/v2/observations
+
+
+def _auth_headers(api_key: str | None) -> dict[str, str]:
+    """
+    Langfuse's public API reads need the project key pair with Basic auth
+    (``PUBLIC_KEY:SECRET_KEY``). A Bearer public key only gets a limited,
+    scores-only scope, so a plain value is still sent as Bearer for proxies
+    that expect it, but it cannot read observations from Langfuse itself.
+    """
+    if not api_key:
+        return {}
+    if ":" in api_key:
+        token = base64.b64encode(api_key.encode("utf-8")).decode("ascii")
+        return {"Authorization": f"Basic {token}"}
+    return {"Authorization": f"Bearer {api_key}"}
+
+
+def _api_root(url: str) -> str:
+    """Strip any /api/public/... suffix: ``https://host`` for ``https://host/api/public/observations``."""
+    base = url.rstrip("/")
+    marker = "/api/public"
+    if marker in base:
+        base = base.split(marker, 1)[0]
+    return base
+
+
+def _fetch_v2(client: Any, root: str, headers: dict[str, str], since: datetime | None) -> list[dict[str, Any]] | None:
+    """
+    GET /api/public/v2/observations with cursor pagination. Returns None when
+    the server does not have the v2 endpoint (404), so the caller can fall back.
+
+    A page may be empty while ``meta.cursor`` is present, so paging continues
+    until the cursor is absent.
+    """
+    params: dict[str, Any] = {"limit": _V2_PAGE_LIMIT, "fields": _V2_FIELDS}
+    if since is not None:
+        params["fromStartTime"] = since.isoformat()
+    observations: list[dict[str, Any]] = []
+    while True:
+        resp = client.get(f"{root}/api/public/v2/observations", headers=headers, params=params)
+        if resp.status_code == 404 and not observations and "cursor" not in params:
+            return None
+        resp.raise_for_status()
+        body = resp.json()
+        observations.extend(_iter_observations(body))
+        cursor = (body.get("meta") or {}).get("cursor") if isinstance(body, dict) else None
+        if not cursor:
+            return observations
+        params["cursor"] = cursor
+
+
+def _fetch_v1(client: Any, root: str, headers: dict[str, str], since: datetime | None) -> list[dict[str, Any]]:
+    """GET /api/public/observations (page numbers). For servers that predate the v2 endpoint."""
+    params: dict[str, Any] = {"limit": 100}
+    if since is not None:
+        params["fromStartTime"] = since.isoformat()
+    observations: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        params["page"] = page
+        resp = client.get(f"{root}/api/public/observations", headers=headers, params=params)
+        resp.raise_for_status()
+        body = resp.json()
+        data = body.get("data") if isinstance(body, dict) else body
+        if not data:
+            break
+        observations.extend(data)
+        total_pages = (body.get("meta") or {}).get("totalPages") if isinstance(body, dict) else None
+        if total_pages is None or page >= int(total_pages):
+            break
+        page += 1
+    return observations
+
+
+def _fetch_url(url: str, api_key: str | None, since: datetime | None, client: Any = None) -> Any:
     """
     Fetch observations from a live Langfuse instance.
 
-    Uses the public API endpoint /api/public/observations with Bearer auth.
-    Pagination is followed transparently; returns the merged list.
+    Reads the Observations API v2 (cursor pagination), which is the only
+    observations read that Langfuse Cloud keeps after its v4 cutover, and falls
+    back to the v1 endpoint on servers that do not have v2. Pagination is
+    followed transparently; returns the merged list. ``client`` is for tests.
     """
     try:
         import httpx
@@ -236,35 +316,18 @@ def _fetch_url(url: str, api_key: str | None, since: datetime | None) -> Any:
             "`pip install httpx` or use --source-file for offline ingestion."
         ) from exc
 
-    headers: dict[str, str] = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    base = url.rstrip("/")
-    if "/api/public/observations" not in base:
-        base = f"{base}/api/public/observations"
-
-    params: dict[str, Any] = {"limit": 100}
-    if since is not None:
-        params["fromStartTime"] = since.isoformat()
-
-    all_observations: list[dict[str, Any]] = []
-    page = 1
-    with httpx.Client(timeout=30.0) as client:
-        while True:
-            params["page"] = page
-            resp = client.get(base, headers=headers, params=params)
-            resp.raise_for_status()
-            body = resp.json()
-            data = body.get("data") if isinstance(body, dict) else body
-            if not data:
-                break
-            all_observations.extend(data)
-            total_pages = (body.get("meta") or {}).get("totalPages")
-            if total_pages is None or page >= int(total_pages):
-                break
-            page += 1
-    return all_observations
+    headers = _auth_headers(api_key)
+    root = _api_root(url)
+    own_client = client is None
+    http = client if client is not None else httpx.Client(timeout=30.0)
+    try:
+        observations = _fetch_v2(http, root, headers, since)
+        if observations is None:
+            observations = _fetch_v1(http, root, headers, since)
+        return observations
+    finally:
+        if own_client:
+            http.close()
 
 
 def ingest_langfuse(

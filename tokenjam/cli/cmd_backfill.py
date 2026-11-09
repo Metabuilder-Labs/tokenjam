@@ -352,11 +352,14 @@ def codex(ctx: click.Context, root_path: str | None,
 @cmd_backfill.command("langfuse", status_message="Ingesting Langfuse observations…")
 @click.option("--source-url", default=None,
               help="Live Langfuse base URL (e.g. https://cloud.langfuse.com). "
-                   "Reads /api/public/observations with --api-key Bearer auth.")
+                   "Reads /api/public/v2/observations (v1 on older servers) "
+                   "with --api-key.")
 @click.option("--source-file", default=None, type=click.Path(exists=True, dir_okay=False),
               help="Local JSON file containing a Langfuse observations dump. "
                    "Accepts a bare list, {\"data\": [...]} envelope, or NDJSON.")
-@click.option("--api-key", default=None, help="Langfuse public API key (Bearer).")
+@click.option("--api-key", default=None,
+              help="Langfuse project keys as PUBLIC_KEY:SECRET_KEY (Basic auth). "
+                   "A value without ':' is sent as a Bearer token.")
 @click.option("--since", default=None,
               help="Only ingest observations newer than this. Accepts '30d', "
                    "'24h', or an ISO-8601 timestamp.")
