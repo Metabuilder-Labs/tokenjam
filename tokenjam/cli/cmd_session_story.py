@@ -34,7 +34,11 @@ import click
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
-from tokenjam.cli.tj_status import TjCommand
+from tokenjam.cli.tj_status import (
+    TjCommand,
+    db_required_message,
+    resolve_command_path,
+)
 from tokenjam.core.method_capture import load_session_method
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
@@ -87,13 +91,19 @@ def cmd_session_story(ctx: click.Context, session_id: str | None,
     ``--session``, auto-selects the most recent substantial session.
     """
     output_json = resolve_output_json(ctx, output_json_flag)
+    command_path = resolve_command_path(ctx, "session-story")
     db = ctx.obj.get("db")
     if db is None:
-        raise click.ClickException("session-story requires a database connection.")
+        raise click.ClickException(db_required_message(command_path))
 
     conn = getattr(db, "conn", None)
     if conn is None:
-        _run_via_serve(db, session_id=session_id, output_json=output_json)
+        _run_via_serve(
+            db,
+            session_id=session_id,
+            output_json=output_json,
+            command_path=command_path,
+        )
         return
 
     # ── Direct DuckDB path. ──
@@ -124,7 +134,13 @@ def cmd_session_story(ctx: click.Context, session_id: str | None,
     render_session_story(story, session_id=session_id, from_snapshot=from_snapshot)
 
 
-def _run_via_serve(db: Any, *, session_id: str | None, output_json: bool) -> None:
+def _run_via_serve(
+    db: Any,
+    *,
+    session_id: str | None,
+    output_json: bool,
+    command_path: str = "tj session-story",
+) -> None:
     """Render the story fetched from a running ``tj serve``.
 
     The daemon holds the DuckDB write lock, so the CLI can't read the transcript
@@ -134,10 +150,7 @@ def _run_via_serve(db: Any, *, session_id: str | None, output_json: bool) -> Non
     from tokenjam.core.api_backend import ApiBackend
 
     if not isinstance(db, ApiBackend):
-        raise click.ClickException(
-            "tj session-story needs either a direct DuckDB connection or a "
-            "running tj serve at the configured api.{host,port}."
-        )
+        raise click.ClickException(db_required_message(command_path))
 
     if session_id is None:
         try:

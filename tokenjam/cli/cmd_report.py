@@ -21,7 +21,12 @@ from pathlib import Path
 import click
 from rich.markup import escape as _rich_escape
 
-from tokenjam.cli.tj_status import TjCommand
+from tokenjam.cli.tj_status import (
+    TjCommand,
+    config_required_message,
+    db_required_message,
+    resolve_command_path,
+)
 from tokenjam.utils.formatting import console
 
 
@@ -71,10 +76,13 @@ def _render_trim_report(
     from tokenjam.core.optimize import build_report
     from tokenjam.utils.time_parse import parse_since, utcnow
 
+    command_path = resolve_command_path(ctx, "tj report")
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
-    if db is None or config is None:
-        raise click.ClickException("tj report requires a database connection.")
+    if db is None:
+        raise click.ClickException(db_required_message(command_path))
+    if config is None:
+        raise click.ClickException(config_required_message(command_path))
 
     try:
         since_dt = parse_since(since)
@@ -128,10 +136,13 @@ def _render_reuse_report(
     from tokenjam.core.optimize import build_report, report_from_dict
     from tokenjam.utils.time_parse import parse_since, utcnow
 
+    command_path = resolve_command_path(ctx, "tj report")
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
-    if db is None or config is None:
-        raise click.ClickException("tj report requires a database connection.")
+    if db is None:
+        raise click.ClickException(db_required_message(command_path))
+    if config is None:
+        raise click.ClickException(config_required_message(command_path))
 
     conn = getattr(db, "conn", None)
     # planning_texts is supplied only on the API path; conn is supplied only on
@@ -143,10 +154,7 @@ def _render_reuse_report(
         # skeleton text over HTTP rather than failing opaquely.
         from tokenjam.core.api_backend import ApiBackend
         if not isinstance(db, ApiBackend):
-            raise click.ClickException(
-                "tj report --reuse needs either a direct DuckDB connection or a "
-                "running tj serve at the configured api.{host,port}."
-            )
+            raise click.ClickException(db_required_message(command_path))
         try:
             resp = db.fetch_reuse_clusters(since=since, agent_id=agent_id)
         except Exception as exc:

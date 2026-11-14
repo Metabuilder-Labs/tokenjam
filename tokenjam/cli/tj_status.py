@@ -94,6 +94,45 @@ def db_required_message(command_path: str) -> str:
     )
 
 
+def config_required_message(command_path: str) -> str:
+    """Single copy of the CLI error when a command finds ``config is None``."""
+    return f"{command_path} could not load configuration."
+
+
+def resolve_command_path(
+    ctx: click.Context | None, fallback: str = "this command"
+) -> str:
+    """Resolve the display command path for ``ctx``.
+
+    Uses ``ctx.command_path`` when Click populated it, falling back to
+    ``command.name`` up the parent chain when a caller constructed
+    ``click.Context(cmd)`` directly without ``info_name``, and finally
+    ``fallback``.
+    """
+    if ctx is None:
+        return fallback
+    raw = getattr(ctx, "command_path", None)
+    if isinstance(raw, str) and raw:
+        return raw
+    parts: list[str] = []
+    node: Any = ctx
+    while node is not None:
+        info_name = getattr(node, "info_name", None)
+        cmd = getattr(node, "command", None)
+        cmd_name = getattr(cmd, "name", None)
+        name = (
+            info_name
+            if isinstance(info_name, str) and info_name
+            else cmd_name if isinstance(cmd_name, str) and cmd_name else None
+        )
+        if name:
+            parts.append(name)
+        node = getattr(node, "parent", None)
+    if parts:
+        return " ".join(reversed(parts))
+    return fallback
+
+
 def help_consumed_as_option_value_message(command_path: str) -> str:
     """When ``--help`` is parsed as an option value, #726 skips opening the DB
     and leaves ``db`` as ``None`` — starting ``tj serve`` cannot fix that."""
@@ -152,7 +191,7 @@ class TjCommand(click.Command):
             return
         if (ctx.obj or {}).get("db") is not None:
             return
-        command_path = ctx.command_path or self.name or "this command"
+        command_path = resolve_command_path(ctx, fallback=self.name or "this command")
         obj = ctx.obj or {}
         if obj.get("_skip_db_for_help"):
             raise click.ClickException(
@@ -198,8 +237,10 @@ class TjGroup(TjCommand, click.Group):
 __all__ = [
     "TjCommand",
     "TjGroup",
+    "config_required_message",
     "db_required_message",
     "help_consumed_as_option_value_message",
+    "resolve_command_path",
     "tj_status",
     "tj_status_stream",
 ]

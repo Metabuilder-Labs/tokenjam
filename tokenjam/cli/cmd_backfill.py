@@ -8,7 +8,7 @@ import click
 
 from tokenjam.cli.backfill_progress import backfill_progress
 from tokenjam.cli.data_access import DelegatedBackfill, resolve_data_access
-from tokenjam.cli.tj_status import TjGroup
+from tokenjam.cli.tj_status import TjGroup, db_required_message, resolve_command_path
 from tokenjam.core.backfill import (
     CLAUDE_CODE_PROJECTS_ROOT,
     count_claude_code_sessions_in_scope,
@@ -51,7 +51,9 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
     """Ingest Claude Code session logs from ~/.claude/projects/."""
     db = ctx.obj.get("db")
     if db is None:
-        raise click.ClickException("backfill requires a database connection.")
+        raise click.ClickException(
+            db_required_message(resolve_command_path(ctx, "backfill claude-code"))
+        )
 
     root = Path(root_path).expanduser() if root_path else CLAUDE_CODE_PROJECTS_ROOT
     if not root.exists():
@@ -207,7 +209,9 @@ def status(ctx: click.Context, root_path: str | None, since_value: str | None,
 
     db = ctx.obj.get("db")
     if db is None:
-        raise click.ClickException("backfill status requires a database connection.")
+        raise click.ClickException(
+            db_required_message(resolve_command_path(ctx, "backfill status"))
+        )
 
     root = Path(root_path).expanduser() if root_path else None
     since = None
@@ -304,7 +308,9 @@ def codex(ctx: click.Context, root_path: str | None,
     """Ingest Codex CLI session logs from ~/.codex/sessions/."""
     db = ctx.obj.get("db")
     if db is None:
-        raise click.ClickException("backfill requires a database connection.")
+        raise click.ClickException(
+            db_required_message(resolve_command_path(ctx, "backfill codex"))
+        )
 
     root = Path(root_path).expanduser() if root_path else CODEX_SESSIONS_ROOT
     if not root.exists():
@@ -366,7 +372,9 @@ def langfuse(ctx: click.Context, source_url: str | None, source_file: str | None
     """Ingest Langfuse observations from a live API or a JSON dump."""
     db = ctx.obj.get("db")
     if db is None:
-        raise click.ClickException("backfill requires a database connection.")
+        raise click.ClickException(
+            db_required_message(resolve_command_path(ctx, "backfill langfuse"))
+        )
     if (source_url is None) == (source_file is None):
         raise click.UsageError("Provide exactly one of --source-url or --source-file.")
 
@@ -414,7 +422,9 @@ def helicone(ctx: click.Context, source_url: str | None, source_file: str | None
     """Ingest Helicone request records from a live API or a JSON dump."""
     db = ctx.obj.get("db")
     if db is None:
-        raise click.ClickException("backfill requires a database connection.")
+        raise click.ClickException(
+            db_required_message(resolve_command_path(ctx, "backfill helicone"))
+        )
     if (source_url is None) == (source_file is None):
         raise click.UsageError("Provide exactly one of --source-url or --source-file.")
 
@@ -463,7 +473,9 @@ def otlp(ctx: click.Context, source_url: str | None, source_file: str | None,
     """Ingest a raw OTLP JSON dump from a live endpoint or a file."""
     db = ctx.obj.get("db")
     if db is None:
-        raise click.ClickException("backfill requires a database connection.")
+        raise click.ClickException(
+            db_required_message(resolve_command_path(ctx, "backfill otlp"))
+        )
     if (source_url is None) == (source_file is None):
         raise click.UsageError("Provide exactly one of --source-url or --source-file.")
 

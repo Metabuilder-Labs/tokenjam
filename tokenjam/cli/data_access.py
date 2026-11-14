@@ -31,6 +31,11 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol, TypeVar, runtime_chec
 import click
 import httpx
 
+from tokenjam.cli.tj_status import (
+    config_required_message,
+    db_required_message,
+    resolve_command_path,
+)
 from tokenjam.core.context_diagnostic import (
     ContextDiagnostic,
     compute_context_diagnostic,
@@ -285,11 +290,14 @@ def resolve_data_access(ctx: click.Context) -> DataAccess:
     the-lock fallback wired up in ``cli/main.py``). Raises a clean
     ``ClickException`` — never a traceback — when neither is available.
     """
+    command_path = resolve_command_path(ctx)
     obj = ctx.obj or {}
     db = obj.get("db")
     config = obj.get("config")
-    if db is None or config is None:
-        raise click.ClickException("this command requires a database connection.")
+    if db is None:
+        raise click.ClickException(db_required_message(command_path))
+    if config is None:
+        raise click.ClickException(config_required_message(command_path))
 
     # Import here to keep the module importable without httpx at import time.
     from tokenjam.core.api_backend import ApiBackend
@@ -298,7 +306,4 @@ def resolve_data_access(ctx: click.Context) -> DataAccess:
         return ServeDataAccess(db)
     if getattr(db, "conn", None) is not None:
         return DirectDataAccess(db, config)
-    raise click.ClickException(
-        "this command needs a direct DuckDB connection or a running tj serve "
-        "at the configured api.{host,port}."
-    )
+    raise click.ClickException(db_required_message(command_path))
