@@ -290,5 +290,7 @@ def test_requires_direct_db_connection(db):
     result = _invoke(_NoConn(), _config("max_5x"))
     assert result.exit_code != 0
     combined = str(result.output) + str(result.exception)
+    assert "tokenmaxx" in combined
+    assert "this command" not in combined
     assert "direct DuckDB connection" in combined
     assert "tj serve" in combined

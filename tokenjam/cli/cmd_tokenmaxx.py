@@ -31,7 +31,12 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.cli.json_option import json_option, resolve_output_json
-from tokenjam.cli.tj_status import TjCommand
+from tokenjam.cli.tj_status import (
+    TjCommand,
+    config_required_message,
+    db_required_message,
+    resolve_command_path,
+)
 from tokenjam.core.context_diagnostic import ContextDiagnostic
 from tokenjam.core.framing import Framing
 from tokenjam.utils.formatting import console, format_tokens
@@ -85,11 +90,14 @@ def cmd_tokenmaxx(ctx: click.Context, agent: str | None, since: str,
                   weekly: bool, output_json_flag: bool) -> None:
     """Your shareable efficiency card."""
     output_json = resolve_output_json(ctx, output_json_flag)
+    command_path = resolve_command_path(ctx, "tokenmaxx")
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     agent = agent or ctx.obj.get("agent")
-    if db is None or config is None:
-        raise click.ClickException("tokenmaxx requires a database connection.")
+    if db is None:
+        raise click.ClickException(db_required_message(command_path))
+    if config is None:
+        raise click.ClickException(config_required_message(command_path))
 
     # --weekly is a recap preset: a 7-day window with recap framing. An explicit
     # --since still wins if the user narrows it themselves.

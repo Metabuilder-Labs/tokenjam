@@ -10,7 +10,13 @@ from rich.padding import Padding
 from rich.table import Table
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
-from tokenjam.cli.tj_status import TjCommand, db_required_message, tj_status
+from tokenjam.cli.tj_status import (
+    TjCommand,
+    config_required_message,
+    db_required_message,
+    resolve_command_path,
+    tj_status,
+)
 from tokenjam.core.optimize.analyzers.deadweight import UNUSED_RECENCY_WINDOW_DAYS
 from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
 from tokenjam.core.framing import (
@@ -190,10 +196,11 @@ def cmd_optimize(
 ) -> None:
     """Find cost-saving opportunities."""
     output_json = resolve_output_json(ctx, output_json_flag)
+    command_path = resolve_command_path(ctx, "optimize")
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     if config is None:
-        raise click.ClickException("optimize could not load configuration.")
+        raise click.ClickException(config_required_message(command_path))
 
     try:
         since_dt = parse_since(since)
@@ -268,7 +275,7 @@ def cmd_optimize(
             # API-shim path
             from tokenjam.core.api_backend import ApiBackend
             if not isinstance(db, ApiBackend):
-                raise click.ClickException(db_required_message("optimize"))
+                raise click.ClickException(db_required_message(command_path))
             # The session -> commit join the `shipped` finding reads is
             # refreshed by the daemon's own pass; a direct-DB run refreshes
             # it inline (below). Here the DB is the daemon's, so ask it to

@@ -21,7 +21,12 @@ from pathlib import Path
 import click
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
-from tokenjam.cli.tj_status import TjGroup
+from tokenjam.cli.tj_status import (
+    TjGroup,
+    config_required_message,
+    db_required_message,
+    resolve_command_path,
+)
 from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
 from tokenjam.core.optimize import OptimizeReport, build_report, report_from_dict
 from tokenjam.utils.formatting import console
@@ -112,10 +117,13 @@ def cmd_route_export(
 
 def _resolve_finding(ctx, *, agent, since):
     """Return (downgrade, pricing_mode, plan_tier, since_label, until_label)."""
+    command_path = resolve_command_path(ctx, "route")
     db = ctx.obj.get("db") if ctx.obj else None
     config = ctx.obj.get("config") if ctx.obj else None
-    if db is None or config is None:
-        raise click.ClickException("route requires a database connection.")
+    if db is None:
+        raise click.ClickException(db_required_message(command_path))
+    if config is None:
+        raise click.ClickException(config_required_message(command_path))
 
     try:
         since_dt = parse_since(since)
@@ -130,10 +138,7 @@ def _resolve_finding(ctx, *, agent, since):
         # API-shim path: daemon holds the DB lock.
         from tokenjam.core.api_backend import ApiBackend
         if not isinstance(db, ApiBackend):
-            raise click.ClickException(
-                "route requires either a direct DuckDB connection or a running "
-                "tj serve at the configured api.{host,port}."
-            )
+            raise click.ClickException(db_required_message(command_path))
         try:
             report_dict = db.fetch_optimize_report(
                 since=since, agent_id=agent, findings=["downsize"],

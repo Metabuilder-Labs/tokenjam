@@ -33,7 +33,12 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.cli.json_option import json_option, resolve_output_json
-from tokenjam.cli.tj_status import TjCommand
+from tokenjam.cli.tj_status import (
+    TjCommand,
+    config_required_message,
+    db_required_message,
+    resolve_command_path,
+)
 from tokenjam.core.framing import Framing
 from tokenjam.core.model_tiers import PREMIUM_TIER_LABEL
 from tokenjam.core.optimize.types import (
@@ -60,11 +65,14 @@ def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
                     export_target: str | None, output_json_flag: bool) -> None:
     """Flag premium sessions that could run cheaper."""
     output_json = resolve_output_json(ctx, output_json_flag)
+    command_path = resolve_command_path(ctx, "quota-audit")
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     agent = agent or ctx.obj.get("agent")
-    if db is None or config is None:
-        raise click.ClickException("quota-audit requires a database connection.")
+    if db is None:
+        raise click.ClickException(db_required_message(command_path))
+    if config is None:
+        raise click.ClickException(config_required_message(command_path))
 
     # Validate the window up-front so the direct and serve paths agree on the
     # error message.
