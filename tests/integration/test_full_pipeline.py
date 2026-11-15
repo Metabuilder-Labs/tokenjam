@@ -861,6 +861,103 @@ def test_real_pipeline_session_attribution_invariant(full_stack):
     assert pytest.approx(total_spans_cost, rel=1e-5) == active_sessions_cost + unatt_cost_val
 
 
+def test_session_attribution_invariant_on_a_mixed_source_corpus(full_stack, tmp_path):
+    """Option 3 of #780: the unattributed bucket is a RAW sum, so one sessionless
+    call that arrives both live and via a later backfill is counted twice in it.
+
+    Both observations go through their real ingest paths: the live one through
+    IngestPipeline (two session markers on one trace make it genuinely
+    ambiguous, so attribution step 3 leaves it sessionless) and the backfill
+    through `ingest_langfuse` over an export file, which writes sessionless
+    spans tagged with its own source. The product's own fingerprint is then
+    used to prove the two rows really are one call seen by two observers.
+
+    What this pins:
+    - the bucket over-counts that call (both rows are in it), which is the
+      documented behaviour the surface caveat discloses;
+    - the bucket carries that caveat;
+    - the invariant the surfaces assert still holds, SCOPED to what it is: a
+      raw span sum equals materialised session totals plus the raw bucket. It
+      is a raw-vs-raw identity, not a claim that either side is deduplicated.
+    """
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+    from tokenjam.core.ingest_adapters.langfuse import ingest_langfuse
+    from tokenjam.core.optimize import accounting
+
+    db = full_stack.db
+
+    # A named session elsewhere in the corpus, so the invariant has two halves.
+    named_marker = make_invoke_agent_span(session_id="named-780", trace_id="tr-named-780")
+    full_stack.pipeline.process(named_marker)
+    named_call = make_llm_span(trace_id="tr-named-780", cost_usd=0.2,
+                               input_tokens=500, output_tokens=40)
+    named_call.session_id = None
+    named_call.conversation_id = None
+    full_stack.pipeline.process(named_call)
+
+    # 1. Live: an ambiguous shared trace leaves the call sessionless.
+    trace = "tr-shared-780"
+    full_stack.pipeline.process(make_invoke_agent_span(session_id="m-a-780", trace_id=trace))
+    full_stack.pipeline.process(make_invoke_agent_span(session_id="m-b-780", trace_id=trace))
+    live = make_llm_span(trace_id=trace, cost_usd=0.15, input_tokens=321, output_tokens=54)
+    live.session_id = None
+    live.conversation_id = None
+    full_stack.pipeline.process(live)
+    stored_live = next(s for s in db.get_trace_spans(trace) if s.span_id == live.span_id)
+    assert stored_live.session_id is None
+    assert stored_live.attribution_step == "step3_unattributed"
+    live_cost = float(stored_live.cost_usd or 0.0)
+    assert live_cost > 0
+
+    # 2. Backfill: the same call, as a Langfuse export reports it, sessionless.
+    obs = {
+        "id": "obs-780",
+        "traceId": "lf-trace-780",
+        "type": "GENERATION",
+        "startTime": stored_live.start_time.isoformat(),
+        "endTime": (stored_live.end_time or stored_live.start_time).isoformat(),
+        "model": stored_live.model,
+        "usageDetails": {
+            "input": stored_live.input_tokens,
+            "output": stored_live.output_tokens,
+        },
+        "calculatedTotalCost": live_cost,
+    }
+    export = tmp_path / "langfuse-780.json"
+    export.write_text(json.dumps({"data": [obs]}))
+    result = ingest_langfuse(db, source_file=str(export))
+    assert result["spans_written"] == 1
+
+    rows = db.conn.execute(
+        "SELECT session_id, model, input_tokens, output_tokens, cache_tokens, "
+        "cache_write_tokens, attributes, cost_usd FROM spans "
+        "WHERE session_id IS NULL AND model IS NOT NULL ORDER BY span_id"
+    ).fetchall()
+    assert len(rows) == 2, rows
+    # The product's own recogniser says these are ONE call from TWO observers.
+    assert len({accounting.call_fingerprint(*r[:6]) for r in rows}) == 1
+    assert {accounting.ingest_source(r[6]) for r in rows} == {
+        accounting.LIVE_INGEST_SOURCE, "ingest.langfuse",
+    }
+
+    # The documented option-3 behaviour: the bucket counts that call twice.
+    bucket = db.get_unattributed_spend()
+    assert bucket["span_count"] == 2
+    assert bucket["cost_usd"] == pytest.approx(2 * live_cost)
+    assert bucket["caveat"] == UNATTRIBUTED_SPEND_CAVEAT
+
+    # The raw identity the surfaces rely on still holds on the mixed corpus.
+    total_spans_cost = float(db.conn.execute("SELECT SUM(cost_usd) FROM spans").fetchone()[0])
+    active_sessions_cost = float(db.conn.execute(
+        "SELECT COALESCE(SUM(total_cost_usd), 0) FROM sessions "
+        "WHERE (status IS NULL OR status != 'superseded')"
+    ).fetchone()[0])
+    assert active_sessions_cost == pytest.approx(
+        float(db.get_session("named-780").total_cost_usd or 0.0)
+    )
+    assert total_spans_cost == pytest.approx(active_sessions_cost + bucket["cost_usd"], rel=1e-5)
+
+
 def test_real_pipeline_multi_marker_reverse_arrival_preserves_parentage(full_stack):
     """When multiple markers arrive on a shared trace, spans that arrived before
     their marker must resolve via parentage (Step 1) rather than falling to unattributed (Step 3).

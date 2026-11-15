@@ -2194,6 +2194,7 @@ def _check_unattributed_spend(db: object) -> dict:
             "message": "All spend is attributed to named sessions.",
         }
 
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
     from tokenjam.utils.formatting import format_cost
     return {
         "name": name,
@@ -2201,6 +2202,7 @@ def _check_unattributed_spend(db: object) -> dict:
         "message": (
             f"{format_cost(cost_usd)} across {span_count} span(s) on {trace_count} trace(s) "
             "is in the unattributed bucket (not assigned to a named session). "
+            f"{UNATTRIBUTED_SPEND_CAVEAT} "
             "Inspect it with tj cost --group-by session."
         ),
     }

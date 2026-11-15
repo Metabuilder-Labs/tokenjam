@@ -207,10 +207,12 @@ def cmd_status(
             cost_val = float(unattributed_spend["cost_usd"])
             span_cnt = int(unattributed_spend.get("span_count") or 0)
             trace_cnt = int(unattributed_spend.get("trace_count") or 0)
+            from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
             console.print(
                 f"[yellow]Note: {format_cost(cost_val)} across {span_cnt} span(s) "
                 f"({trace_cnt} trace(s)) is unattributed (not assigned to a named session).[/yellow]"
             )
+            console.print(f"[dim]{UNATTRIBUTED_SPEND_CAVEAT}[/dim]")
             console.print("Inspect the breakdown with [accent]tj cost --group-by session[/accent].")
         teaser = _recoverable_teaser(ctx.obj.get("config"))
         if teaser:

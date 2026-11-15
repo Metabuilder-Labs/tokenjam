@@ -176,11 +176,13 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
         cost_val = float(unattributed["cost_usd"])
         span_cnt = int(unattributed.get("span_count") or 0)
         trace_cnt = int(unattributed.get("trace_count") or 0)
+        from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
         console.print()
         console.print(
             f"[yellow]Note: {format_cost(cost_val)} across {span_cnt} span(s) "
             f"({trace_cnt} trace(s)) is unattributed (not assigned to a named session).[/yellow]"
         )
+        console.print(f"[dim]{UNATTRIBUTED_SPEND_CAVEAT}[/dim]")
         console.print("Inspect the breakdown with [accent]tj cost --group-by session[/accent].")
     _print_pricing_coverage(db, agent, since, since_dt)
 
