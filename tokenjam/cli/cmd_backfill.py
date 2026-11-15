@@ -5,6 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import click
+import httpx
 
 from tokenjam.cli.backfill_progress import backfill_progress
 from tokenjam.cli.data_access import DelegatedBackfill, resolve_data_access
@@ -391,6 +392,8 @@ def langfuse(ctx: click.Context, source_url: str | None, source_file: str | None
         )
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        raise click.ClickException(_langfuse_http_error_message(exc, api_key)) from exc
 
     console.print(
         f"[green]✓[/green] Read [bold]{result['observations_read']}[/bold] "
@@ -398,6 +401,40 @@ def langfuse(ctx: click.Context, source_url: str | None, source_file: str | None
         f"span(s); skipped [bold]{result['spans_skipped']}[/bold] already "
         f"present."
     )
+
+
+_LANGFUSE_KEY_FORMAT = "--api-key pk-lf-...:sk-lf-..."
+
+
+def _langfuse_http_error_message(exc: httpx.HTTPStatusError, api_key: str | None) -> str:
+    """One accurate sentence for a refused Langfuse request, in place of a traceback.
+
+    Langfuse's public API reads observations only with the project's public and
+    secret key joined by a colon, sent as Basic auth. A single key is sent as a
+    Bearer token, which Langfuse scopes to scores only, so a 401/403 on one is
+    almost always the wrong key shape rather than a wrong key.
+    """
+    status = exc.response.status_code
+    if status in (401, 403):
+        if not api_key:
+            return (
+                f"Langfuse refused the request without credentials (HTTP {status}). "
+                f"Pass the project's public and secret key: {_LANGFUSE_KEY_FORMAT}"
+            )
+        if ":" in api_key:
+            return (
+                f"Langfuse rejected the key pair (HTTP {status}). Check that "
+                f"--api-key is this project's public and secret key joined with "
+                f"a colon: {_LANGFUSE_KEY_FORMAT}"
+            )
+        return (
+            f"Langfuse rejected the key (HTTP {status}). A single key is sent as "
+            f"a Bearer token, which cannot read observations; Langfuse's public "
+            f"API needs the project's public and secret key joined with a colon: "
+            f"{_LANGFUSE_KEY_FORMAT}"
+        )
+    url = exc.request.url.copy_with(query=None)
+    return f"Langfuse returned HTTP {status} for {url}."
 
 
 @cmd_backfill.command("helicone", status_message="Ingesting Helicone records…")

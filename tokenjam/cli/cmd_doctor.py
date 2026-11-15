@@ -37,7 +37,7 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     checks.append(_check_config(ctx.obj.get("config_path_override")))
 
     # 2. DuckDB file writable
-    checks.append(_check_db(config))
+    checks.append(_check_db(config, ctx.obj.get("db")))
 
     # 3. Ingest secret set
     checks.append(_check_ingest_secret(config))
@@ -189,18 +189,40 @@ def _check_config(override: str | None = None) -> dict:
                 "message": f"Config parse error: {e}"}
 
 
-def _check_db(config: object) -> dict:
+def _check_db(config: object, db: object = None) -> dict:
     """
     Verify the DuckDB file is writable. The daemon legitimately holds
     the write lock when running — that's the recommended operating mode
     after `tj onboard`. Detect a lock-conflict error and downgrade to
     informational rather than flagging it as ✗ (#68 §4).
+
+    When this process already holds the file open (`main` opened it before
+    dispatching to doctor), the probe asks THAT connection rather than opening
+    a second one. DuckDB keeps one instance per file per process and refuses a
+    second connection whose settings differ, so a bare `duckdb.connect(path)`
+    beside the backend's bounded one failed on every healthy install (#775).
+    With no live backend the probe opens the file exactly as the backend does.
     """
+    from tokenjam.core.db import DuckDBBackend, connect_bounded
+
     try:
-        from pathlib import Path
-        db_path = Path(config.storage.path).expanduser()
-        conn = duckdb.connect(str(db_path))
-        conn.close()
+        storage = config.storage
+        db_path = Path(storage.path).expanduser()
+        if (
+            isinstance(db, DuckDBBackend)
+            and db.db_path is not None
+            and Path(db.db_path).resolve() == db_path.resolve()
+        ):
+            # Opened read-write at startup, so the file and its write lock
+            # are already held; a query proves the instance is still usable.
+            db.conn.execute("SELECT 1").fetchone()
+        else:
+            conn = connect_bounded(
+                str(db_path),
+                getattr(storage, "memory_limit", None) or "",
+                getattr(storage, "threads", None) or 0,
+            )
+            conn.close()
         return {"name": "DuckDB writable", "level": "ok",
                 "message": f"Database accessible: {display_path(db_path)}"}
     except Exception as e:
