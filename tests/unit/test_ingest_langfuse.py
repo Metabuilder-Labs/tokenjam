@@ -1,14 +1,17 @@
 """Unit tests for the Langfuse ingest adapter."""
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest_adapters.langfuse import (
+    _fetch_url,
     _model_to_provider,
     _observation_to_span,
     ingest_langfuse,
@@ -261,3 +264,125 @@ def test_ingest_malformed_ndjson_raises_valueerror(db, tmp_path):
         ingest_langfuse(db, source_file=str(path))
     assert "Failed to parse NDJSON in" in str(exc.value)
     assert "at line 2" in str(exc.value)
+
+
+# -- Live API fetch (mocked transport; no network) --
+
+def _client(handler) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(handler), timeout=5.0)
+
+
+def _v2_obs(i: int) -> dict:
+    return {
+        "id": f"obs-{i}",
+        "traceId": f"trace-{i}",
+        "type": "GENERATION",
+        "name": "call",
+        "startTime": "2026-11-01T10:00:00.000Z",
+        "endTime": "2026-11-01T10:00:02.000Z",
+        "model": "claude-sonnet-4-6",
+        "usageDetails": {"input": 11, "output": 7, "total": 18},
+        "totalCost": 0.0123,
+    }
+
+
+def test_fetch_url_uses_basic_auth_for_a_key_pair():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"data": [], "meta": {}})
+
+    _fetch_url("https://cloud.langfuse.com", "pk-lf-abc:sk-lf-def", None, client=_client(handler))
+    expected = base64.b64encode(b"pk-lf-abc:sk-lf-def").decode()
+    assert seen["auth"] == f"Basic {expected}"
+
+
+def test_fetch_url_keeps_bearer_for_a_plain_key():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"data": [], "meta": {}})
+
+    _fetch_url("https://cloud.langfuse.com", "some-token", None, client=_client(handler))
+    assert seen["auth"] == "Bearer some-token"
+
+
+def test_fetch_url_reads_v2_observations_and_follows_cursors_through_empty_pages():
+    pages = {
+        None: {"data": [_v2_obs(1), _v2_obs(2)], "meta": {"cursor": "c1"}},
+        # a page may be empty while a cursor is present: the loop must keep going
+        "c1": {"data": [], "meta": {"cursor": "c2", "comment": "keep going"}},
+        "c2": {"data": [_v2_obs(3)], "meta": {}},
+    }
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == "/api/public/v2/observations"
+        return httpx.Response(200, json=pages[request.url.params.get("cursor")])
+
+    got = _fetch_url("https://cloud.langfuse.com", "pk:sk", None, client=_client(handler))
+    assert [o["id"] for o in got] == ["obs-1", "obs-2", "obs-3"]
+    assert len(requests) == 3
+    first = requests[0].url.params
+    assert "page" not in first
+    assert int(first["limit"]) <= 1000
+    assert {"core", "basic", "model", "usage"} <= set(first["fields"].split(","))
+
+
+def test_fetch_url_sends_the_since_bound():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["from"] = request.url.params.get("fromStartTime")
+        return httpx.Response(200, json={"data": [], "meta": {}})
+
+    since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    _fetch_url("https://cloud.langfuse.com", "pk:sk", since, client=_client(handler))
+    assert seen["from"] == since.isoformat()
+
+
+def test_fetch_url_accepts_a_url_that_already_names_the_old_endpoint():
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, json={"data": [], "meta": {}})
+
+    _fetch_url("https://lf.example.com/api/public/observations", "pk:sk", None, client=_client(handler))
+    assert paths == ["/api/public/v2/observations"]
+
+
+def test_fetch_url_falls_back_to_v1_when_the_server_has_no_v2():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, request.url.params.get("page")))
+        if request.url.path == "/api/public/v2/observations":
+            return httpx.Response(404, json={"message": "not found"})
+        page = int(request.url.params["page"])
+        data = [_v2_obs(page)]
+        return httpx.Response(200, json={"data": data, "meta": {"totalPages": 2}})
+
+    got = _fetch_url("https://self-hosted.example.com", "pk:sk", None, client=_client(handler))
+    assert [o["id"] for o in got] == ["obs-1", "obs-2"]
+    assert calls[0][0] == "/api/public/v2/observations"
+    assert [c for c in calls[1:]] == [("/api/public/observations", "1"), ("/api/public/observations", "2")]
+
+
+def test_fetch_url_does_not_hide_an_auth_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "unauthorized"})
+
+    with pytest.raises(httpx.HTTPStatusError):
+        _fetch_url("https://cloud.langfuse.com", "pk:sk", None, client=_client(handler))
+
+
+def test_v2_observation_maps_to_a_span():
+    span = _observation_to_span(_v2_obs(1))
+    assert span is not None
+    assert (span.input_tokens, span.output_tokens) == (11, 7)
+    assert span.cost_usd == pytest.approx(0.0123)
+    assert span.model == "claude-sonnet-4-6"
