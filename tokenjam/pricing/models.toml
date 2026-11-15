@@ -503,6 +503,14 @@ output_per_mtok = 0.60
 input_per_mtok = 10.00
 output_per_mtok = 40.00
 
+# OpenAI cut o3 by 80% on 2025-06-10. Current rate verified 2026-11-15 at
+# https://developers.openai.com/api/docs/pricing
+[[openai.o3.rates]]
+valid_from = 2025-06-10
+input_per_mtok = 2.00
+output_per_mtok = 8.00
+cache_read_per_mtok = 0.50
+
 [openai.o4-mini]
 input_per_mtok = 1.10
 output_per_mtok = 4.40
@@ -626,6 +634,13 @@ output_per_mtok = 10.00
 [google.gemini-2-5-flash]
 input_per_mtok = 0.15
 output_per_mtok = 0.60
+
+# Preview rate above; the GA release on 2025-06-17 moved it to 0.30 / 2.50.
+# Verified 2026-11-15 at https://ai.google.dev/gemini-api/docs/pricing
+[[google.gemini-2-5-flash.rates]]
+valid_from = 2025-06-17
+input_per_mtok = 0.30
+output_per_mtok = 2.50
 
 [aws.us-amazon-nova-pro-v1]
 input_per_mtok = 0.80

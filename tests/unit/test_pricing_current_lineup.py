@@ -182,3 +182,24 @@ def test_gpt_5_6_sol_stays_unpriced_until_its_post_promo_rate_is_published():
     successor, so the table deliberately carries no row; adding one without the
     follow-on rate would misprice every span after that date."""
     assert get_rates("openai", "gpt-5.6-sol", at=_AT) is None
+
+
+@pytest.mark.parametrize(
+    "provider,model,change,before,after",
+    [
+        # o3's 80% cut; spans from before it keep the rate that billed them.
+        ("openai", "o3", datetime(2025, 6, 10, tzinfo=timezone.utc), (10.00, 40.00), (2.00, 8.00)),
+        # gemini-2.5-flash preview rate, then the GA rate.
+        ("google", "gemini-2-5-flash", datetime(2025, 6, 17, tzinfo=timezone.utc),
+         (0.15, 0.60), (0.30, 2.50)),
+    ],
+)
+def test_historic_price_changes_are_dated_not_overwritten(provider, model, change, before, after):
+    pre = get_rates(provider, model, at=datetime(change.year, change.month, change.day - 1,
+                                                tzinfo=timezone.utc))
+    post = get_rates(provider, model, at=change)
+    now = get_rates(provider, model, at=_AT)
+    assert pre is not None and post is not None and now is not None
+    assert (pre.input_per_mtok, pre.output_per_mtok) == before
+    assert (post.input_per_mtok, post.output_per_mtok) == after
+    assert (now.input_per_mtok, now.output_per_mtok) == after
