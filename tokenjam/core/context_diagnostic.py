@@ -139,6 +139,12 @@ DELEGATION_TOOL_NAME = "task"
 # content this turn, not a re-read, so they're outside the discount this
 # reflects. Named constants (not inlined) so the ratio's provenance is visible
 # at every call site.
+#
+# KNOWN GAP: the cache-read ratio is no longer uniform. Claude Fable/Mythos 5.1
+# and 5.2 read cache at 0.025x input and Opus 5.5 / Sonnet 5.5 at 0.05x, so for
+# traffic on those models this 0.1 weight overstates the quota-weighted re-read
+# share. `test_quota_weight_constants_match_anthropic_pricing_table` names the
+# divergent models exactly; a per-model weight is the fix.
 CACHE_READ_QUOTA_WEIGHT = 0.1
 OUTPUT_QUOTA_WEIGHT = 5.0
 

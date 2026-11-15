@@ -21,10 +21,11 @@ were wrong in the same direction. The analyzers now price each span at its own
 timestamp (see :mod:`tokenjam.core.optimize.span_pricing`), so these read the
 table through that same module, at the window the test actually seeded.
 
-A concrete failure this prevents: ``claude-sonnet-5`` carries an introductory
-rate through 2026-08-31 and a higher standard rate from 2026-09-01. A test that
-seeds spans in the past and asserts against the bare "rate now" passes today and
-starts failing on 2026-09-01 for no reason connected to the code under test.
+A concrete failure this prevents: ``gemini-4-carbon`` carries one rate through
+2026-11-30 and a doubled one from 2026-12-01. A test that seeds spans in the
+past and asserts against the bare "rate now" passes today and starts failing on
+2026-12-01 for no reason connected to the code under test. (``claude-sonnet-5``
+did exactly that on 2026-09-01, before Anthropic cancelled that rise.)
 :func:`rate_for_window` refuses to hand back a single rate for a window that
 straddles a change, so that class of bug surfaces as a clear message instead of
 a mystery red.
