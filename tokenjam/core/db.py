@@ -2827,7 +2827,7 @@ _SESSION_CHANGED_COMMON = """
 """
 
 
-def _connect_bounded(db_path: str, memory_limit: str, threads: int):
+def connect_bounded(db_path: str, memory_limit: str, threads: int):
     """Open `db_path` with an explicit buffer-pool ceiling.
 
     Every connection to the telemetry database goes through here — `__init__`
@@ -2842,6 +2842,14 @@ def _connect_bounded(db_path: str, memory_limit: str, threads: int):
     database so the spill lands on the volume already allotted to this tool. A
     value DuckDB rejects must never make the database unopenable, so a bad
     override degrades to the default rather than propagating.
+
+    Only a rejected SETTING degrades. A lock held by another process
+    (`IOException`) or a second connection in this process opened with other
+    settings (`ConnectionException`) has nothing to do with the values, so it
+    propagates untouched: retrying with the defaults cannot fix it, and a
+    warning claiming the values were rejected would be false (issue #775).
+    Retrying is also skipped when the values already ARE the defaults, since
+    that would only repeat the call that just failed.
     """
     # Annotated because duckdb's `config=` parameter is typed as an invariant
     # dict over a union: an inferred dict[str, str] is rejected by mypy even
@@ -2851,13 +2859,21 @@ def _connect_bounded(db_path: str, memory_limit: str, threads: int):
         "threads": str(threads or StorageConfig.threads),
         "temp_directory": str(Path(db_path).parent / "duckdb_temp"),
     }
+    defaults = {
+        "memory_limit": StorageConfig.memory_limit,
+        "threads": str(StorageConfig.threads),
+    }
     try:
         return duckdb.connect(db_path, config=settings)
-    except duckdb.Error:
+    except (duckdb.IOException, duckdb.ConnectionException):
+        raise
+    except duckdb.Error as exc:
+        if all(settings[key] == value for key, value in defaults.items()):
+            raise
         logger.warning(
-            "storage.memory_limit=%r / storage.threads=%r rejected by DuckDB; "
-            "falling back to %s / %s",
-            memory_limit, threads,
+            "storage.memory_limit=%r / storage.threads=%r rejected by DuckDB (%s); "
+            "using the defaults %s / %s instead",
+            memory_limit, threads, exc,
             StorageConfig.memory_limit, StorageConfig.threads,
         )
         settings["memory_limit"] = StorageConfig.memory_limit
@@ -2874,7 +2890,7 @@ class DuckDBBackend:
         self._db_path: str | None = str(db_path)
         self._memory_limit = config.memory_limit
         self._threads = config.threads
-        self._conn = _connect_bounded(str(db_path), config.memory_limit, config.threads)
+        self._conn = connect_bounded(str(db_path), config.memory_limit, config.threads)
         run_migrations(self._conn)
         self._local = threading.local()
         # Every cursor `conn` has handed out. Recovery must close ALL of them —
@@ -2938,6 +2954,11 @@ class DuckDBBackend:
     # why recovery cannot be done by one backend alone, and why it works at all.
 
     @property
+    def db_path(self) -> str | None:
+        """The resolved file this backend holds open, or None when in-memory."""
+        return self._db_path
+
+    @property
     def recoverable(self) -> bool:
         """Whether this backend can be torn down and reopened from disk.
 
@@ -2988,7 +3009,7 @@ class DuckDBBackend:
             return False
         try:
             with self._conn_lock:
-                self._conn = _connect_bounded(
+                self._conn = connect_bounded(
                     self._db_path, self._memory_limit, self._threads,
                 )
                 run_migrations(self._conn)

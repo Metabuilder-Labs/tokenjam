@@ -386,3 +386,72 @@ def test_v2_observation_maps_to_a_span():
     assert (span.input_tokens, span.output_tokens) == (11, 7)
     assert span.cost_usd == pytest.approx(0.0123)
     assert span.model == "claude-sonnet-4-6"
+
+
+# -- CLI: a refused request is a one-line hint, never a traceback --
+
+def _invoke_backfill(monkeypatch, status: int, api_key: str | None):
+    from functools import partial
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    import tokenjam.core.ingest_adapters.langfuse as lf
+    from tokenjam.cli.main import cli
+    from tokenjam.core.config import TjConfig
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"message": "nope"})
+
+    monkeypatch.setattr(lf, "_fetch_url", partial(lf._fetch_url, client=_client(handler)))
+    backend = InMemoryBackend()
+    args = ["backfill", "langfuse", "--source-url", "https://cloud.langfuse.com"]
+    if api_key is not None:
+        args += ["--api-key", api_key]
+    try:
+        with patch("tokenjam.cli.main.load_config", return_value=TjConfig(version="1")), \
+             patch("tokenjam.cli.main.open_db", return_value=backend):
+            result = CliRunner().invoke(cli, args)
+    finally:
+        backend.close()
+    return result
+
+
+def _assert_clean_failure(result) -> None:
+    assert result.exit_code == 1, result.output
+    # ClickException exits via SystemExit; anything else means a traceback.
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert "Traceback" not in result.output
+    assert "HTTPStatusError" not in result.output
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_cli_bearer_key_refusal_names_the_key_pair_format(monkeypatch, status):
+    result = _invoke_backfill(monkeypatch, status, "sk-lf-only")
+    _assert_clean_failure(result)
+    assert f"HTTP {status}" in result.output
+    assert "--api-key pk-lf-...:sk-lf-..." in result.output
+    assert "Bearer" in result.output
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_cli_key_pair_refusal_says_check_the_pair(monkeypatch, status):
+    result = _invoke_backfill(monkeypatch, status, "pk-lf-abc:sk-lf-def")
+    _assert_clean_failure(result)
+    assert "rejected the key pair" in result.output
+    assert "--api-key pk-lf-...:sk-lf-..." in result.output
+    assert "sk-lf-def" not in result.output  # never echo the secret back
+
+
+def test_cli_missing_key_refusal_asks_for_the_key_pair(monkeypatch):
+    result = _invoke_backfill(monkeypatch, 401, None)
+    _assert_clean_failure(result)
+    assert "without credentials" in result.output
+    assert "--api-key pk-lf-...:sk-lf-..." in result.output
+
+
+def test_cli_other_http_error_is_concise(monkeypatch):
+    result = _invoke_backfill(monkeypatch, 500, "pk:sk")
+    _assert_clean_failure(result)
+    assert "HTTP 500" in result.output
+    assert "api-key" not in result.output

@@ -2,6 +2,7 @@
 so the home dir is collapsed to ``~`` in the paths doctor prints."""
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from tokenjam.cli.cmd_doctor import _check_config, _check_db
@@ -51,3 +52,133 @@ def test_db_path_message_collapses_home(monkeypatch, tmp_path):
     assert check["level"] == "ok"
     assert "~/.tj/telemetry.duckdb" in check["message"]
     assert str(home) not in check["message"]
+
+
+# -- #775: the writability probe beside the process's own bounded connection --
+
+def _storage(db_path, **overrides):
+    from tokenjam.core.config import StorageConfig
+    return StorageConfig(path=str(db_path), **overrides)
+
+
+def test_check_db_is_ok_beside_the_backend_connection(tmp_path):
+    """`main` opens the backend (bounded settings) before doctor runs. A probe
+    that opened a second, differently-configured connection to the same file
+    got DuckDB's "different configuration" error and reported a healthy
+    database as unwritable."""
+    from tokenjam.core.db import open_db
+
+    storage = _storage(tmp_path / "t.duckdb")
+    backend = open_db(storage)
+    try:
+        check = _check_db(SimpleNamespace(storage=storage), backend)
+    finally:
+        backend.close()
+    assert check["level"] == "ok", check["message"]
+    assert "different configuration" not in check["message"]
+
+
+def test_check_db_is_ok_beside_a_live_connection_it_was_not_handed(tmp_path):
+    """Even without the backend object, the probe opens the file with the
+    backend's own settings, so DuckDB's per-file instance accepts it."""
+    from tokenjam.core.db import open_db
+
+    storage = _storage(tmp_path / "t.duckdb")
+    backend = open_db(storage)
+    try:
+        check = _check_db(SimpleNamespace(storage=storage))
+    finally:
+        backend.close()
+    assert check["level"] == "ok", check["message"]
+
+
+def test_check_db_still_reports_an_unopenable_database_as_an_error(tmp_path):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    storage = _storage(blocker / "t.duckdb")
+
+    check = _check_db(SimpleNamespace(storage=storage))
+    assert check["level"] == "error"
+    assert check["message"].startswith("Cannot open database:")
+
+
+def test_check_db_still_downgrades_a_lock_held_elsewhere(tmp_path, monkeypatch):
+    import duckdb
+
+    def held(*_a, **_k):
+        raise duckdb.IOException(
+            'IO Error: Could not set lock on file "t.duckdb": Conflicting lock '
+            "is held in /usr/bin/python (PID 4242)"
+        )
+
+    monkeypatch.setattr("tokenjam.core.db.duckdb.connect", held)
+    check = _check_db(SimpleNamespace(storage=_storage(tmp_path / "t.duckdb")))
+    assert check["level"] == "info"
+    assert "write lock held by another process" in check["message"]
+
+
+def test_doctor_command_reports_the_database_writable(tmp_path):
+    """End to end through `main`, which opens the backend before dispatch."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from tokenjam.cli.main import cli
+    from tokenjam.core.config import TjConfig
+
+    config = TjConfig(version="1")
+    config.storage.path = str(tmp_path / "t.duckdb")
+    with patch("tokenjam.cli.main.load_config", return_value=config):
+        result = CliRunner().invoke(cli, ["--json", "doctor"])
+    checks = json.loads(result.output)
+    db_check = next(c for c in checks if c["name"] == "DuckDB writable")
+    assert db_check["level"] == "ok", db_check["message"]
+
+
+# -- #775 item 2: the settings fallback must not misreport other errors --
+
+def test_connect_bounded_does_not_blame_the_settings_for_a_config_mismatch(tmp_path, caplog):
+    import duckdb
+    import pytest
+
+    from tokenjam.core.db import connect_bounded
+
+    path = str(tmp_path / "t.duckdb")
+    first = duckdb.connect(path)  # default settings, so the bounded open mismatches
+    try:
+        with caplog.at_level("WARNING", logger="tokenjam.db"):
+            with pytest.raises(duckdb.ConnectionException):
+                connect_bounded(path, "2GB", 4)
+    finally:
+        first.close()
+    assert "rejected by DuckDB" not in caplog.text
+
+
+def test_connect_bounded_does_not_blame_the_settings_for_a_held_lock(tmp_path, caplog, monkeypatch):
+    import duckdb
+    import pytest
+
+    from tokenjam.core.db import connect_bounded
+
+    def held(*_a, **_k):
+        raise duckdb.IOException("IO Error: Could not set lock on file: Conflicting lock is held")
+
+    monkeypatch.setattr("tokenjam.core.db.duckdb.connect", held)
+    with caplog.at_level("WARNING", logger="tokenjam.db"):
+        with pytest.raises(duckdb.IOException):
+            connect_bounded(str(tmp_path / "t.duckdb"), "2GB", 4)
+    assert "rejected by DuckDB" not in caplog.text
+
+
+def test_connect_bounded_still_degrades_a_rejected_override(tmp_path, caplog):
+    from tokenjam.core.db import connect_bounded
+
+    with caplog.at_level("WARNING", logger="tokenjam.db"):
+        conn = connect_bounded(str(tmp_path / "t.duckdb"), "banana", 4)
+    try:
+        limit = conn.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+    finally:
+        conn.close()
+    assert "rejected by DuckDB" in caplog.text
+    assert "using the defaults 2GB / 4" in caplog.text
+    assert limit  # opened with the defaults rather than failing
