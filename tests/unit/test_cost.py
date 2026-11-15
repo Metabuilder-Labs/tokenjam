@@ -523,8 +523,8 @@ def test_default_cache_rates_are_nonzero_and_ratio_derived():
 # means "now", which is documented as being for LIVE callers only — a test is
 # a backward-looking caller, and one that leans on the default silently starts
 # asserting a different row the day a dated rate takes effect. That is not
-# hypothetical: claude-sonnet-5's introductory rate expired 2026-09-01 and
-# turned this table red on a date nobody was watching. Pin the instant and a
+# hypothetical: a claude-sonnet-5 row dated 2026-09-01 (a rise Anthropic later
+# cancelled) turned this table red on a date nobody was watching. Pin the instant and a
 # row's arithmetic stays true forever; add a case to cover a new row.
 _BEFORE_SONNET_5_STANDARD = datetime(2026, 8, 1, tzinfo=timezone.utc)
 _AFTER_SONNET_5_STANDARD = datetime(2026, 9, 2, tzinfo=timezone.utc)
@@ -535,11 +535,12 @@ _AFTER_SONNET_5_STANDARD = datetime(2026, 9, 2, tzinfo=timezone.utc)
     [
         ("claude-haiku-4-5", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 6.0),    # 1.00 + 5.00
         ("claude-sonnet-4-6", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 18.0),  # 3.00 + 15.00
-        # Both sides of claude-sonnet-5's 2026-09-01 boundary, so each row is
-        # guarded on its own terms rather than whichever one today happens to
-        # select.
+        # Both sides of the 2026-09-01 date claude-sonnet-5 was once scheduled
+        # to rise on. Anthropic cancelled that rise ($2 / $10 "is now the
+        # standard price"), so both sides price at $2 / $10, and the second
+        # case fails if the cancelled $3 / $15 row is ever re-added.
         ("claude-sonnet-5", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 12.0),    # 2.00 + 10.00
-        ("claude-sonnet-5", 1_000_000, 1_000_000, _AFTER_SONNET_5_STANDARD, 18.0),     # 3.00 + 15.00
+        ("claude-sonnet-5", 1_000_000, 1_000_000, _AFTER_SONNET_5_STANDARD, 12.0),     # 2.00 + 10.00
         ("claude-opus-4-8", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 30.0),    # 5.00 + 25.00
         ("claude-fable-5", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 60.0),     # 10.00 + 50.00
         ("claude-opus-4", 1_000_000, 1_000_000, _BEFORE_SONNET_5_STANDARD, 90.0),      # 15.00 + 75.00

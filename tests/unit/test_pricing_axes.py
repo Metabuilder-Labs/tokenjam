@@ -109,16 +109,19 @@ def test_a_span_older_than_every_known_rate_prices_at_the_earliest_one(
     assert rates.input_per_mtok == 3.00
 
 
-def test_the_packaged_sonnet_5_rate_change_is_expressed_not_pending():
-    """The introductory rate expires 2026-08-31; both sides must be expressible
-    at once, so a figure already recorded under the intro rate stays checkable
-    against the bill that produced it."""
-    intro = get_rates("anthropic", "claude-sonnet-5", at=BEFORE)
-    standard = get_rates("anthropic", "claude-sonnet-5", at=AFTER)
+def test_the_cancelled_sonnet_5_rate_rise_is_not_priced():
+    """Sonnet 5 launched at $2 / $10 with a rise to $3 / $15 scheduled for
+    2026-09-01. Anthropic cancelled the rise ($2 / $10 "is now the standard
+    price", https://platform.claude.com/docs/en/about-claude/pricing), so no
+    span was ever billed at $3 / $15 and a span from either side of that date
+    must price at $2 / $10. This test used to assert the $3 / $15 row; it is
+    inverted rather than deleted so the cancelled row cannot quietly return."""
+    before = get_rates("anthropic", "claude-sonnet-5", at=BEFORE)
+    after = get_rates("anthropic", "claude-sonnet-5", at=AFTER)
 
-    assert intro is not None and standard is not None
-    assert (intro.input_per_mtok, intro.output_per_mtok) == (2.00, 10.00)
-    assert (standard.input_per_mtok, standard.output_per_mtok) == (3.00, 15.00)
+    assert before is not None and after is not None
+    assert (before.input_per_mtok, before.output_per_mtok) == (2.00, 10.00)
+    assert (after.input_per_mtok, after.output_per_mtok) == (2.00, 10.00)
 
 
 # --- Variant axis ----------------------------------------------------------

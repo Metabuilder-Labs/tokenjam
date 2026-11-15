@@ -20,12 +20,12 @@
 # existed. A model whose price CHANGES on a date adds dated rows instead of
 # being edited in place:
 #
-#   [anthropic.claude-sonnet-5]          # the rate before the change
+#   [google.gemini-4-carbon]            # the rate before the change
 #   input_per_mtok = 2.00
 #
-#   [[anthropic.claude-sonnet-5.rates]]  # the rate from that date onward
-#   valid_from = 2026-09-01
-#   input_per_mtok = 3.00
+#   [[google.gemini-4-carbon.rates]]    # the rate from that date onward
+#   valid_from = 2026-12-01
+#   input_per_mtok = 4.00
 #
 # Lookup picks the row whose window contains the span's start_time, so a span
 # recorded before the change keeps pricing at the rate that actually billed it
@@ -36,9 +36,9 @@
 # ADDING A DATED ROW SCHEDULES A TEST FAILURE unless you also pin the tests that
 # price this model. A test that hardcodes an expected dollar figure and lets the
 # pricing instant default to "now" asserts the pre-boundary row until the date
-# lands, then asserts the post-boundary row against a pre-boundary number. The
-# row above did exactly that on 2026-09-01 and turned main red with no commit to
-# blame, days after the last green run. So when you add a dated row:
+# lands, then asserts the post-boundary row against a pre-boundary number. A
+# claude-sonnet-5 row dated 2026-09-01 did exactly that and turned main red with
+# no commit to blame, days after the last green run. So when you add a dated row:
 #   * give `tests/unit/test_cost.py`'s priced-models table a case on EACH side
 #     of the boundary, each passing `at=` explicitly;
 #   * check any test that prices this model for a floating instant — the rule is
@@ -73,7 +73,100 @@ cache_write_per_mtok = { multiplier = 0.50 }
 [variants.cache-1h]
 cache_write_per_mtok = { multiplier = 2.0, of = "input_per_mtok" }
 
-# Claude Fable 5 — Anthropic's most capable widely released model.
+# ─── Current Anthropic lineup (verified 2026-11-15) ────────────────────────
+# Every rate in this block was read on 2026-11-15 from
+# https://platform.claude.com/docs/en/about-claude/pricing ("Model pricing",
+# "Fast mode pricing", "Prompt caching") and the per-model pages under
+# https://platform.claude.com/docs/en/models/<model>/overview, which give the
+# API ids. cache_write = the 5-minute write; the 1-hour write and the Batch API
+# come from `[variants.cache-1h]` (2x input) and `[variants.batch]` (0.5x),
+# both of which the page confirms for these models. Note that cache READS are
+# NOT the usual 0.1x on several of them (page footnotes 1 and 2): 0.025x input
+# on Fable/Mythos 5.1 and 5.2, 0.05x on Opus 5.5 and Sonnet 5.5.
+
+# Claude Fable 5.2 (`claude-fable-5-2`), the current Fable model.
+[anthropic.claude-fable-5-2]
+input_per_mtok = 8.00
+output_per_mtok = 40.00
+cache_read_per_mtok = 0.20
+cache_write_per_mtok = 10.00
+
+# Fast mode on Fable 5.2: $16 input / $80 output. The page states the prompt
+# caching multipliers apply on top of fast mode, so cache read = 0.025 x 16 and
+# the 5-minute write = 1.25 x 16.
+[[anthropic.claude-fable-5-2.rates]]
+variant = "fast"
+input_per_mtok = 16.00
+output_per_mtok = 80.00
+cache_read_per_mtok = 0.40
+cache_write_per_mtok = 20.00
+
+# Claude Mythos 5.2 (`claude-mythos-5-2`): the same model and pricing as Fable
+# 5.2, for verified organizations. Fast mode is also offered, at the same rates.
+[anthropic.claude-mythos-5-2]
+input_per_mtok = 8.00
+output_per_mtok = 40.00
+cache_read_per_mtok = 0.20
+cache_write_per_mtok = 10.00
+
+[[anthropic.claude-mythos-5-2.rates]]
+variant = "fast"
+input_per_mtok = 16.00
+output_per_mtok = 80.00
+cache_read_per_mtok = 0.40
+cache_write_per_mtok = 20.00
+
+# Claude Fable 5.1 (`claude-fable-5-1`), legacy since Fable 5.2.
+[anthropic.claude-fable-5-1]
+input_per_mtok = 10.00
+output_per_mtok = 50.00
+cache_read_per_mtok = 0.25
+cache_write_per_mtok = 12.50
+
+# Claude Mythos 5.1 (`claude-mythos-5-1`): same pricing as Fable 5.1.
+[anthropic.claude-mythos-5-1]
+input_per_mtok = 10.00
+output_per_mtok = 50.00
+cache_read_per_mtok = 0.25
+cache_write_per_mtok = 12.50
+
+# Claude Opus 5.5 (`claude-opus-5-5`).
+[anthropic.claude-opus-5-5]
+input_per_mtok = 4.00
+output_per_mtok = 20.00
+cache_read_per_mtok = 0.20
+cache_write_per_mtok = 5.00
+
+# Fast mode on Opus 5.5: $8 input / $40 output, with the caching multipliers
+# on top (cache read = 0.05 x 8, 5-minute write = 1.25 x 8).
+[[anthropic.claude-opus-5-5.rates]]
+variant = "fast"
+input_per_mtok = 8.00
+output_per_mtok = 40.00
+cache_read_per_mtok = 0.40
+cache_write_per_mtok = 10.00
+
+# Claude Sonnet 5.5 (`claude-sonnet-5-5`).
+[anthropic.claude-sonnet-5-5]
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+cache_read_per_mtok = 0.10
+cache_write_per_mtok = 2.50
+
+# Claude Haiku 5.5 (`claude-haiku-5-5`) is priced by PROMPT LENGTH: a request
+# whose prompt (input + cache reads + cache writes) exceeds 100,000 tokens pays
+# $0.50 / $2.50 / $0.05 read / $0.625 write instead of the rates below. This
+# table has no per-request prompt-length tier, so the row carries the
+# up-to-100K tier only, and a long-prompt Haiku 5.5 call is UNDERSTATED by 5x.
+# Do not read a Haiku 5.5 figure for long-context work as exact.
+[anthropic.claude-haiku-5-5]
+input_per_mtok = 0.10
+output_per_mtok = 0.50
+cache_read_per_mtok = 0.01
+cache_write_per_mtok = 0.125
+
+# Claude Fable 5.
+
 # See https://platform.claude.com/docs/en/pricing (cache_write = 5-minute write).
 [anthropic.claude-fable-5]
 input_per_mtok = 10.00
@@ -137,23 +230,18 @@ output_per_mtok = 25.00
 cache_read_per_mtok = 0.50
 cache_write_per_mtok = 6.25
 
-# Claude Sonnet 5 — introductory pricing in effect through 2026-08-31 (see
-# https://platform.claude.com/docs/en/about-claude/pricing#claude-sonnet-5-introductory-pricing);
-# standard pricing takes over 2026-09-01 and is the dated row below, so spans
-# recorded on either side of the boundary each price at the rate that billed
-# them. cache_write = 5-minute write.
+# Claude Sonnet 5. Launched at $2 / $10 as "introductory pricing through
+# 2026-08-31", with a scheduled rise to $3 / $15 on 2026-09-01. That rise was
+# CANCELLED: footnote 3 of https://platform.claude.com/docs/en/about-claude/pricing
+# (read 2026-11-15) says the $2 / $10 price "is now the standard price" and the
+# September 1 increase "will not occur". The 2026-09-01 dated row this table
+# used to carry was therefore removed rather than superseded: no span was ever
+# billed at it, so there is no history to preserve. cache_write = 5-minute write.
 [anthropic.claude-sonnet-5]
 input_per_mtok = 2.00
 output_per_mtok = 10.00
 cache_read_per_mtok = 0.20
 cache_write_per_mtok = 2.50
-
-[[anthropic.claude-sonnet-5.rates]]
-valid_from = 2026-09-01
-input_per_mtok = 3.00
-output_per_mtok = 15.00
-cache_read_per_mtok = 0.30
-cache_write_per_mtok = 3.75
 
 [anthropic.claude-sonnet-4-6]
 input_per_mtok = 3.00
@@ -235,6 +323,70 @@ output_per_mtok = 4.00
 cache_read_per_mtok = 0.08
 cache_write_per_mtok = 1.00
 
+# ─── OpenAI GPT-6 and GPT-5.6 families (verified 2026-11-15) ──────────────
+# Every rate below was read on 2026-11-15 from the Standard-tier, "Short"
+# context tab of https://developers.openai.com/api/docs/pricing ("Flagship
+# models"), cross-checked against the per-model pages under
+# https://developers.openai.com/api/docs/models/<model-id>.
+#
+# Two differences from the older OpenAI rows below:
+#   * These models publish a cache WRITE price ("30m write", 1.25x input per
+#     the model pages), so `cache_write_per_mtok` carries it. The separate
+#     "12h write" (2.5x input) has no variant in this table yet and is not
+#     modelled; a 12h write prices at the 30m rate here.
+#   * The page prices prompts over 272K input tokens at 2x input and 1.5x
+#     output for the whole request ("Long" tab). This table has no
+#     prompt-length tier, so these rows carry the short-context rate only and
+#     UNDERSTATE any request over 272K input tokens.
+# Batch on the page is exactly half of standard for every field, which is what
+# `[variants.batch]` already applies.
+
+[openai."gpt-6-astra"]
+input_per_mtok = 10.00
+output_per_mtok = 50.00
+cache_read_per_mtok = 1.00
+cache_write_per_mtok = 12.50
+
+[openai."gpt-6.1-sol"]
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+cache_read_per_mtok = 0.10
+cache_write_per_mtok = 2.50
+
+[openai."gpt-6.1-terra"]
+input_per_mtok = 1.00
+output_per_mtok = 5.00
+cache_read_per_mtok = 0.05
+cache_write_per_mtok = 1.25
+
+[openai."gpt-6-sol"]
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+cache_read_per_mtok = 0.20
+cache_write_per_mtok = 2.50
+
+[openai."gpt-6-luna"]
+input_per_mtok = 0.10
+output_per_mtok = 0.50
+cache_read_per_mtok = 0.01
+cache_write_per_mtok = 0.125
+
+# gpt-5.6-sol is deliberately ABSENT: the page lists $4 / $20 as promotional
+# pricing "available until November 30, 2026" and does not state the rate that
+# follows, so a row here would misprice every span after that date.
+
+[openai."gpt-5.6-terra"]
+input_per_mtok = 2.00
+output_per_mtok = 12.00
+cache_read_per_mtok = 0.20
+cache_write_per_mtok = 2.50
+
+[openai."gpt-5.6-luna"]
+input_per_mtok = 0.20
+output_per_mtok = 1.20
+cache_read_per_mtok = 0.02
+cache_write_per_mtok = 0.25
+
 # ─── OpenAI ────────────────────────────────────────────────────────────────
 # Current GPT-5 family (July 2026). Source: https://developers.openai.com/api/docs/pricing
 # Keys are the literal API model IDs (dotted, e.g. `gpt-5.5`) exactly as they
@@ -271,6 +423,61 @@ cache_read_per_mtok = 0.02
 input_per_mtok = 30.00
 output_per_mtok = 180.00
 
+# ─── OpenAI GPT-5.x rows still on the pricing page (verified 2026-11-15) ────
+# Read on 2026-11-15 from the Standard tier of
+# https://developers.openai.com/api/docs/pricing. The page marks gpt-5.1,
+# gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-4.1-mini, o3-pro and
+# gpt-5.3-codex as deprecated, but they are still listed and billable, and
+# still common in recorded telemetry. No cache-write price is published for
+# any of these, so cache_write is left unset as for the rows above.
+[openai."gpt-5.2"]
+input_per_mtok = 1.75
+output_per_mtok = 14.00
+cache_read_per_mtok = 0.175
+
+[openai."gpt-5.2-pro"]
+input_per_mtok = 21.00
+output_per_mtok = 168.00
+
+[openai."gpt-5.1"]
+input_per_mtok = 1.25
+output_per_mtok = 10.00
+cache_read_per_mtok = 0.125
+
+[openai."gpt-5"]
+input_per_mtok = 1.25
+output_per_mtok = 10.00
+cache_read_per_mtok = 0.125
+
+[openai."gpt-5-mini"]
+input_per_mtok = 0.25
+output_per_mtok = 2.00
+cache_read_per_mtok = 0.025
+
+[openai."gpt-5-nano"]
+input_per_mtok = 0.05
+output_per_mtok = 0.40
+cache_read_per_mtok = 0.005
+
+[openai."gpt-5-pro"]
+input_per_mtok = 15.00
+output_per_mtok = 120.00
+
+# Listed under "Specialized models" → Codex on the same page.
+[openai."gpt-5.3-codex"]
+input_per_mtok = 1.75
+output_per_mtok = 14.00
+cache_read_per_mtok = 0.175
+
+[openai."gpt-4.1-mini"]
+input_per_mtok = 0.40
+output_per_mtok = 1.60
+cache_read_per_mtok = 0.10
+
+[openai.o3-pro]
+input_per_mtok = 20.00
+output_per_mtok = 80.00
+
 # ─── OpenAI (superseded, kept for historical spans) ─────────────────────────
 # gpt-4o / gpt-4o-mini / o3 / o4-mini are no longer on OpenAI's current pricing
 # page but still appear in older telemetry; rates retained as last-published.
@@ -296,9 +503,114 @@ output_per_mtok = 0.60
 input_per_mtok = 10.00
 output_per_mtok = 40.00
 
+# OpenAI cut o3 by 80% on 2025-06-10. Current rate verified 2026-11-15 at
+# https://developers.openai.com/api/docs/pricing
+[[openai.o3.rates]]
+valid_from = 2025-06-10
+input_per_mtok = 2.00
+output_per_mtok = 8.00
+cache_read_per_mtok = 0.50
+
 [openai.o4-mini]
 input_per_mtok = 1.10
 output_per_mtok = 4.40
+
+# ─── Google Gemini 3.x / 4 (verified 2026-11-15) ───────────────────────────
+# Every rate below was read on 2026-11-15 from the PAID tier, Standard tab of
+# Google's Gemini API pricing page, https://ai.google.dev/gemini-api/docs/pricing
+# (which now redirects to https://aistudio.google.com/docs/pricing). As with
+# Gemini 2.0 Flash below, these are the Gemini API rates, not Vertex AI's.
+#
+# Keys are dashed (`gemini-3-5-flash-lite`); the API id is dotted
+# (`gemini-3.5-flash-lite`) and resolves here through the version-dash fallback
+# in `get_rates`, as does the `models/gemini-...` form via the routing-prefix
+# strip. Input is the text/image/video rate; audio input, where the page prices
+# it higher, is not separately modelled. `cache_read_per_mtok` is the "context
+# caching" price. Google bills cache STORAGE per token-hour rather than a write,
+# so cache_write is left unset.
+
+# Gemini 4 Carbon and Gemini 4 Argon: the page lists $2 / $10 / $0.10 cached
+# "through November 30, 2026" and $4 / $20 / $0.20 "starting December 1,
+# 2026", so the second rate is a dated row.
+[google.gemini-4-carbon]
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+cache_read_per_mtok = 0.10
+
+[[google.gemini-4-carbon.rates]]
+valid_from = 2026-12-01
+input_per_mtok = 4.00
+output_per_mtok = 20.00
+cache_read_per_mtok = 0.20
+
+[google.gemini-4-argon]
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+cache_read_per_mtok = 0.10
+
+[[google.gemini-4-argon.rates]]
+valid_from = 2026-12-01
+input_per_mtok = 4.00
+output_per_mtok = 20.00
+cache_read_per_mtok = 0.20
+
+[google.gemini-4-hydrogen]
+input_per_mtok = 1.50
+output_per_mtok = 7.50
+cache_read_per_mtok = 0.075
+
+# Gemini 3.8 Flash and Gemini 3.6 Flash: $0.75 / $3.75 / $0.075 cached
+# "through December 31, 2026", then $1.50 / $7.50 / $0.15 "starting January 1,
+# 2027".
+[google.gemini-3-8-flash]
+input_per_mtok = 0.75
+output_per_mtok = 3.75
+cache_read_per_mtok = 0.075
+
+[[google.gemini-3-8-flash.rates]]
+valid_from = 2027-01-01
+input_per_mtok = 1.50
+output_per_mtok = 7.50
+cache_read_per_mtok = 0.15
+
+[google.gemini-3-6-flash]
+input_per_mtok = 0.75
+output_per_mtok = 3.75
+cache_read_per_mtok = 0.075
+
+[[google.gemini-3-6-flash.rates]]
+valid_from = 2027-01-01
+input_per_mtok = 1.50
+output_per_mtok = 7.50
+cache_read_per_mtok = 0.15
+
+[google.gemini-3-5-flash-lite]
+input_per_mtok = 0.30
+output_per_mtok = 2.50
+cache_read_per_mtok = 0.03
+
+[google.gemini-3-1-flash-lite]
+input_per_mtok = 0.25
+output_per_mtok = 1.50
+cache_read_per_mtok = 0.025
+
+# Gemini 3.1 Pro Preview is priced by prompt length: prompts over 200K tokens
+# pay $4.00 / $18.00 / $0.40 cached. This table has no prompt-length tier, so
+# the row carries the <=200K tier only and UNDERSTATES longer prompts.
+[google.gemini-3-1-pro-preview]
+input_per_mtok = 2.00
+output_per_mtok = 12.00
+cache_read_per_mtok = 0.20
+
+[google.gemini-3-flash-preview]
+input_per_mtok = 0.50
+output_per_mtok = 3.00
+cache_read_per_mtok = 0.05
+
+[google.gemini-2-5-flash-lite]
+input_per_mtok = 0.10
+output_per_mtok = 0.40
+cache_read_per_mtok = 0.01
 
 # Gemini 2.0 Flash (shut down 2026-06-01, kept for historical spans). Arrives
 # as the dotted `gemini-2.0-flash`, resolved to this key by the version-dash
@@ -322,6 +634,13 @@ output_per_mtok = 10.00
 [google.gemini-2-5-flash]
 input_per_mtok = 0.15
 output_per_mtok = 0.60
+
+# Preview rate above; the GA release on 2025-06-17 moved it to 0.30 / 2.50.
+# Verified 2026-11-15 at https://ai.google.dev/gemini-api/docs/pricing
+[[google.gemini-2-5-flash.rates]]
+valid_from = 2025-06-17
+input_per_mtok = 0.30
+output_per_mtok = 2.50
 
 [aws.us-amazon-nova-pro-v1]
 input_per_mtok = 0.80
