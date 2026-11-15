@@ -34,3 +34,17 @@ def test_status_view_explains_unattributed_spend(status_view: str):
 def test_status_view_does_not_hide_the_disclosure_in_the_empty_state(status_view: str):
     """Sessionless telemetry has no agent card, but still needs to remain visible."""
     assert "!sdkServices.length && !unattributedSpend" in status_view
+
+
+def test_status_view_renders_the_api_caveat_not_a_second_copy(status_view: str):
+    """The may-overstate caveat (Metabuilder-Labs/tokenjam#780) comes from the
+    API's `unattributed_spend.caveat`, so Lens and the CLI cannot drift apart.
+
+    Pinned in both directions: the view reads the field, and the sentence is
+    NOT hard-coded anywhere in the page, since a second copy is what drifts."""
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+
+    page = _UI.read_text(encoding="utf-8")
+    assert "unattributedSpend.caveat" in status_view
+    assert UNATTRIBUTED_SPEND_CAVEAT not in page
+    assert "may overstate unattributed spend" not in page

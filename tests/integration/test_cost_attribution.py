@@ -241,3 +241,37 @@ async def test_status_discloses_unattributed_spend_when_nonzero():
         d = (await c.get("/api/v1/status")).json()
     assert d["unattributed_spend"] is not None
     assert d["unattributed_spend"]["cost_usd"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_cost_and_status_carry_the_unattributed_caveat():
+    """Both routes put the shared may-overstate caveat on the bucket object
+    (option 3 of Metabuilder-Labs/tokenjam#780), so every consumer renders one
+    string rather than its own copy."""
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    db.insert_span(make_llm_span(session_id=None, model="claude-haiku-4-5", cost_usd=1.0))
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        cost = (await c.get("/api/v1/cost?since=30d")).json()
+        status = (await c.get("/api/v1/status")).json()
+    assert cost["unattributed_spend"]["caveat"] == UNATTRIBUTED_SPEND_CAVEAT
+    assert status["unattributed_spend"]["caveat"] == UNATTRIBUTED_SPEND_CAVEAT
+
+
+@pytest.mark.asyncio
+async def test_cost_caveat_is_empty_when_the_bucket_is_empty():
+    """/cost always returns the bucket object; with no sessionless spend its
+    caveat is empty so a renderer adds nothing, and /status omits the bucket."""
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    db.upsert_session(make_session(session_id="s-only"))
+    db.insert_span(make_llm_span(session_id="s-only", model="claude-haiku-4-5", cost_usd=1.0))
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        cost = (await c.get("/api/v1/cost?since=30d")).json()
+        status = (await c.get("/api/v1/status")).json()
+    assert cost["unattributed_spend"]["caveat"] == ""
+    assert status["unattributed_spend"] is None

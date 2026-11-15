@@ -357,6 +357,7 @@ class ApiBackend:
             "cost_usd": 0.0,
             "trace_count": 0,
             "span_count": 0,
+            "caveat": "",
         }
 
     def get_completed_sessions(self, agent_id: str, limit: int) -> list[SessionRecord]:

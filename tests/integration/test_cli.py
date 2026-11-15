@@ -2055,6 +2055,71 @@ def test_status_unattributed_disclosure_cli(runner, db, config):
     assert "unambiguous parentage" not in result.output
 
 
+# --- #780: the unattributed bucket's may-overstate caveat (option 3) ---------
+
+def _flat(text: str) -> str:
+    """Collapse Rich's terminal-width wrapping so a sentence matches whole."""
+    return " ".join(text.split())
+
+
+def test_cost_cli_states_the_unattributed_caveat(runner, db, config):
+    """`tj cost` prints the shared caveat under the bucket, and --json carries it."""
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+    db.upsert_session(make_session(session_id="sess-caveat"))
+    db.insert_span(make_llm_span(session_id="sess-caveat", cost_usd=1.0))
+    db.insert_span(make_llm_span(session_id=None, trace_id="tr-caveat", cost_usd=0.4))
+
+    result = _invoke(runner, db, config, ["cost", "--since", "30d"])
+    assert result.exit_code == 0
+    assert UNATTRIBUTED_SPEND_CAVEAT in _flat(result.output)
+
+    result = _invoke(runner, db, config, ["cost", "--since", "30d", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["unattributed_spend"]["caveat"] == UNATTRIBUTED_SPEND_CAVEAT
+
+
+def test_cost_cli_omits_the_caveat_without_sessionless_spend(runner, db, config):
+    """No bucket, no caveat: users with no sessionless spend see no extra noise."""
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+    db.upsert_session(make_session(session_id="sess-only"))
+    db.insert_span(make_llm_span(session_id="sess-only", cost_usd=1.0))
+
+    result = _invoke(runner, db, config, ["cost", "--since", "30d"])
+    assert result.exit_code == 0
+    assert UNATTRIBUTED_SPEND_CAVEAT not in _flat(result.output)
+    assert "may overstate unattributed spend" not in _flat(result.output)
+
+
+def test_status_cli_states_the_unattributed_caveat(runner, db, config):
+    """`tj status` prints the shared caveat under the bucket, and --json carries it."""
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+    db.upsert_session(make_session(session_id="sess-st", agent_id="agent-st"))
+    db.insert_span(make_llm_span(session_id="sess-st", agent_id="agent-st", cost_usd=1.0))
+    db.insert_span(make_llm_span(session_id=None, trace_id="tr-st-orphan", cost_usd=0.5))
+
+    result = _invoke(runner, db, config, ["status"])
+    assert result.exit_code == 0
+    assert UNATTRIBUTED_SPEND_CAVEAT in _flat(result.output)
+
+    result = _invoke(runner, db, config, ["status", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["unattributed_spend"]["caveat"] == UNATTRIBUTED_SPEND_CAVEAT
+
+
+def test_status_cli_omits_the_caveat_without_sessionless_spend(runner, db, config):
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+    db.upsert_session(make_session(session_id="sess-st2", agent_id="agent-st2"))
+    db.insert_span(make_llm_span(session_id="sess-st2", agent_id="agent-st2", cost_usd=1.0))
+
+    result = _invoke(runner, db, config, ["status"])
+    assert result.exit_code == 0
+    assert UNATTRIBUTED_SPEND_CAVEAT not in _flat(result.output)
+
+
 def test_optimize_compare_appends_window_diff(runner, db, config):
     """`tj optimize --compare previous` surfaces the diff alongside findings."""
     _seed_optimize_window(db, plan_tier="api")
