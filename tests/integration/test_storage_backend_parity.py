@@ -311,6 +311,9 @@ def _proj_unattributed_spend(data: dict) -> tuple:
         round(float(data.get("cost_usd", 0.0) or 0.0), 6),
         int(data.get("trace_count", 0) or 0),
         int(data.get("span_count", 0) or 0),
+        # The shim must carry the bucket's caveat through, or `tj cost --json`
+        # under the daemon would drop it (Metabuilder-Labs/tokenjam#780).
+        data.get("caveat"),
     )
 
 
@@ -526,10 +529,13 @@ def test_unattributed_spend_has_one_canonical_dollar_value(_parity_env):
     """The summary exposes one nonzero dollar amount, never duplicate aliases."""
     summary = _parity_env["db"].get_unattributed_spend()
 
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+
     assert summary == {
         "cost_usd": pytest.approx(1.25),
         "trace_count": 3,
         "span_count": 3,
+        "caveat": UNATTRIBUTED_SPEND_CAVEAT,
     }
 
 

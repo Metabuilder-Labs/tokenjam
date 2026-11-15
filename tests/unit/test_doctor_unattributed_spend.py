@@ -33,3 +33,24 @@ def test_unattributed_spend_check_discloses_spans_and_traces():
     assert "3 span(s)" in check["message"]
     assert "2 trace(s)" in check["message"]
     assert "not assigned to a named session" in check["message"]
+
+
+def test_unattributed_spend_check_states_the_may_overstate_caveat():
+    """The bucket is a raw sum (option 3 of Metabuilder-Labs/tokenjam#780), so
+    the doctor line must say it may count one call twice."""
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+
+    db = InMemoryBackend()
+    db.insert_span(make_llm_span(trace_id="tr-unatt-c", session_id=None, cost_usd=1.0))
+
+    check = _check_unattributed_spend(db)
+    assert check["level"] == "info"
+    assert UNATTRIBUTED_SPEND_CAVEAT in check["message"]
+
+
+def test_unattributed_spend_check_omits_the_caveat_when_empty():
+    from tokenjam.core.db import UNATTRIBUTED_SPEND_CAVEAT
+
+    check = _check_unattributed_spend(InMemoryBackend())
+    assert check["level"] == "ok"
+    assert UNATTRIBUTED_SPEND_CAVEAT not in check["message"]

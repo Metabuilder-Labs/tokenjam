@@ -1414,6 +1414,18 @@ def session_cost_drift(
     return len(rows), total, worst
 
 
+#: The one disclosure every surface rendering the unattributed bucket carries.
+#: The bucket is a raw sum of sessionless rows (see the query below), so one
+#: call observed both live and by a later backfill is counted twice in it. CLI,
+#: REST (`caveat` on the bucket object) and Lens all render THIS string; keep
+#: it may-overstate, number-free and one sentence (the honesty discipline of
+#: Critical Rule 14 applies to every figure, not only analyzer output).
+UNATTRIBUTED_SPEND_CAVEAT = (
+    "This figure may count the same call twice when it arrived both live and "
+    "via a later backfill, so it may overstate unattributed spend."
+)
+
+
 def get_unattributed_spend_summary(
     conn: duckdb.DuckDBPyConnection,
     since: datetime | None = None,
@@ -1433,10 +1445,15 @@ def get_unattributed_spend_summary(
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
     where = " AND ".join(clauses)
-    # This intentionally sums stored sessionless observations. The
-    # session-keyed duplicate-observation winner rule cannot apply without a
-    # session key; revisit this query if sessionless cross-source deduplication
-    # is introduced.
+    # This intentionally sums stored sessionless observations, duplicates and
+    # all: option 3, decided for 0.7.1; see #780. The duplicate-observation
+    # winner rule is scoped by session_id, and these rows have none. Scoping it
+    # by trace, or applying the fingerprint with no grouping key, would be a
+    # dedup path nobody has exercised, and a wrong one UNDER-reports, which is
+    # the silent-loss failure the bucket exists to prevent (#749). So the sum
+    # may over-report a call that arrived both live and via a backfill, and
+    # every surface rendering it says so via UNATTRIBUTED_SPEND_CAVEAT. Revisit
+    # this query if sessionless cross-source deduplication is introduced.
     row = conn.execute(
         f"SELECT COALESCE(SUM(cost_usd), 0.0), "
         f"COUNT(DISTINCT trace_id), "
@@ -1451,6 +1468,9 @@ def get_unattributed_spend_summary(
         "cost_usd": round(cost, 8),
         "trace_count": traces,
         "span_count": spans,
+        # Empty when the bucket is empty, so a consumer can render it next to
+        # the figure without adding noise for users with no sessionless spend.
+        "caveat": UNATTRIBUTED_SPEND_CAVEAT if (spans or cost) else "",
     }
 
 
