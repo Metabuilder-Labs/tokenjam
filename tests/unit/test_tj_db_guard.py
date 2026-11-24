@@ -108,6 +108,28 @@ def test_help_and_usage_errors_do_not_open_db(args, exit_code, message):
 
 
 @pytest.mark.parametrize(
+    ("args", "command_path", "error"),
+    [
+        (["loop", "annotate", "session-1", "--note"], "tj loop annotate", "requires an argument"),
+        (["loop", "--", "--help", "--unknown"], "tj loop", "No such option"),
+        (["cost", "--help", "--agent"], "tj cost", "requires an argument"),
+    ],
+)
+def test_help_probe_preserves_click_usage_context(args, command_path, error):
+    from tokenjam.cli.main import cli
+    from tokenjam.core.config import TjConfig
+
+    with patch("tokenjam.cli.main.load_config", return_value=TjConfig(version="1")), \
+         patch("tokenjam.cli.main.open_db", side_effect=AssertionError("opened DB")) as open_db:
+        result = CliRunner().invoke(cli, args, prog_name="tj")
+    open_db.assert_not_called()
+    assert result.exit_code == 2, result.output
+    assert f"Usage: {command_path} " in result.output
+    assert f"Try '{command_path} --help' for help." in result.output
+    assert error in result.output
+
+
+@pytest.mark.parametrize(
     ("words", "completion"),
     [
         ("tj cost --unknown --g", "plain,--group-by"),

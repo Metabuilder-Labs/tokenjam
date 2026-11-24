@@ -41,6 +41,7 @@ from contextlib import AbstractContextManager
 from typing import Any
 
 import click
+from click.core import augment_usage_errors
 
 from tokenjam.cli.backfill_progress import StatusUpdate, phase_status, transient_status
 from tokenjam.utils.formatting import console as _stdout_console
@@ -107,10 +108,11 @@ def _requests_help(
 ) -> bool:
     # Use Click's token parser without running parameter callbacks or the
     # command. In particular, a value consumed by another option must not
-    # count as the help option.
+    # count as the help option. Keep the usage context that Click normally
+    # attaches during Command.make_context.
     with command.context_class(
         command, info_name=name, parent=parent, **command.context_settings,
-    ) as probe:
+    ) as probe, augment_usage_errors(probe):
         parser = command.make_parser(probe)
         help_option = command.get_help_option(probe)
         _, remaining, parsed = parser.parse_args(list(args))
