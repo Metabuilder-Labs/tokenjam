@@ -95,12 +95,41 @@ def db_required_message(command_path: str) -> str:
 
 
 def help_consumed_as_option_value_message(command_path: str) -> str:
-    """When ``--help`` is parsed as an option value, #726 skips opening the DB
-    and leaves ``db`` as ``None`` — starting ``tj serve`` cannot fix that."""
+    """Fallback diagnostic if a DB-requiring leaf runs after a help probe."""
     return (
         f"{command_path} cannot run: `--help` was consumed as an option value. "
         "Give that option a value (e.g. `tj cost --since 7d --help`) or drop it."
     )
+
+
+def _requests_help(
+    parent: click.Context, name: str, command: click.Command, args: list[str],
+) -> bool:
+    # Use Click's token parser without running parameter callbacks or the
+    # command. In particular, a value consumed by another option must not
+    # count as the help option.
+    with command.context_class(
+        command, info_name=name, parent=parent, **command.context_settings,
+    ) as probe:
+        parser = command.make_parser(probe)
+        help_option = command.get_help_option(probe)
+        _, remaining, parsed = parser.parse_args(list(args))
+        if help_option in parsed:
+            return True
+        if not isinstance(command, click.Group) or not remaining:
+            return False
+        # Resolve the child without running callbacks. If Click would reparse
+        # an unresolved dash-prefixed token (e.g. "loop -- --help"), use the
+        # same token parser on that remainder too.
+        probe.resilient_parsing = True
+        child_name, child, child_args = click.Group.resolve_command(command, probe, remaining)
+        if child_name is not None and child is not None:
+            return _requests_help(probe, child_name, child, child_args)
+        if not remaining[0].startswith("-"):
+            return False
+        probe.resilient_parsing = False
+        _, _, parsed = parser.parse_args(list(remaining))
+        return help_option in parsed
 
 
 class TjCommand(click.Command):
@@ -126,26 +155,13 @@ class TjCommand(click.Command):
         self.requires_db = requires_db
         super().__init__(*args, **kwargs)
 
-    def _tokens_request_help(self, ctx: click.Context) -> bool:
-        names: set[str] = set()
-        node: click.Context | None = ctx
-        while node is not None:
-            names.update(node.help_option_names)
-            node = node.parent
-        tokens = list(ctx.args)
-        return any(tok in names for tok in tokens)
-
     def _requires_db(self, ctx: click.Context) -> bool:
         if self.requires_db is not None:
             return self.requires_db
         return bool((ctx.obj or {}).get("requires_db", False))
 
     def _ensure_db_available(self, ctx: click.Context) -> None:
-        """Raise a clean ``ClickException`` when a DB-requiring leaf runs with
-        ``db is None`` (#727). Real ``--help`` exits during ``make_context``
-        before a leaf ``invoke`` runs; the crash case is a command body that
-        actually executes (e.g. a ``--help`` token consumed as an option value).
-        """
+        """Raise a clean error if a DB-requiring leaf has no backend (#727)."""
         if isinstance(self, click.Group):
             return
         if not self._requires_db(ctx):
@@ -162,10 +178,6 @@ class TjCommand(click.Command):
 
     def invoke(self, ctx: click.Context) -> Any:
         ctx.ensure_object(dict)
-        if self._tokens_request_help(ctx):
-            # Root/nested group callbacks probe DuckDB before Click renders
-            # ``--help`` on a leaf subcommand (#580).
-            ctx.obj["_skip_db_for_help"] = True
         self._ensure_db_available(ctx)
         if not self.status_message:
             return super().invoke(ctx)
@@ -193,6 +205,23 @@ class TjGroup(TjCommand, click.Group):
     """
     command_class = TjCommand
     group_class = type
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str],
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        name, command, remaining = super().resolve_command(ctx, args)
+        # Click resolves the child before invoking the root callback that opens
+        # DuckDB. Check whether the child will show help, and keep token parse
+        # errors ahead of storage errors.
+        if (
+            ctx.parent is None
+            and not ctx.resilient_parsing
+            and name is not None
+            and command is not None
+            and _requests_help(ctx, name, command, remaining)
+        ):
+            ctx.ensure_object(dict)["_skip_db_for_help"] = True
+        return name, command, remaining
 
 
 __all__ = [

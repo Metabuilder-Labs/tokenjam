@@ -2903,6 +2903,7 @@ def test_validate_daemon_lock_fails_cleanly(runner, config):
     ["optimize", "downsize", "--help"],
     ["backfill", "langfuse", "--help"],
     ["loop", "annotate", "--help"],
+    ["loop", "annotate", "session-1", "--note", "--help", "--help"],
 ])
 def test_nested_subcommand_help_skips_db_probe(runner, args):
     """Nested group subcommand --help must not open DuckDB (#580)."""
@@ -2914,15 +2915,11 @@ def test_nested_subcommand_help_skips_db_probe(runner, args):
     assert "Usage:" in result.output
 
 
-def test_db_requiring_command_fails_cleanly_when_db_is_none(runner, config):
-    """A DB-requiring leaf with db=None raises ClickException, not a traceback (#727)."""
+@pytest.mark.parametrize("note", ["--help", "ordinary"])
+def test_annotation_note_still_opens_db(runner, db, config, note):
     with patch("tokenjam.cli.main.load_config", return_value=config), \
-         patch("tokenjam.cli.main.open_db",
-               side_effect=AssertionError("must not open db")):
-        result = runner.invoke(
-            cli,
-            ["loop", "annotate", "session-1", "--note", "--help"],
-        )
-    assert result.exit_code == 1, result.output
-    assert "`--help` was consumed as an option value" in result.output
-    assert "AttributeError" not in result.output
+         patch("tokenjam.cli.main.open_db", return_value=db) as open_db:
+        result = runner.invoke(cli, ["--json", "loop", "annotate", "session-1", "--note", note])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["note"] == note
+    open_db.assert_called_once_with(config.storage)

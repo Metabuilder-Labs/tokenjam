@@ -1,10 +1,11 @@
 """Regression tests for the shared DB-required guard (#727)."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
 
 from tokenjam.cli.tj_status import (
     TjCommand,
@@ -83,3 +84,43 @@ def test_tj_group_skips_db_guard() -> None:
     ctx = click.Context(group)
     ctx.obj = {"db": None, "requires_db": True}
     group._ensure_db_available(ctx)  # does not raise
+
+
+@pytest.mark.parametrize(
+    ("args", "exit_code", "message"),
+    [
+        (["loop", "--", "--help"], 0, "Usage:"),
+        (["loop", "--", "--help", "--unknown"], 2, "No such option"),
+        (["cost", "--help", "--unknown"], 2, "No such option"),
+        (["cost", "--help", "--agent"], 2, "requires an argument"),
+    ],
+)
+def test_help_and_usage_errors_do_not_open_db(args, exit_code, message):
+    from tokenjam.cli.main import cli
+    from tokenjam.core.config import TjConfig
+
+    with patch("tokenjam.cli.main.load_config", return_value=TjConfig(version="1")), \
+         patch("tokenjam.cli.main.open_db", side_effect=AssertionError("opened DB")) as open_db:
+        result = CliRunner().invoke(cli, args)
+    open_db.assert_not_called()
+    assert result.exit_code == exit_code, result.output
+    assert message in result.output
+
+
+@pytest.mark.parametrize(
+    ("words", "completion"),
+    [
+        ("tj cost --unknown --g", "plain,--group-by"),
+        ("tj loop --unknown anno", "plain,annotate"),
+    ],
+)
+def test_shell_completion_keeps_resilient_parsing(words, completion):
+    from tokenjam.cli.main import cli
+
+    result = CliRunner().invoke(cli, [], prog_name="tj", env={
+        "_TJ_COMPLETE": "bash_complete",
+        "COMP_WORDS": words,
+        "COMP_CWORD": "3",
+    })
+    assert result.exit_code == 0, result.output
+    assert completion in result.output.splitlines()
