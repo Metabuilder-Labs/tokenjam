@@ -1,6 +1,7 @@
 """Unit tests for TokenJam MCP server tool handlers."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 import pytest
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.config import TjConfig, AgentConfig, BudgetConfig, DefaultsConfig
-from tokenjam.core.models import AlertType, Severity, Alert, DriftBaseline, AgentRecord
+from tokenjam.core.models import AlertType, Severity, Alert, CostRow, DriftBaseline, AgentRecord
 from tokenjam.utils.time_parse import utcnow
 from tokenjam.utils.ids import new_uuid
 from tests.factories import make_session, make_llm_span, make_tool_span
@@ -583,13 +584,15 @@ def test_get_status_http_mode():
 
 
 def test_get_cost_summary_http_mode_preserves_complete_rows():
-    fake_response = {
-        "rows": [{
-            "group": "tool.read", "agent_id": "alpha", "model": None,
-            "input_tokens": 10, "output_tokens": 5, "cache_tokens": 4,
-            "cache_write_tokens": 3, "cost_usd": 0.02, "call_count": 7,
-        }],
-    }
+    # The REST row is built from CostRow's own fields with a distinct non-default
+    # value per field, so a field added to CostRow that _HttpDB or the MCP
+    # serializer drops (or defaults) fails here (#759).
+    sample = {str: "x", int: 7, float: 0.5}
+    row = {}
+    for i, f in enumerate(dataclasses.fields(CostRow)):
+        kind = str if "str" in str(f.type) else float if "float" in str(f.type) else int
+        row[f.name] = sample[kind] + (f.name if kind is str else i)
+    fake_response = {"rows": [row]}
     _set_serve_url("http://127.0.0.1:7391")
     try:
         with patch("tokenjam.mcp.server._http_get", return_value=fake_response):
