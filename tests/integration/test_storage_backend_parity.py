@@ -57,6 +57,7 @@ from tokenjam.core.models import (
     AlertFilters,
     AlertType,
     CostFilters,
+    CostRow,
     DriftBaseline,
     SessionCommit,
     Severity,
@@ -213,17 +214,12 @@ def _proj_span(span) -> tuple | None:
 
 
 def _proj_cost(rows) -> list:
+    # Every CostRow field, derived from the dataclass: a field added to CostRow
+    # that the serve shim drops must fail here, not drift silently (#759).
     return sorted(
-        (
-            r.group,
-            r.agent_id,
-            r.model,
-            r.input_tokens,
-            r.output_tokens,
-            r.cache_tokens,
-            r.cache_write_tokens,
-            round(r.cost_usd, 6),
-            r.call_count,
+        tuple(
+            round(v, 6) if isinstance(v, float) else v
+            for v in (getattr(r, f.name) for f in dataclasses.fields(CostRow))
         )
         for r in rows
     )
